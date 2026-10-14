@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 (2026-10-14)
+
+### Breaking
+
+- **connectors**: separate policy and bind Slack ingress to teams (#11) ([612a002](https://github.com/urmzd/mandatum/commit/612a0027ac7ce73407d5e95ce8847ce322ae7f42))
+
+[Full Changelog](https://github.com/urmzd/mandatum/compare/v0.5.0...v0.6.0)
+
+
 ## 0.5.0 (2026-10-14)
 
 ### Features
