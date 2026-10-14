@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,6 +102,8 @@ func usageRecords(t *testing.T, w *world, runID string) []string {
 			keys = append(keys, rec.Key)
 		}
 	}
+	// The in-memory ledger returns a run's records in map order.
+	sort.Strings(keys)
 	return keys
 }
 

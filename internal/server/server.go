@@ -102,6 +102,14 @@ var (
 	// ErrUnavailable reports a dependency that is temporarily unable to serve,
 	// which is the one class of failure a client should retry unchanged.
 	ErrUnavailable = errors.New("server: unavailable")
+
+	// ErrClosed reports a request about something that has ended and no
+	// longer takes it: a question whose run was stopped or ended.
+	ErrClosed = errors.New("server: closed")
+
+	// ErrForbidden reports a caller of the right tenant who may still not do
+	// this: answer a question the spec keeps for other people.
+	ErrForbidden = errors.New("server: forbidden")
 )
 
 // Defaults for Config. Each is the value a deployment can leave alone.
@@ -170,6 +178,10 @@ type Config struct {
 	// Stopper asks runs to stop, behind POST /v1/runs/{id}/stop. Nil disables
 	// the route.
 	Stopper Stopper
+
+	// Answerer answers the questions runs are parked on, behind
+	// InvokeService.Answer. Nil disables it.
+	Answerer Answerer
 
 	// Ingress registers one inbound webhook endpoint per connector, served at
 	// POST /v1/webhooks/{connector}.
@@ -289,7 +301,7 @@ func New(cfg Config) (*Server, error) {
 	s.mux.Handle(mandatumv1connect.NewBusServiceHandler(
 		&busService{bus: cfg.Bus, srv: s, log: s.log}, opts))
 	s.mux.Handle(mandatumv1connect.NewInvokeServiceHandler(
-		&invokeService{invoker: cfg.Invoker, runs: cfg.Runs, bus: cfg.Bus, srv: s, log: s.log}, opts))
+		&invokeService{invoker: cfg.Invoker, runs: cfg.Runs, answerer: cfg.Answerer, bus: cfg.Bus, srv: s, log: s.log}, opts))
 
 	s.mux.HandleFunc("GET /v1/sse", s.handleSSE)
 	s.mux.HandleFunc("POST /v1/blobs", s.handleBlobPut)
@@ -462,6 +474,10 @@ func codeOf(err error) connect.Code {
 		return connect.CodeUnavailable
 	case errors.Is(err, ErrUnimplemented):
 		return connect.CodeUnimplemented
+	case errors.Is(err, ErrClosed):
+		return connect.CodeFailedPrecondition
+	case errors.Is(err, ErrForbidden):
+		return connect.CodePermissionDenied
 	case errors.Is(err, bus.ErrSlowConsumer):
 		return connect.CodeResourceExhausted
 	case errors.Is(err, ErrInvalid),

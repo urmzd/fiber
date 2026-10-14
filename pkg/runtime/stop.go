@@ -69,6 +69,9 @@ import (
 //	between two attempts     recorded, or retained: the next attempt stops
 //	after the run ended      not recorded (the run has ended), and nobody
 //	                         subscribes again: nothing happens
+//	while parked on a person recorded, and the question is resolved as
+//	                         stopped: the run is woken and ends without
+//	                         resuming its turn (see park.go)
 //
 // # How long the bus keeps a request
 //
@@ -410,12 +413,21 @@ func (r *Runtime) recordStop(ctx context.Context, tenant, runID string, body []b
 		// Not a run of this runtime's, or not the asker's.
 		return false, nil
 	}
-	_, err = r.stops.Record(ctx, run.Record{
+	stored, err := r.stops.Record(ctx, run.Record{
 		RunID: runID, Key: stopRecordKey, Kind: run.KindEvent, Name: stopRecordName,
 		Codec: "application/json", Status: run.RecordOK, Output: body,
 	})
 	switch {
 	case err == nil, errors.Is(err, run.ErrAlreadyRecorded):
+		// A run parked on a person is not running a turn that could hear
+		// the request: its question is resolved as stopped, with the
+		// request the run honours, and it is woken to end.
+		if errors.Is(err, run.ErrAlreadyRecorded) {
+			body = stored.Output
+		}
+		if err := r.stopParked(ctx, tenant, runID, body); err != nil {
+			return true, err
+		}
 		return true, nil
 	case errors.Is(err, run.ErrNotFound):
 		return false, nil
@@ -443,7 +455,7 @@ func (r *Runtime) StopRequested(ctx context.Context, tenant, runID string) (Stop
 	if r.stops == nil {
 		return StopRecord{}, false, fmt.Errorf("%w: no stop ledger", ErrStopUnavailable)
 	}
-	rec, records, err := r.stops.Load(ctx, runID)
+	rec, records, err := r.recordsOf(ctx, runID, true, prefixStop)
 	switch {
 	case errors.Is(err, run.ErrNotFound):
 		return StopRecord{}, false, nil
@@ -495,7 +507,7 @@ func (r *Runtime) recordedStop(ctx context.Context, runID string) (agentrt.Stop,
 	if r.stops == nil {
 		return agentrt.Stop{}, false
 	}
-	_, records, err := r.stops.Load(ctx, runID)
+	_, records, err := r.recordsOf(ctx, runID, false, prefixStop)
 	if err != nil {
 		r.logger.Warn("mandatum/runtime: could not read recorded stop requests; relying on the bus",
 			"run_id", runID, "error", err)

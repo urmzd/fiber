@@ -57,6 +57,10 @@ const (
 	KindResumed   Kind = "lifecycle.resumed"
 	KindCompleted Kind = "lifecycle.completed"
 	KindFailed    Kind = "lifecycle.failed"
+	// KindChildParked reports, on a parent run's stream, that a child run
+	// it delegated to and is waiting on is parked on a question for a
+	// person. The parent is not parked: its turn is waiting on the child.
+	KindChildParked Kind = "lifecycle.child.parked"
 	// KindStopped ends a run that was asked to stop before it finished. It
 	// is terminal, like completed and failed, and it is neither: the run did
 	// not finish its work and nothing went wrong. No completed or failed

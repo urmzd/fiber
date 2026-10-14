@@ -162,8 +162,10 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		Invoker: c,
 		Runs:    c,
 		Stopper: c,
-		Metrics: rec,
-		Logger:  log,
+		// The questions runs park on are answered through the runtime too.
+		Answerer: c,
+		Metrics:  rec,
+		Logger:   log,
 	})
 	if err != nil {
 		return fmt.Errorf("cli: server: %w", err)

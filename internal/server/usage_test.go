@@ -98,8 +98,11 @@ func TestTheRunResourceOnlyGrew(t *testing.T) {
 	if f := (&mandatumv1.Usage{}).ProtoReflect().Descriptor().Fields().ByName("other_costs"); f == nil || f.Number() != 9 || !f.IsList() {
 		t.Errorf("Usage.other_costs = %v, want repeated field 9", f)
 	}
-	if fields.Len() != len(before)+1 {
-		t.Errorf("Run has %d fields, want the %d it had plus usage", fields.Len(), len(before))
+	if q := fields.ByName("pending_question"); q == nil || q.Number() != 17 || q.Message().FullName() != "mandatum.v1.Question" {
+		t.Errorf("Run.pending_question = %v, want field 17 of type Question", q)
+	}
+	if fields.Len() != len(before)+2 {
+		t.Errorf("Run has %d fields, want the %d it had plus usage and pending_question", fields.Len(), len(before))
 	}
 	for status, n := range map[mandatumv1.RunStatus]int32{
 		mandatumv1.RunStatus_RUN_STATUS_UNSPECIFIED: 0,

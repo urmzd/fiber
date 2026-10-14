@@ -171,6 +171,9 @@ type turn struct {
 	// childUsage checks and reads a child run a Delegator reports, from the
 	// runtime executing the turn. Nil when the runtime offered none.
 	childUsage func(context.Context, string) (payload.UsageChild, error)
+	// childQuestion checks and reads a child run a Delegator watches for
+	// questions (WatchChildQuestions). Nil when the runtime offered none.
+	childQuestion func(context.Context, string) (payload.ChildQuestion, bool, bool, error)
 }
 
 // SandboxOption configures a Sandbox.
@@ -335,7 +338,8 @@ func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Co
 	// type: the channel holds the request until the turn reads it, so a
 	// request that arrives before the task has been picked up is not lost to
 	// timing.
-	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx)}); err != nil {
+	childQuestion, _ := ctx.Value(childQuestionKey{}).(func(context.Context, string) (payload.ChildQuestion, bool, bool, error))
+	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx), childQuestion: childQuestion}); err != nil {
 		return Outcome{}, err
 	}
 	// Detaching aborts the task if it is still running, which it is on every
@@ -623,6 +627,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		Text: req.Text, Meta: req.Meta, History: req.History,
 		Attachments: req.Attachments, Tenant: req.Tenant,
 		Stop: stop, Accounting: req.Accounting,
+		Park: req.Park, QuestionTTL: req.QuestionTTL, Resume: req.Resume,
 	}, func(_ context.Context, c agentrt.Chunk) error {
 		return send(c)
 	})
@@ -630,8 +635,8 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		return nil, err
 	}
 
-	out := Outcome{Text: res.Text, Prompt: res.Prompt, Chunks: res.Chunks, Citations: res.Citations, Stopped: res.Stopped}
-	if out.Stopped != nil {
+	out := Outcome{Text: res.Text, Prompt: res.Prompt, Chunks: res.Chunks, Citations: res.Citations, Stopped: res.Stopped, Parked: res.Parked}
+	if out.Stopped != nil || out.Parked != nil {
 		// Half an answer is not the run's answer artifact.
 		return json.Marshal(out)
 	}
@@ -744,6 +749,9 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 // run it started with ReportChildUsage, from the context it is given, and the
 // runtime reads that run's total from the ledger.
 func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, report func(payload.Action) error, send func(agentrt.Chunk) error) saigetypes.Tool {
+	if parent.ChildRuns && parent.RunID != "" {
+		return &childRunTool{s: s, parent: parent, target: target, send: send}
+	}
 	return &saigetypes.ToolFunc{
 		Def: saigetypes.ToolDef{
 			Name:        DelegateToolName(target),
@@ -781,6 +789,19 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 						return err
 					}
 					return send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
+				})
+				dctx = context.WithValue(dctx, childQuestionKey{}, func(ctx context.Context, runID string) error {
+					t := s.turn(parent.RunID)
+					if t == nil || t.childQuestion == nil {
+						return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
+					}
+					return watchChild(ctx, t.childQuestion, runID, func(cq payload.ChildQuestion) error {
+						body, err := payload.Encode(cq)
+						if err != nil {
+							return err
+						}
+						return send(agentrt.Chunk{Kind: envelope.KindChildParked, Payload: body})
+					})
 				})
 				return s.delegator(dctx, parent, target, text, report)
 			}
@@ -933,4 +954,70 @@ func (s *Sandbox) await(ctx context.Context, deployment, taskID string) (Outcome
 		}
 		return out, nil
 	}
+}
+
+// childRunTool is the delegation tool of a durable run whose delegations are
+// child runs (WithChildRuns). The turn parks at a call to it (it is
+// agentrt.Awaiting), the runtime starts the child, and the continuation runs
+// the call with the child's ending as its answer.
+type childRunTool struct {
+	s      *Sandbox
+	parent Request
+	target string
+	send   func(agentrt.Chunk) error
+}
+
+var _ agentrt.Awaiting = (*childRunTool)(nil)
+
+func (t *childRunTool) Definition() saigetypes.ToolDef {
+	return saigetypes.ToolDef{
+		Name:        DelegateToolName(t.target),
+		Description: fmt.Sprintf("Tag the %q agent with a request and wait for its answer.", t.target),
+		Parameters: saigetypes.ParameterSchema{
+			Type:     "object",
+			Required: []string{"text"},
+			Properties: map[string]saigetypes.PropertyDef{
+				"text": {Type: "string", Description: "The request to send to " + t.target},
+			},
+		},
+	}
+}
+
+// AwaitQuestion describes the wait a call parks on. A call with no request
+// text is not a delegation: it runs, and tells the model what was wrong.
+func (t *childRunTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
+	text, _ := call.Arguments["text"].(string)
+	if strings.TrimSpace(text) == "" {
+		return payload.Question{}, false
+	}
+	args, _ := json.Marshal(call.Arguments)
+	return payload.Question{
+		Prompt: text,
+		Tool:   &payload.QuestionTool{Name: call.Name, CallID: call.ID, Arguments: args},
+	}, true
+}
+
+// Execute returns the child run's answer, and puts what the child spent on
+// the parent's stream.
+func (t *childRunTool) Execute(ctx context.Context, args map[string]any) (string, error) {
+	if text, _ := args["text"].(string); strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("%w: delegation to %q needs a text request", ErrInvalid, t.target)
+	}
+	a, ok := agentrt.AnswerFor(ctx)
+	if !ok {
+		return "", fmt.Errorf("runtime: delegation to %q: the run it started has not answered", t.target)
+	}
+	if a.RunID != "" {
+		if turn := t.s.turn(t.parent.RunID); turn != nil && turn.childUsage != nil {
+			if c, err := turn.childUsage(ctx, a.RunID); err == nil {
+				if body, err := payload.Encode(c); err == nil {
+					_ = t.send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
+				}
+			}
+		}
+	}
+	if a.Text == "" && a.Note != "" {
+		return "", errors.New(a.Note)
+	}
+	return a.Text, nil
 }

@@ -261,6 +261,10 @@ func specFromProto(p *mandatumv1.AgentSpec) (Spec, error) {
 		Provider:     p.GetProvider(),
 		SystemPrompt: p.GetSystemPrompt(),
 		Tools:        p.GetTools(),
+		Approvals:    p.GetApprovals(),
+		Approvers:    p.GetApprovers(),
+		SelfApproval: p.GetSelfApproval(),
+		Answerers:    p.GetAnswerers(),
 	}
 	for _, src := range p.GetSources() {
 		s.Sources = append(s.Sources, Source{
@@ -283,6 +287,10 @@ func specToProto(s Spec) *mandatumv1.AgentSpec {
 		Provider:     s.Provider,
 		SystemPrompt: s.SystemPrompt,
 		Tools:        s.Tools,
+		Approvals:    s.Approvals,
+		Approvers:    s.Approvers,
+		SelfApproval: s.SelfApproval,
+		Answerers:    s.Answerers,
 		Access:       &mandatumv1.Access{Spawn: s.Access.Spawn, WorkspaceAreas: s.Access.WorkspaceAreas},
 	}
 	for _, src := range s.Sources {
@@ -323,9 +331,11 @@ func runToProto(r Run) *mandatumv1.Run {
 		StopReason: r.StopReason,
 		StoppedBy:  r.StoppedBy,
 		Usage:      runUsageToProto(r.Usage),
-		CreatedAt:  timeToProto(r.CreatedAt),
-		StartedAt:  timeToProto(r.StartedAt),
-		EndedAt:    timeToProto(r.EndedAt),
+
+		PendingQuestion: questionToProto(r.Question),
+		CreatedAt:       timeToProto(r.CreatedAt),
+		StartedAt:       timeToProto(r.StartedAt),
+		EndedAt:         timeToProto(r.EndedAt),
 	}
 }
 
@@ -418,4 +428,60 @@ func int32Of(n int) int32 {
 	default:
 		return int32(n)
 	}
+}
+
+// questionToProto renders a question a run is parked on. Nil stays unset.
+func questionToProto(q *payload.Question) *mandatumv1.Question {
+	if q == nil {
+		return nil
+	}
+	out := &mandatumv1.Question{
+		Id:            q.ID,
+		Kind:          q.Kind,
+		Agent:         q.Agent,
+		Prompt:        q.Prompt,
+		Options:       q.Options,
+		AskedOf:       q.AskedOf,
+		ExpiresAt:     timeToProto(q.ExpiresAt),
+		DefaultAnswer: answerToProto(q.Default),
+		AskedAt:       timeToProto(q.At),
+	}
+	if t := q.Tool; t != nil {
+		out.Tool = &mandatumv1.QuestionTool{Name: t.Name, CallId: t.CallID, ArgumentsJson: string(t.Arguments), SchemaJson: string(t.Schema)}
+	}
+	return out
+}
+
+// answerToProto renders an answer. Nil stays unset.
+func answerToProto(a *payload.Answer) *mandatumv1.Answer {
+	if a == nil {
+		return nil
+	}
+	return &mandatumv1.Answer{
+		QuestionId:    a.QuestionID,
+		Decision:      a.Decision,
+		ArgumentsJson: string(a.Arguments),
+		Choice:        a.Choice,
+		Text:          a.Text,
+		Note:          a.Note,
+		By:            a.By,
+		AnsweredAt:    timeToProto(a.At),
+		Expired:       a.Expired,
+	}
+}
+
+// answerFromProto reads what a caller may say in an answer: the decision,
+// edited arguments, the choice, the reply and a note. Everything else is the
+// server's to set.
+func answerFromProto(a *mandatumv1.Answer) payload.Answer {
+	out := payload.Answer{
+		Decision: a.GetDecision(),
+		Choice:   a.GetChoice(),
+		Text:     a.GetText(),
+		Note:     a.GetNote(),
+	}
+	if args := a.GetArgumentsJson(); args != "" {
+		out.Arguments = []byte(args)
+	}
+	return out
 }

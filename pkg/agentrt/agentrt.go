@@ -85,6 +85,15 @@
 // caller that retries failures must not retry it. This package does not decide
 // what a stopped turn means for a run or a thread; pkg/runtime does.
 //
+// # Parking a turn on a person
+//
+// A turn that may park (Turn.Park) ends at a question for a person instead of
+// waiting for one: an approval of a marked tool call, or the agent's
+// ask_person tool. Result.Parked holds the question and everything a later
+// turn (Turn.Resume) needs to continue it with the answer, sending exactly
+// what an uninterrupted turn would have sent. A turn that may not park
+// refuses approvals instead. See park.go.
+//
 // # Usage
 //
 // Every model call the turn makes is published as a usage.call event the
@@ -113,6 +122,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
@@ -212,6 +222,20 @@ type Turn struct {
 	// uses the run, the attempt and the delegation path), which makes every
 	// call's key unique. Empty is DefaultAccounting.
 	Accounting string
+	// Park lets the turn end at a question for a person instead of waiting
+	// for the answer: see "Parking a turn on a person" in park.go. A turn
+	// that may not park (a delegated sub-task, a caller with nobody to ask)
+	// refuses every approval and tells the model that ask_person cannot be
+	// answered, so it can carry on.
+	Park bool
+	// QuestionTTL is how long a question the turn parks on waits before its
+	// default applies. Zero is DefaultQuestionTTL.
+	QuestionTTL time.Duration
+	// Resume continues a turn that parked, with the answers its pending tool
+	// calls have. History, Text, Meta and Attachments must be the parked
+	// turn's; the request is the parked turn's recorded prompt, not Text
+	// rendered again.
+	Resume *Parked
 }
 
 // Result is what a turn produced.
@@ -244,6 +268,9 @@ type Result struct {
 	// may be nothing. It is nil for a turn that finished before the request
 	// took effect: that turn completed, and its Text is the whole answer.
 	Stopped *Stop
+	// Parked is set when the turn ended at a question for a person: Text is
+	// what it had said so far, and a turn with Turn.Resume continues it.
+	Parked *Parked
 }
 
 // Runner runs turns of one pinned revision.
@@ -391,6 +418,12 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	// the cache for an edit that only reordered a list.
 	tools := saigetypes.NewToolRegistry()
 	for _, name := range rev.Spec.Tools {
+		if name == AskPersonToolName {
+			// Built in: its answer comes from the turn, which no catalog
+			// can know.
+			tools.Register(AskPersonTool())
+			continue
+		}
 		if cfg.tools == nil {
 			return nil, fmt.Errorf("%w: agent %q revision %d grants tool %q but no tool catalog is configured",
 				ErrInvalid, rev.Spec.Name, rev.Rev, name)
@@ -400,6 +433,22 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 			return nil, fmt.Errorf("agentrt: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
 		}
 		tools.Register(t)
+	}
+	// A tool the spec requires approval for carries a saige marker, which is
+	// what makes saige stop at its calls and ask.
+	for _, name := range rev.Spec.Approvals {
+		t, ok := tools.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("%w: agent %q revision %d requires approval for %q, which it is not granted",
+				ErrInvalid, rev.Spec.Name, rev.Rev, name)
+		}
+		if _, marked := t.(*saigetypes.MarkedTool); marked {
+			continue
+		}
+		tools.Register(saigetypes.WithMarkers(t, saigetypes.Marker{
+			Kind:    MarkerApproval,
+			Message: fmt.Sprintf("Allow %s to call %s?", rev.Spec.Name, name),
+		}))
 	}
 
 	return &Runner{
@@ -462,7 +511,12 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	}
 
 	prompt := t.Text
-	if r.retriever != nil && len(r.rev.Spec.Sources) > 0 {
+	if t.Resume != nil {
+		// A continuation sends the request the parked turn sent, retrieved
+		// passages and all, and does not retrieve again: its citations were
+		// published by that turn, and a second retrieval could differ.
+		prompt = t.Resume.Prompt
+	} else if r.retriever != nil && len(r.rev.Spec.Sources) > 0 {
 		ac, err := r.retriever.Retrieve(ctx, t.Text)
 		if err != nil {
 			return res, fmt.Errorf("agentrt: agent %q revision %d: retrieve: %w", r.rev.Spec.Name, r.rev.Rev, err)
@@ -478,7 +532,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			prompt = ac.Prompt + "\n\n" + prompt
 		}
 	}
-	if meta := renderMeta(t.Meta); meta != "" {
+	if meta := renderMeta(t.Meta); meta != "" && t.Resume == nil {
 		prompt = meta + "\n\n" + prompt
 	}
 	res.Prompt = prompt
@@ -487,22 +541,40 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	// its text, and the request's on the last message. They are the most
 	// volatile thing a turn sends, so they go after everything a later turn
 	// could share a cached prefix with.
-	input, err := r.conversation(ctx, t, prompt)
+	input, provider, pending, err := r.continuation(ctx, t, prompt)
 	if err != nil {
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
 	}
 
+	park := &parker{
+		enabled: t.Park,
+		tools:   r.tools,
+		agent:   r.rev.Spec.Name,
+		scope:   firstOf(t.Accounting, DefaultAccounting),
+		ttl:     t.QuestionTTL,
+		now:     time.Now,
+	}
+	if park.ttl <= 0 {
+		park.ttl = DefaultQuestionTTL
+	}
+	if t.Resume != nil {
+		park.answers = t.Resume.Answers
+	}
+	// ask_person reads its answer from the context its call runs under.
+	ctx = context.WithValue(ctx, answersKey{}, park.answers)
+
 	agentCfg := saige.Config{
 		Name:         r.rev.Spec.Name,
 		SystemPrompt: r.rev.Spec.SystemPrompt,
-		Provider:     r.provider,
+		Provider:     provider,
 		Tools:        r.tools,
 		MaxIter:      r.maxIter,
 		Logger:       r.logger,
+		Hooks:        []saige.Hooks{park.hooks()},
 	}
 	if cc := r.compaction.config(); cc != nil {
 		agentCfg.CompactCfg = cc
-		agentCfg.Hooks = []saige.Hooks{newCompactionGuard(r.compaction.keepTurns()).hooks()}
+		agentCfg.Hooks = append(agentCfg.Hooks, newCompactionGuard(r.compaction.keepTurns()).hooks())
 	}
 	agent, err := saige.New(agentCfg)
 	if err != nil {
@@ -542,7 +614,16 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 
 	var answer strings.Builder
 	var streamErr error
+	replay := newReplaying(pending)
 	for d := range stream.Deltas() {
+		if replay.drop(d) {
+			continue
+		}
+		if id, ok := batchDelta(d); ok && park.holds(id) {
+			// The batch the turn parked on never ran; saige's account of
+			// cancelling it is not news.
+			continue
+		}
 		switch v := d.(type) {
 		case saigetypes.PartDelta:
 			answer.WriteString(v.Text)
@@ -577,18 +658,16 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		case saigetypes.CompactionDelta:
 			res.Compactions = append(res.Compactions, compactionRecord(v))
 		case saigetypes.MarkerDelta:
-			// A tool asked for human approval mid-turn. Nothing in a durable
-			// turn can answer that question — the caller is a queue, not a
-			// person — and leaving it unresolved would block the stream
-			// forever, so it is refused explicitly. The right shape for
-			// approval is to park the run on an external event; see
-			// pkg/runtime.
+			// A tool call waits for approval. A call this turn was given the
+			// answer to is answered with it. Any other is refused: the turn is
+			// ending at its question (see park.go) and the call will be asked
+			// again, with the answer, when the turn is continued, or the turn
+			// cannot park at all and the model is told nobody can approve it.
+			// A refusal never runs the tool, and nothing is left waiting.
 			//
 			// A refusal that cannot be delivered would leave the tool
 			// waiting, so it fails the turn and stops the stream instead.
-			err := stream.ResolveMarkerErr(v.ToolCallID, saige.Resolution{
-				Message: "mandatum: interactive approval is not available inside a durable run",
-			})
+			err := stream.ResolveMarkerErr(v.ToolCallID, park.decide(v.ToolCallID))
 			if err != nil {
 				streamErr = errors.Join(streamErr, fmt.Errorf("refuse approval for tool call %s: %w", v.ToolCallID, err))
 				stream.Cancel()
@@ -609,6 +688,17 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	res.Text = answer.String()
 	waitErr := stream.Wait()
 	settle()
+	if _, stopped := stream.Stopped(); !stopped && park.isParking() {
+		if _, cancelled := stopping.cancelled(); !cancelled {
+			parked, err := r.parkedOf(agent, park, t, len(res.Compactions) > 0)
+			if err != nil {
+				return res, fmt.Errorf("agentrt: agent %q revision %d: park: %w", r.rev.Spec.Name, r.rev.Rev, err)
+			}
+			parked.Prompt = res.Prompt
+			res.Parked = parked
+			return res, nil
+		}
+	}
 	if req, ok := stream.Stopped(); ok {
 		// saige wrapped the turn up: the partial text is kept and the stream
 		// ended cleanly.
@@ -824,3 +914,58 @@ func providerNames(m map[string]ProviderFunc) []string {
 }
 
 var _ Tools = ToolsFunc(nil)
+
+// continuation builds a turn's input and the provider it calls. A fresh turn
+// sends its history and request to the revision's provider. A continuation
+// sends the conversation its parked turn had, and its first call is answered
+// with the message that turn parked on (see replayFirst).
+func (r *Runner) continuation(ctx context.Context, t Turn, prompt string) ([]saigetypes.Message, saigetypes.Provider, *saigetypes.AssistantMessage, error) {
+	if t.Resume == nil {
+		input, err := r.conversation(ctx, t, prompt)
+		return input, r.provider, nil, err
+	}
+	var input []saigetypes.Message
+	if !t.Resume.Whole {
+		base, err := r.conversation(ctx, t, prompt)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		input = base
+	}
+	for i, raw := range t.Resume.Transcript {
+		m, err := DecodeMessage(raw)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("parked transcript message %d: %w", i+1, err)
+		}
+		input = append(input, m)
+	}
+	m, err := DecodeMessage(t.Resume.Pending)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parked message: %w", err)
+	}
+	pending, ok := m.(saigetypes.AssistantMessage)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("%w: the parked message is a %s message, want assistant", ErrInvalid, m.Role())
+	}
+	return input, newReplayFirst(r.provider, pending), &pending, nil
+}
+
+// parkedOf records where a turn that parked stopped.
+func (r *Runner) parkedOf(agent *saige.Agent, park *parker, t Turn, compacted bool) (*Parked, error) {
+	tr := agent.Tree()
+	branch, err := tr.FlattenBranch(tr.Active())
+	if err != nil {
+		return nil, err
+	}
+	whole := compacted || (t.Resume != nil && t.Resume.Whole)
+	return park.parked(branch, len(t.History)+1, whole)
+}
+
+func firstOf(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}

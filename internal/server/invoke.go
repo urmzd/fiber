@@ -92,6 +92,9 @@ type Run struct {
 	// Usage is what the run spent, nil when nothing is recorded yet: while
 	// it executes, or for a run recorded before usage was.
 	Usage *payload.RunUsage
+	// Question is what the run is waiting on a person for, set while
+	// Status is StatusParked on a question.
+	Question *payload.Question
 
 	CreatedAt time.Time
 	StartedAt time.Time
@@ -111,11 +114,12 @@ type RunReader interface {
 
 // invokeService serves mandatum.v1.InvokeService: the write path.
 type invokeService struct {
-	invoker Invoker
-	runs    RunReader
-	bus     bus.Bus
-	srv     *Server
-	log     *slog.Logger
+	invoker  Invoker
+	runs     RunReader
+	answerer Answerer
+	bus      bus.Bus
+	srv      *Server
+	log      *slog.Logger
 }
 
 // Invoke accepts a tag and returns as soon as the run is durable.

@@ -74,6 +74,18 @@ func renderSpec(s agentspec.AgentSpec) []string {
 	for _, t := range s.Tools {
 		lines = append(lines, "tool: "+t)
 	}
+	for _, t := range s.Approvals {
+		lines = append(lines, "approval: "+t)
+	}
+	for _, t := range s.Approvers {
+		lines = append(lines, "approver: "+t)
+	}
+	if s.SelfApproval {
+		lines = append(lines, "self_approval: true")
+	}
+	for _, t := range s.Answerers {
+		lines = append(lines, "answerer: "+t)
+	}
 	for _, t := range s.Access.Spawn {
 		lines = append(lines, "spawn: "+t)
 	}

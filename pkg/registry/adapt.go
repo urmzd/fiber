@@ -123,6 +123,10 @@ func fromServerSpec(s server.Spec) agentspec.AgentSpec {
 		Provider:     s.Provider,
 		SystemPrompt: s.SystemPrompt,
 		Tools:        s.Tools,
+		Approvals:    s.Approvals,
+		Approvers:    s.Approvers,
+		SelfApproval: s.SelfApproval,
+		Answerers:    s.Answerers,
 		Access: agentspec.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -149,6 +153,10 @@ func toServerSpec(s agentspec.AgentSpec) server.Spec {
 		Provider:     s.Provider,
 		SystemPrompt: s.SystemPrompt,
 		Tools:        s.Tools,
+		Approvals:    s.Approvals,
+		Approvers:    s.Approvers,
+		SelfApproval: s.SelfApproval,
+		Answerers:    s.Answerers,
 		Access: server.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -218,6 +226,10 @@ func toRuntimeRevision(r agentspec.Revision) agentrt.Revision {
 		Provider:     r.Spec.Provider,
 		SystemPrompt: r.Spec.SystemPrompt,
 		Tools:        r.Spec.Tools,
+		Approvals:    r.Spec.Approvals,
+		Approvers:    r.Spec.Approvers,
+		SelfApproval: r.Spec.SelfApproval,
+		Answerers:    r.Spec.Answerers,
 		Access: agentrt.Access{
 			Spawn:          r.Spec.Access.Spawn,
 			WorkspaceAreas: r.Spec.Access.WorkspaceAreas,
