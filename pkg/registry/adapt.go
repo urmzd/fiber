@@ -92,7 +92,7 @@ func (a serverStore) History(ctx context.Context, tenant, name string) ([]server
 }
 
 func (a serverStore) Delete(ctx context.Context, tenant, name string) error {
-	return serverError(a.store.Delete(ctx, tenant, name))
+	return serverError(a.store.Delete(ctx, tenant, name, 0))
 }
 
 // serverError maps a registry sentinel onto the server's. An error that matches

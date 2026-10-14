@@ -109,6 +109,17 @@ type Page struct {
 	Token string
 }
 
+// size is the page size a listing actually uses.
+func (p Page) size() int {
+	switch {
+	case p.Size <= 0:
+		return DefaultPageSize
+	case p.Size > MaxPageSize:
+		return MaxPageSize
+	}
+	return p.Size
+}
+
 // Store is the agent control plane.
 //
 // It mirrors internal/server.Store method for method, in this package's
@@ -151,5 +162,11 @@ type Store interface {
 
 	// Delete retires a name. It does not erase history and does not cancel
 	// runs: a run holds its pinned revision independently of the store.
-	Delete(ctx context.Context, tenant, name string) error
+	//
+	// When expectedRev is non-zero the retirement is rejected with
+	// ErrConflict unless that is the current revision, and the check and the
+	// retirement are one atomic step. A caller that showed someone revision
+	// 4 and was told "retire it" must not retire a revision 5 that nobody
+	// looked at, and a check made in a separate read cannot promise that.
+	Delete(ctx context.Context, tenant, name string, expectedRev int) error
 }
