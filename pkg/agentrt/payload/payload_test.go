@@ -33,6 +33,20 @@ func TestEveryKindSurvivesEncodeDecode(t *testing.T) {
 		{"failure", envelope.KindFailed, payload.Lifecycle{Attempt: 1, Rev: 6, Error: "boom", Terminal: true}},
 		{"stopped", envelope.KindStopped, payload.Stopped{Attempt: 1, Rev: 6, Reason: "Stopped by a user", By: "slack:U1", Text: "So far"}},
 		{"stop request", envelope.KindStop, payload.StopRequest{RunID: "r0123", Reason: "Stopped by a user", By: "slack:U1"}},
+		{"usage call", envelope.KindUsageCall, payload.UsageCall{
+			AccountingID: "r0123/a1/1", Agent: "docs-bot", Model: "claude-test", Requests: 1,
+			PromptTokens: 1200, CachedPromptTokens: 900, CacheWriteTokens: 100, CompletionTokens: 40,
+			Cost: &payload.Cost{Micros: 1234, Currency: "USD", AsOf: "2026-07-24"}, ContextWindow: 200_000,
+		}},
+		{"usage child", envelope.KindUsageChild, payload.UsageChild{
+			AccountingID: "run:r9", RunID: "r9", Agent: "helper", Depth: 1,
+			Usage: payload.Usage{ModelCalls: 2, Requests: 2, PromptTokens: 10, CompletionTokens: 3, UnpricedCalls: 2},
+		}},
+		{"completed with usage", envelope.KindCompleted, payload.Lifecycle{Attempt: 1, Rev: 6, Text: "done", Usage: &payload.RunUsage{
+			Own:     payload.Usage{ModelCalls: 1, Requests: 1, PromptTokens: 10, CompletionTokens: 2, Cost: &payload.Cost{Micros: 5, Currency: "USD"}},
+			Total:   payload.Usage{ModelCalls: 1, Requests: 1, PromptTokens: 10, CompletionTokens: 2, Cost: &payload.Cost{Micros: 5, Currency: "USD"}},
+			Context: &payload.ContextUsage{Model: "claude-test", Window: 200_000, Tokens: 10},
+		}}},
 		{"action", envelope.KindActionTaken, payload.Action{
 			Name: "jira_transition", Target: "jira://acme/PROJ-5", Summary: "moved to done",
 			Address: "jira://acme/PROJ-5", Data: json.RawMessage(`{"status":"done"}`),
@@ -211,5 +225,104 @@ func TestCacheReadRatioIsTheCachedShareOfInput(t *testing.T) {
 		if got := tc.u.CacheReadRatio(); got != tc.want {
 			t.Errorf("%s: CacheReadRatio = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func call(id string, depth int, in, out int, micros int64, currency, asOf string) payload.UsageCall {
+	c := payload.UsageCall{AccountingID: id, Depth: depth, Requests: 1, PromptTokens: in, CompletionTokens: out}
+	if currency != "" {
+		c.Cost = &payload.Cost{Micros: micros, Currency: currency, AsOf: asOf}
+	}
+	return c
+}
+
+// Delivery is at-least-once and a call is relayed up every level of a
+// delegation, so the same report can arrive more than once. A tally counts an
+// AccountingID once, keeps a run's own calls apart from what it delegated, and
+// adds money as integers.
+func TestATallyCountsEachAccountingIDOnce(t *testing.T) {
+	t.Parallel()
+
+	var tally payload.Tally
+	reports := []payload.UsageCall{
+		call("r/a1/1", 0, 1000, 50, 4500, "USD", "2026-07-24"),
+		call("r/a1/1", 0, 1000, 50, 4500, "USD", "2026-07-24"), // redelivered
+		call("r/a1/helper.sub-1/1", 1, 300, 20, 1200, "USD", "2026-06-01"),
+		call("r/a1/2", 0, 1100, 60, 5100, "USD", "2026-07-24"),
+	}
+	fresh := 0
+	for _, c := range reports {
+		if tally.Call(c) {
+			fresh++
+		}
+	}
+	child := payload.UsageChild{AccountingID: payload.ChildRunAccountingID("r9"), RunID: "r9", Depth: 1,
+		Usage: payload.Usage{ModelCalls: 2, Requests: 2, PromptTokens: 50, CompletionTokens: 5, Cost: &payload.Cost{Micros: 300, Currency: "USD", AsOf: "2026-07-24"}}}
+	if !tally.Child(child) || tally.Child(child) {
+		t.Fatal("a child run must be counted the first time it is reported and never again")
+	}
+	if fresh != 3 {
+		t.Fatalf("%d calls counted as new, want 3", fresh)
+	}
+
+	got := tally.Usage()
+	if got.Own.ModelCalls != 2 || got.Own.PromptTokens != 2100 || got.Own.Cost.Micros != 9600 {
+		t.Errorf("Own = %+v cost %+v, want the run's two calls", got.Own, got.Own.Cost)
+	}
+	if got.Children.ModelCalls != 3 || got.Children.Cost.Micros != 1500 || got.Children.Cost.AsOf != "2026-06-01" {
+		t.Errorf("Children = %+v cost %+v, want the sub-task's call and the child run, dated by the oldest card", got.Children, got.Children.Cost)
+	}
+	if got.Total.ModelCalls != 5 || got.Total.Cost.Micros != 11100 || got.Total.Cost.AsOf != "2026-06-01" {
+		t.Errorf("Total = %+v cost %+v, want own and children added", got.Total, got.Total.Cost)
+	}
+	if got.Context == nil || got.Context.Tokens != 1100 {
+		t.Errorf("Context = %+v, want the run's own latest call", got.Context)
+	}
+}
+
+// Money adds only within one currency, and nothing is converted or guessed: a
+// call in another currency, or with no price at all, is counted in
+// UnpricedCalls and its tokens still count. A total priced from a card with no
+// date has no date.
+func TestCostsAddOnlyWithinOneCurrency(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		calls        []payload.UsageCall
+		wantMicros   int64
+		wantNoCost   bool
+		wantAsOf     string
+		wantUnpriced int
+	}{
+		{"one currency", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "USD", "2026-07-24")}, 30, false, "2026-07-24", 0},
+		{"a second currency", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "EUR", "2026-07-24")}, 10, false, "2026-07-24", 1},
+		{"an unpriced call", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 0, "", "")}, 10, false, "2026-07-24", 1},
+		{"nothing priced", []payload.UsageCall{call("a", 0, 1, 1, 0, "", "")}, 0, true, "", 1},
+		{"an undated card", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "USD", "")}, 30, false, "", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var u payload.Usage
+			for _, c := range tc.calls {
+				u = u.AddCall(c)
+			}
+			if u.PromptTokens != len(tc.calls) {
+				t.Errorf("PromptTokens = %d, want every call's tokens counted", u.PromptTokens)
+			}
+			if u.UnpricedCalls != tc.wantUnpriced {
+				t.Errorf("UnpricedCalls = %d, want %d", u.UnpricedCalls, tc.wantUnpriced)
+			}
+			if tc.wantNoCost {
+				if u.Cost != nil {
+					t.Errorf("Cost = %+v, want none", *u.Cost)
+				}
+				return
+			}
+			if u.Cost == nil || u.Cost.Micros != tc.wantMicros || u.Cost.AsOf != tc.wantAsOf {
+				t.Errorf("Cost = %+v, want %d micros as of %q", u.Cost, tc.wantMicros, tc.wantAsOf)
+			}
+		})
 	}
 }

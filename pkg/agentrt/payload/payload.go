@@ -142,6 +142,9 @@ type Lifecycle struct {
 	// subscribes to lifecycle.completed still gets the whole answer without
 	// having to reassemble deltas.
 	Text string `json:"text,omitempty"`
+	// Usage is what the run spent, on envelope.KindCompleted: every attempt,
+	// and everything it delegated. See RunUsage.
+	Usage *RunUsage `json:"usage,omitempty"`
 }
 
 // Stopped is the body of envelope.KindStopped: a run that was asked to stop
@@ -166,6 +169,9 @@ type Stopped struct {
 	// nothing. A sink that only subscribes to lifecycle.stopped still gets
 	// the partial answer without having to reassemble deltas.
 	Text string `json:"text,omitempty"`
+	// Usage is what the run spent before it stopped, the call that was cut
+	// short included when its provider had reported it. See RunUsage.
+	Usage *RunUsage `json:"usage,omitempty"`
 }
 
 // StopRequest is the body of envelope.KindStop: a request that one run stop.
@@ -219,13 +225,13 @@ func parseAddr(s string) (address.Address, error) {
 	return address.Parse(s)
 }
 
-// Usage is what a turn cost in tokens, summed over every model call it made,
-// compaction summaries included.
+// Usage is what some model calls cost, summed: a turn's, a run's own, or a run
+// and everything it delegated (see RunUsage).
 //
-// It has no envelope.Kind, on purpose. Token counts are telemetry: putting
-// them on a fan-out bus that connectors render would leak cost data into Slack
-// threads. A turn returns its Usage to the caller instead, which is where a
-// metrics exporter or a run ledger reads it.
+// Token counts are accounting, not conversation, so no connector renders
+// them: they travel as their own kinds (usage.call, usage.child) that a chat
+// surface ignores, and on the terminal event and the run's record. See
+// UsageCall for one call.
 //
 // The cache fields are what make prompt-cache health measurable. A long run
 // whose requests keep a stable prefix reads most of its input from the cache,
@@ -233,11 +239,19 @@ func parseAddr(s string) (address.Address, error) {
 // every call shows CacheWriteTokens growing and CachedPromptTokens near zero.
 // Providers that do not report cache activity leave both at zero, which is
 // indistinguishable from a cold cache.
+//
+// Every field is a sum, so two Usage values add field by field (see Add),
+// except Cost, which adds only within one currency.
 type Usage struct {
-	// ModelCalls is the number of provider requests the turn made: every
-	// call of the tool loop, plus every compaction summary whose provider
-	// reported tokens for it.
+	// ModelCalls is the number of model calls counted: every call of the
+	// tool loop, plus every compaction summary whose provider reported
+	// tokens for it.
 	ModelCalls int `json:"model_calls,omitempty"`
+	// Requests is the number of billable provider requests those calls
+	// made. It is ModelCalls or more: a vendor can serve one call in several
+	// requests (a server tool turn the adapter continued), and a call served
+	// from saige's response cache made none.
+	Requests int `json:"requests,omitempty"`
 	// PromptTokens is all input: uncached, read from cache, and written to it.
 	PromptTokens int `json:"prompt_tokens,omitempty"`
 	// CachedPromptTokens is the part of PromptTokens read from the prompt
@@ -248,6 +262,262 @@ type Usage struct {
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 	// CompletionTokens is all output.
 	CompletionTokens int `json:"completion_tokens,omitempty"`
+	// Cost is what the priced calls cost, nil when none was priced. It is a
+	// lower bound whenever UnpricedCalls is not zero.
+	Cost *Cost `json:"cost,omitempty"`
+	// UnpricedCalls counts the calls whose tokens are in the counts above
+	// and whose cost is not in Cost: a model saige has no rate card for, a
+	// modality the card does not price, or a call priced in a currency other
+	// than Cost's. Nothing is ever guessed for them.
+	UnpricedCalls int `json:"unpriced_calls,omitempty"`
+}
+
+// Cost is an amount of money: integer micro-units of a currency, so that
+// summing thousands of calls never drifts. One US dollar is Micros 1_000_000
+// with Currency "USD", which is the int64 micro-USD convention a host keeping
+// spend limits uses. It is saige's types.Cost, carried with the two facts that
+// make it checkable.
+type Cost struct {
+	// Micros is the amount in millionths of Currency.
+	Micros int64 `json:"micros"`
+	// Currency is an ISO 4217 code. saige's catalog prices in "USD".
+	Currency string `json:"currency"`
+	// AsOf is the date the rates were recorded, from saige's price catalog,
+	// such as "2026-07-24". On a sum it is the oldest date among the calls,
+	// and empty when any of them was priced from a card with no date: a
+	// total is only as fresh as its stalest rate.
+	AsOf string `json:"as_of,omitempty"`
+}
+
+// UsageCall is the body of envelope.KindUsageCall: one model call, reported
+// as it happens.
+//
+// A reader that sums them must key them by AccountingID: delivery is
+// at-least-once, and the same call arrives twice when an event is redelivered.
+// Calls are never repeated across attempts or replays (see
+// docs/architecture/overview.md, "Usage"), so the key only ever collapses
+// copies of one report.
+type UsageCall struct {
+	// AccountingID identifies the call. It is saige's UsageDelta.AccountingID
+	// when saige reports one (it does when a budget is attached), and
+	// otherwise one mandatum derives from the run, the attempt, the
+	// delegation path and the call's position, which is unique per call.
+	AccountingID string `json:"accounting_id"`
+	// Agent is the agent whose model made the call: the run's own agent, or
+	// the agent a sub-task was delegated to.
+	Agent string `json:"agent,omitempty"`
+	// Depth is how far down the delegation the call was made: 0 for the
+	// run's own agent, 1 for a sub-task its turn delegated to, 2 for one that
+	// sub-task delegated to, and so on.
+	Depth int `json:"depth,omitempty"`
+	// Model is the model that answered, as the provider reported it, or the
+	// model the pinned revision names.
+	Model string `json:"model,omitempty"`
+	// Requests is the billable provider requests the call made: 1, or more
+	// for a call a vendor served in several requests, or 0 for a call saige
+	// answered from its response cache.
+	Requests int `json:"requests,omitempty"`
+	// PromptTokens is all input; it is also how full the context was for
+	// this call (see ContextWindow).
+	PromptTokens int `json:"prompt_tokens,omitempty"`
+	// CachedPromptTokens is the part of PromptTokens read from the prompt
+	// cache.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+	// CacheWriteTokens is the part of PromptTokens written to the prompt
+	// cache.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// CompletionTokens is all output.
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	// ResponseCacheHit marks a call saige answered from its response cache:
+	// nothing was sent to a provider, nothing was spent, and the token
+	// counts are zero.
+	ResponseCacheHit bool `json:"response_cache_hit,omitempty"`
+	// Cost is what the call cost, from saige's rate card for the model. It
+	// is nil when saige has no card for the model or the card does not price
+	// what the call used. It is never estimated.
+	Cost *Cost `json:"cost,omitempty"`
+	// ContextWindow is the model's input token limit from saige's model
+	// catalog, 0 when the catalog does not declare one.
+	ContextWindow int `json:"context_window,omitempty"`
+}
+
+// UsageChild is the body of envelope.KindUsageChild: a run that a turn of this
+// run delegated to, reporting its whole usage once it has ended.
+//
+// It is how a host that carries out delegations as runs of their own
+// (runtime.WithDelegator) rolls them up into the run that asked. A sub-task
+// that is not a run reports its calls as UsageCall instead.
+type UsageChild struct {
+	// AccountingID is "run:" followed by RunID. A child run is counted once
+	// per parent however many attempts of the parent asked for it.
+	AccountingID string `json:"accounting_id"`
+	// RunID is the child run.
+	RunID string `json:"run_id"`
+	// Agent is the agent the child run executed.
+	Agent string `json:"agent,omitempty"`
+	// Depth is 1 for a run this run's turn delegated to, more when the
+	// report came up through a sub-task.
+	Depth int `json:"depth,omitempty"`
+	// Usage is the child run's total: its own calls and everything it
+	// delegated in turn.
+	Usage Usage `json:"usage"`
+}
+
+// ChildRunAccountingID is the AccountingID a child run is reported under.
+func ChildRunAccountingID(runID string) string { return "run:" + runID }
+
+// ContextUsage is how full a run's context was at its latest model call.
+type ContextUsage struct {
+	// Model is the model of that call.
+	Model string `json:"model,omitempty"`
+	// Window is the model's input token limit from saige's model catalog, 0
+	// when the catalog does not declare one.
+	Window int `json:"window,omitempty"`
+	// Tokens is the prompt that call sent, in tokens: how much of Window was
+	// in use.
+	Tokens int `json:"tokens,omitempty"`
+}
+
+// RunUsage is what a run spent, split by who spent it.
+//
+// Own is the run's own agent. Children is everything it delegated, at every
+// depth: in-turn sub-tasks, and child runs a host carried out and reported.
+// Total is the two added, and is the number to hold against a limit. Each call
+// and each child run is in exactly one of Own and Children, once.
+type RunUsage struct {
+	Own      Usage `json:"own"`
+	Children Usage `json:"children,omitzero"`
+	Total    Usage `json:"total"`
+	// Context is the run's own agent at its latest model call, nil when it
+	// made none.
+	Context *ContextUsage `json:"context,omitempty"`
+}
+
+// Add returns u and o summed. Costs in one currency add; when the currencies
+// differ, o's priced calls are counted in UnpricedCalls instead, since there is
+// no rate to convert at.
+func (u Usage) Add(o Usage) Usage {
+	u.ModelCalls += o.ModelCalls
+	u.Requests += o.Requests
+	u.PromptTokens += o.PromptTokens
+	u.CachedPromptTokens += o.CachedPromptTokens
+	u.CacheWriteTokens += o.CacheWriteTokens
+	u.CompletionTokens += o.CompletionTokens
+	u.UnpricedCalls += o.UnpricedCalls
+	if o.Cost != nil {
+		if sum, ok := addCost(u.Cost, *o.Cost); ok {
+			u.Cost = sum
+		} else {
+			u.UnpricedCalls += o.ModelCalls - o.UnpricedCalls
+		}
+	}
+	return u
+}
+
+// AddCall returns u with one call added.
+func (u Usage) AddCall(c UsageCall) Usage {
+	u.ModelCalls++
+	u.Requests += c.Requests
+	u.PromptTokens += c.PromptTokens
+	u.CachedPromptTokens += c.CachedPromptTokens
+	u.CacheWriteTokens += c.CacheWriteTokens
+	u.CompletionTokens += c.CompletionTokens
+	switch {
+	case c.Cost != nil:
+		if sum, ok := addCost(u.Cost, *c.Cost); ok {
+			u.Cost = sum
+		} else {
+			u.UnpricedCalls++
+		}
+	case !c.ResponseCacheHit:
+		u.UnpricedCalls++
+	}
+	return u
+}
+
+// addCost adds c to sum, which may be nil, and reports false when the
+// currencies differ.
+func addCost(sum *Cost, c Cost) (*Cost, bool) {
+	if sum == nil {
+		out := c
+		return &out, true
+	}
+	if sum.Currency != c.Currency {
+		return sum, false
+	}
+	out := *sum
+	out.Micros += c.Micros
+	out.AsOf = olderAsOf(sum.AsOf, c.AsOf)
+	return &out, true
+}
+
+// olderAsOf is the less trustworthy of two recording dates: unknown when either
+// is, otherwise the earlier. ISO dates sort as strings.
+func olderAsOf(a, b string) string {
+	if a == "" || b == "" {
+		return ""
+	}
+	return min(a, b)
+}
+
+// Tally sums usage reports into a RunUsage, counting each AccountingID once.
+// The zero value is ready to use. It is what a run's total is built from, and
+// what a reader of a run's stream can use to rebuild it.
+type Tally struct {
+	seen     map[string]bool
+	own      Usage
+	children Usage
+	context  *ContextUsage
+}
+
+// Call adds one call and reports whether it was new. A call with no
+// AccountingID is always new: it cannot be told apart from another.
+func (t *Tally) Call(c UsageCall) bool {
+	if !t.first(c.AccountingID) {
+		return false
+	}
+	if c.Depth > 0 {
+		t.children = t.children.AddCall(c)
+		return true
+	}
+	t.own = t.own.AddCall(c)
+	if !c.ResponseCacheHit {
+		t.context = &ContextUsage{Model: c.Model, Window: c.ContextWindow, Tokens: c.PromptTokens}
+	}
+	return true
+}
+
+// Child adds a child run's total and reports whether it was new.
+func (t *Tally) Child(c UsageChild) bool {
+	if !t.first(c.AccountingID) {
+		return false
+	}
+	t.children = t.children.Add(c.Usage)
+	return true
+}
+
+func (t *Tally) first(id string) bool {
+	if id == "" {
+		return true
+	}
+	if t.seen[id] {
+		return false
+	}
+	if t.seen == nil {
+		t.seen = make(map[string]bool)
+	}
+	t.seen[id] = true
+	return true
+}
+
+// Usage returns the sum so far.
+func (t *Tally) Usage() RunUsage {
+	out := RunUsage{Own: t.own, Children: t.children, Total: t.own.Add(t.children)}
+	if t.context != nil {
+		c := *t.context
+		out.Context = &c
+	}
+	return out
 }
 
 // CacheReadRatio is the fraction of input tokens served from the prompt cache,
@@ -341,6 +611,10 @@ func Of(e envelope.Event) (body any, known bool, err error) {
 		return decodeOr[Stopped](e)
 	case envelope.KindStop:
 		return decodeOr[StopRequest](e)
+	case envelope.KindUsageCall:
+		return decodeOr[UsageCall](e)
+	case envelope.KindUsageChild:
+		return decodeOr[UsageChild](e)
 	default:
 		return json.RawMessage(e.Payload), false, nil
 	}

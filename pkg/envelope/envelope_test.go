@@ -25,6 +25,13 @@ func TestKindFamilyAndMatches(t *testing.T) {
 		{envelope.KindCompleted, "lifecycle", "lifecycle.completed", true},
 		{envelope.KindActionTaken, "action", "action", true},
 		{envelope.KindText, "delta", "", true},
+		// Usage is its own family, so a route that asked for the
+		// conversation or the outcome is never sent accounting.
+		{envelope.KindUsageCall, "usage", "usage", true},
+		{envelope.KindUsageChild, "usage", "usage", true},
+		{envelope.KindUsageCall, "usage", "delta", false},
+		{envelope.KindUsageCall, "usage", "lifecycle", false},
+		{envelope.KindUsageChild, "usage", "usage.call", false},
 	}
 	for _, tc := range cases {
 		if got := tc.kind.Family(); got != tc.family {

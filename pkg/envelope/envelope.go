@@ -68,6 +68,17 @@ const (
 	// "the agent said something".
 	KindActionTaken Kind = "action.taken"
 
+	// What a run spent. They are accounting, not conversation: a sink that
+	// renders a chat surface ignores them, and a route that selects "delta"
+	// or "lifecycle" never receives them. Select "usage" to receive both.
+	//
+	// KindUsageCall reports one model call as it completes: tokens, the
+	// model, its cost where saige can price it, and its context window.
+	KindUsageCall Kind = "usage.call"
+	// KindUsageChild reports a child run's whole usage once it has ended,
+	// so the run that delegated to it can count it.
+	KindUsageChild Kind = "usage.child"
+
 	// Control-plane changes, on the same bus as the data so a dashboard sees
 	// an agent get revised in the same stream as the runs that follow it.
 	KindAgentCreated Kind = "control.created"
@@ -82,7 +93,7 @@ const (
 )
 
 // Family returns the leading component of a kind: "delta", "lifecycle",
-// "action", or "control".
+// "action", "usage", or "control".
 func (k Kind) Family() string {
 	for i := 0; i < len(k); i++ {
 		if k[i] == '.' {
