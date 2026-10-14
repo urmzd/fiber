@@ -67,7 +67,7 @@ func TestTheFilesInABodyAreFoundInOrderAndLinksAreLeftAlone(t *testing.T) {
 // redirect to, and from nothing else on github.com or anywhere.
 func TestGitHubFilesAreFetchedOnlyFromAttachmentHostsAndPaths(t *testing.T) {
 	for raw, want := range map[string]bool{
-		"https://github.com/user-attachments/assets/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0":       true,
+		"https://github.com/user-attachments/assets/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0":      true,
 		"https://github.com/user-attachments/files/17000000/trace.log":                         true,
 		"https://github.com/acme/handbook/assets/1502855/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee": true,
 		"https://user-images.githubusercontent.com/1502855/1-2.png":                            true,
@@ -76,11 +76,11 @@ func TestGitHubFilesAreFetchedOnlyFromAttachmentHostsAndPaths(t *testing.T) {
 		"https://objects.githubusercontent.com/github-production-repository-file-5c1aeb/1/2":   true,
 		"https://github.com/acme/handbook/archive/refs/heads/main.zip":                         false,
 		"https://github.com/acme/handbook/assets/../settings":                                  false,
-		"https://github.com/login":                                                             false,
-		"https://api.github.com/repos/acme/handbook":                                           false,
-		"https://github.com.evil.example/user-attachments/assets/x":                            false,
-		"https://evil-bucket.s3.amazonaws.com/x.png":                                           false,
-		"https://raw.githubusercontent.com/acme/handbook/main/secret.env":                      false,
+		"https://github.com/login":                                        false,
+		"https://api.github.com/repos/acme/handbook":                      false,
+		"https://github.com.evil.example/user-attachments/assets/x":       false,
+		"https://evil-bucket.s3.amazonaws.com/x.png":                      false,
+		"https://raw.githubusercontent.com/acme/handbook/main/secret.env": false,
 	} {
 		u, _ := url.Parse(raw)
 		if got := github.FileAllowed(u) == nil; got != want {
