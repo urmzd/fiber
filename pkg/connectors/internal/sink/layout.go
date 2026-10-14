@@ -47,6 +47,7 @@ func MapText(v render.View, fn func(string) string) render.View {
 	out.Text = fn(v.Text)
 	out.Thinking = fn(v.Thinking)
 	out.Error = fn(v.Error)
+	out.Reason = fn(v.Reason)
 
 	if len(v.Tools) > 0 {
 		out.Tools = make([]render.Tool, len(v.Tools))
@@ -87,6 +88,8 @@ func StatusLabel(s render.Status) string {
 		return "done"
 	case render.StatusFailed:
 		return "failed"
+	case render.StatusStopped:
+		return "stopped"
 	default:
 		return ""
 	}
@@ -102,6 +105,7 @@ func StatusLabel(s render.Status) string {
 //	[1] Design doc                         footnotes, one per cited source
 //	changed: commented on PR #42           what it changed on a real surface
 //	failed: provider timeout               why there is no answer
+//	stopped: Stopped by a user             why the answer is not finished
 //
 // Sections that are empty are omitted entirely rather than rendered as a
 // heading with nothing under it, so the first delta of a run produces a
@@ -132,6 +136,16 @@ func Layout(m Markup, v render.View) string {
 	}
 	if v.Error != "" {
 		sections = append(sections, m.Bold("failed")+": "+v.Error)
+	}
+	if v.Status == render.StatusStopped {
+		// Always said in the body, not only in the header: a stopped run's
+		// text is an unfinished answer, and a reader who skips the header
+		// must not take it for a finished one.
+		line := m.Bold("stopped")
+		if v.Reason != "" {
+			line += ": " + truncate(collapse(v.Reason), 200)
+		}
+		sections = append(sections, line)
 	}
 
 	return strings.Join(sections, "\n\n")

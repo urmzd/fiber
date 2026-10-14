@@ -123,6 +123,11 @@ func (c *Connector) checkBody(v render.View) string {
 	case render.StatusFailed:
 		check.Status = "completed"
 		check.Conclusion = "failure"
+	case render.StatusStopped:
+		// Someone ended the run on purpose. That is GitHub's "cancelled":
+		// finished, and neither a pass nor a failure.
+		check.Status = "completed"
+		check.Conclusion = "cancelled"
 	case render.StatusDone:
 		check.Status = "completed"
 		check.Conclusion = "neutral"

@@ -399,3 +399,40 @@ func TestFinalAnswerReplacesPartialAndLateDeltas(t *testing.T) {
 		}
 	}
 }
+
+// A stopped run is terminal and is its own status: not done, because the text
+// is an unfinished answer, and not failed, because nothing went wrong. The
+// partial answer and the reason travel on the event, so a route that selected
+// only lifecycle kinds still shows both.
+func TestAStoppedRunIsTerminalAndCarriesItsPartialAnswerAndReason(t *testing.T) {
+	d := render.New()
+	d.Apply(ev(1, envelope.KindStarted, `{}`))
+	d.Apply(text(2, "Half an "))
+	d.Apply(text(3, "answer"))
+	if !d.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped by a user","by":"slack:U1"}`)) {
+		t.Fatal("applying lifecycle.stopped reported no change")
+	}
+
+	v := d.View()
+	if v.Status != render.StatusStopped || !v.Terminal() {
+		t.Fatalf("status = %q, terminal = %v; want stopped and terminal", v.Status, v.Terminal())
+	}
+	if v.Status == render.StatusDone || v.Status == render.StatusFailed || v.Error != "" {
+		t.Fatalf("a stopped run renders as %q with error %q", v.Status, v.Error)
+	}
+	if v.Text != "Half an answer" || v.Reason != "Stopped by a user" {
+		t.Errorf("text = %q, reason = %q", v.Text, v.Reason)
+	}
+
+	// At-least-once: the same event again changes nothing.
+	if d.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped by a user"}`)) {
+		t.Error("a redelivered lifecycle.stopped changed the document")
+	}
+
+	// A sink that was sent the terminal event alone still has the answer.
+	only := render.New()
+	only.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer"}`))
+	if got := only.View(); got.Text != "Half an answer" || got.Status != render.StatusStopped || got.Reason != "" {
+		t.Errorf("lifecycle-only view = %+v", got)
+	}
+}

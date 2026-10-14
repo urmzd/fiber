@@ -21,6 +21,7 @@ import (
 //	                     "label": "..."}   or a JSON array of those
 //	action.taken        {"summary": "...", "address": "github://o/r/issues/1"}
 //	lifecycle.failed    {"error": "..."}                also: message
+//	lifecycle.stopped   {"text": "...", "reason": "..."}
 //
 // Every decoder here is tolerant in two specific ways, and it is worth being
 // precise about why, because "be liberal in what you accept" is usually how a
