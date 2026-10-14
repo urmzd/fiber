@@ -245,6 +245,14 @@ Compose sets `MANDATUM_TOKEN=mandatum-dev-token` by default. Use that value when
 connecting from a host CLI. Connector setup is covered in the
 [GitHub](docs/architecture/github.md) and [Slack](docs/architecture/slack.md) guides.
 
+## Upgrading
+
+**Run ids changed in this release.** A run id is now derived from the tenant and the tag id together, so every run gets a different id than it had before.
+
+- **Drain before upgrading.** Stop accepting tags and let in-flight runs finish on the old version. A durable replay recomputes the run id from the tag, so a run accepted by the old version and resumed by the new one is looked up under an id it was never stored under. Do not run old and new workers against the same ledger.
+- **Old redeliveries start new runs.** A webhook redelivered across the upgrade no longer deduplicates against the run its first delivery created, because that run is stored under its old id.
+- **Stored run ids are stale.** Anything that saved a run id from before the upgrade (a link, a dashboard, a surface message) will not resolve it afterwards.
+
 ## Limitations
 
 - Event streaming uses the in-memory bus or Redis independently of the Postgres run store.
