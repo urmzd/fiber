@@ -70,6 +70,11 @@ const (
 	// Failed means the run finished unsuccessfully and will not be retried.
 	// Terminal, and error carries why.
 	RunStatus_RUN_STATUS_FAILED RunStatus = 5
+	// Stopped means the run was asked to stop and wrapped its turn up before it
+	// finished. Terminal, and neither a completion nor a failure: what the agent
+	// had said so far was kept, and it is never retried. stop_reason and
+	// stopped_by say why and who asked.
+	RunStatus_RUN_STATUS_STOPPED RunStatus = 6
 )
 
 // Enum value maps for RunStatus.
@@ -81,6 +86,7 @@ var (
 		3: "RUN_STATUS_PARKED",
 		4: "RUN_STATUS_COMPLETED",
 		5: "RUN_STATUS_FAILED",
+		6: "RUN_STATUS_STOPPED",
 	}
 	RunStatus_value = map[string]int32{
 		"RUN_STATUS_UNSPECIFIED": 0,
@@ -89,6 +95,7 @@ var (
 		"RUN_STATUS_PARKED":      3,
 		"RUN_STATUS_COMPLETED":   4,
 		"RUN_STATUS_FAILED":      5,
+		"RUN_STATUS_STOPPED":     6,
 	}
 )
 
@@ -729,7 +736,15 @@ type Run struct {
 	// between created_at and started_at is queue latency and nothing else.
 	StartedAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	// EndedAt is when the run reached a terminal state. Unset until then.
-	EndedAt       *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
+	EndedAt *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
+	// StopReason is why the run was stopped, in the words of whoever asked,
+	// empty unless status is RUN_STATUS_STOPPED. It may be empty then too: a
+	// reason is optional.
+	StopReason string `protobuf:"bytes,14,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
+	// StoppedBy is who asked the run to stop, empty unless status is
+	// RUN_STATUS_STOPPED. It is the asking credential's subject, or the person a
+	// surface trusted to act for others named.
+	StoppedBy     string `protobuf:"bytes,15,opt,name=stopped_by,json=stoppedBy,proto3" json:"stopped_by,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -855,6 +870,20 @@ func (x *Run) GetEndedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Run) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
+}
+
+func (x *Run) GetStoppedBy() string {
+	if x != nil {
+		return x.StoppedBy
+	}
+	return ""
+}
+
 // GetRunRequest reads one run.
 type GetRunRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -950,7 +979,7 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x03rev\x18\x02 \x01(\x05R\x03rev\x12\x14\n" +
 	"\x05topic\x18\x03 \x01(\tR\x05topic\x12;\n" +
 	"\vaccepted_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"acceptedAtJ\x04\b\x05\x10\x10\"\xc2\x03\n" +
+	"acceptedAtJ\x04\b\x05\x10\x10\"\x82\x04\n" +
 	"\x03Run\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\tR\x06tenant\x12\x14\n" +
@@ -967,17 +996,22 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"created_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"started_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x125\n" +
-	"\bended_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\aendedAtJ\x04\b\x0e\x10 \",\n" +
+	"\bended_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt\x12\x1f\n" +
+	"\vstop_reason\x18\x0e \x01(\tR\n" +
+	"stopReason\x12\x1d\n" +
+	"\n" +
+	"stopped_by\x18\x0f \x01(\tR\tstoppedByJ\x04\b\x10\x10 \",\n" +
 	"\rGetRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runIdJ\x04\b\x02\x10\n" +
-	"*\xa6\x01\n" +
+	"*\xbe\x01\n" +
 	"\tRunStatus\x12\x1a\n" +
 	"\x16RUN_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13RUN_STATUS_ACCEPTED\x10\x01\x12\x16\n" +
 	"\x12RUN_STATUS_RUNNING\x10\x02\x12\x15\n" +
 	"\x11RUN_STATUS_PARKED\x10\x03\x12\x18\n" +
 	"\x14RUN_STATUS_COMPLETED\x10\x04\x12\x15\n" +
-	"\x11RUN_STATUS_FAILED\x10\x05\"\x04\b\x06\x10\x0f2\xbe\x01\n" +
+	"\x11RUN_STATUS_FAILED\x10\x05\x12\x16\n" +
+	"\x12RUN_STATUS_STOPPED\x10\x06\"\x04\b\a\x10\x0f2\xbe\x01\n" +
 	"\rInvokeService\x129\n" +
 	"\x06Invoke\x12\x10.mandatum.v1.Tag\x1a\x1b.mandatum.v1.InvokeResponse\"\x00\x128\n" +
 	"\fInvokeStream\x12\x10.mandatum.v1.Tag\x1a\x12.mandatum.v1.Event\"\x000\x01\x128\n" +

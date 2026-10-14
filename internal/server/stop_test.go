@@ -9,6 +9,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"connectrpc.com/connect"
+
+	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
 // fakeStopper records what the edge asked the runtime to stop.
@@ -161,11 +166,86 @@ func TestAStopThatCannotBeCarriedIsRefused(t *testing.T) {
 	}
 }
 
-// The wire enum has no member for a stopped run yet. It must still read as
-// over, and as not failed, to a client polling GetRun.
-func TestAStoppedRunReadsAsTerminalAndNotFailedOnTheWire(t *testing.T) {
-	got := statusToProto(StatusStopped)
-	if got != statusToProto(StatusCompleted) || got == statusToProto(StatusFailed) {
-		t.Fatalf("StatusStopped maps to %v", got)
+// A stopped run reads as stopped to a client polling GetRun, with why and who
+// asked, and the fields stay empty on a run that was not stopped. A completed
+// and a failed run read exactly as they did before stopped existed.
+func TestGetRunReportsAStoppedRunAsStopped(t *testing.T) {
+	h := newHarness(t, nil)
+	h.runs.put(Run{ID: "run_stopped", Tenant: tenantAcme, Agent: "docs-bot", Status: StatusStopped,
+		StopReason: "Stopped by a user", StoppedBy: "slack:U1", EndedAt: fixedTime})
+	h.runs.put(Run{ID: "run_done", Tenant: tenantAcme, Agent: "docs-bot", Status: StatusCompleted, EndedAt: fixedTime})
+	h.runs.put(Run{ID: "run_failed", Tenant: tenantAcme, Agent: "docs-bot", Status: StatusFailed, Error: "boom", EndedAt: fixedTime})
+
+	read := func(id string) *mandatumv1.Run {
+		t.Helper()
+		got, err := h.invokeClient(tokenAcme).GetRun(context.Background(), connect.NewRequest(&mandatumv1.GetRunRequest{RunId: id}))
+		if err != nil {
+			t.Fatalf("get run %s: %v", id, err)
+		}
+		return got.Msg
+	}
+	stopped := read("run_stopped")
+	if stopped.GetStatus() != mandatumv1.RunStatus_RUN_STATUS_STOPPED {
+		t.Fatalf("status = %v, want RUN_STATUS_STOPPED", stopped.GetStatus())
+	}
+	if stopped.GetStopReason() != "Stopped by a user" || stopped.GetStoppedBy() != "slack:U1" || stopped.GetError() != "" {
+		t.Errorf("stop_reason %q, stopped_by %q, error %q", stopped.GetStopReason(), stopped.GetStoppedBy(), stopped.GetError())
+	}
+	if stopped.GetEndedAt() == nil {
+		t.Error("a stopped run has no ended_at")
+	}
+	if done := read("run_done"); done.GetStatus() != mandatumv1.RunStatus_RUN_STATUS_COMPLETED || done.GetStopReason() != "" || done.GetStoppedBy() != "" {
+		t.Errorf("completed run = %v", done)
+	}
+	if failed := read("run_failed"); failed.GetStatus() != mandatumv1.RunStatus_RUN_STATUS_FAILED || failed.GetError() != "boom" {
+		t.Errorf("failed run = %v", failed)
+	}
+	// Append only: the members that existed keep their numbers.
+	for status, n := range map[mandatumv1.RunStatus]int32{
+		mandatumv1.RunStatus_RUN_STATUS_COMPLETED: 4,
+		mandatumv1.RunStatus_RUN_STATUS_FAILED:    5,
+		mandatumv1.RunStatus_RUN_STATUS_STOPPED:   6,
+	} {
+		if int32(status) != n {
+			t.Errorf("%v is %d on the wire, want %d", status, int32(status), n)
+		}
+	}
+}
+
+// The browser surface carries a stopped run's ending like any other event:
+// the kind as the SSE event type, and the reason, the asker and the partial
+// answer in the data.
+func TestSSECarriesLifecycleStopped(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.publish(event(tenantAcme, "run_1", 9, envelope.KindStopped, `{"attempt":1,"reason":"Stopped by a user","by":"slack:U1","text":"Half"}`))
+
+	res, err := h.get(ctx, "/v1/sse?topic=agent:docs-bot:run_1", tokenAcme)
+	if err != nil {
+		t.Fatalf("sse: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	reader := newSSEReader(t, res.Body)
+	_ = reader.frame() // retry hint
+	got := reader.event()
+	for _, want := range []string{"id: 9\n", "event: lifecycle.stopped\n", `"reason":"Stopped by a user"`, `"by":"slack:U1"`, `"text":"Half"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("frame %q lacks %q", got, want)
+		}
+	}
+}
+
+// A body over the limit is refused as too large, the way every other handler
+// here refuses one, and never reaches the runtime.
+func TestAnOversizedStopBodyIsRefusedAsTooLarge(t *testing.T) {
+	stopper := &fakeStopper{}
+	h := newHarness(t, func(c *Config) { c.Stopper = stopper; c.MaxBodyBytes = 16 })
+	status, _ := h.postStop(t, "r1", tokenAcme, `{"reason":"`+strings.Repeat("x", 64)+`"}`)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d, want 413", status)
+	}
+	if got := stopper.requests(); len(got) != 0 {
+		t.Fatalf("an oversized request reached the runtime: %+v", got)
 	}
 }

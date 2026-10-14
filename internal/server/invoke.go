@@ -67,10 +67,7 @@ const (
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
 	// StatusStopped is a run that ended because it was asked to. It is
-	// terminal. The wire enum has no member for it yet, so it is reported
-	// there as completed, which is the terminal status that is not a
-	// failure; the run's lifecycle.stopped event is what tells the two
-	// apart.
+	// terminal, and it is neither completed nor failed.
 	StatusStopped Status = "stopped"
 )
 
@@ -87,6 +84,10 @@ type Run struct {
 	Tag     envelope.Tag
 	LastSeq uint64
 	Error   string
+	// StopReason and StoppedBy say why a stopped run was stopped and who
+	// asked. Empty unless Status is StatusStopped.
+	StopReason string
+	StoppedBy  string
 
 	CreatedAt time.Time
 	StartedAt time.Time

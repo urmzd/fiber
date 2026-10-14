@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,12 @@ import (
 )
 
 // StopRequest asks one run to stop, as the edge hands it to the runtime.
+//
+// It mirrors runtime.StopRequest rather than importing it for the reason
+// Invoker is declared here: the edge is built and tested against its own
+// types, and the composition root converts. The other stop types are
+// different things: payload.StopRequest is the body on the bus and in the
+// ledger, and agentrt.Stop is what a single turn is told.
 type StopRequest struct {
 	// Tenant is the caller's, from its credential. A run of another tenant
 	// never hears the request.
@@ -89,6 +96,11 @@ func (s *Server) handleStop(stopper Stopper) http.HandlerFunc {
 		var body stopBody
 		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBody))
 		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, "stop: body exceeds the configured limit", http.StatusRequestEntityTooLarge)
+				return
+			}
 			s.httpFail(w, "stop", fmt.Errorf("%w: read body: %w", ErrInvalid, err))
 			return
 		}
