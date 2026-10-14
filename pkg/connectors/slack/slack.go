@@ -10,7 +10,9 @@
 //
 // Two event types raise tags: app_mention, which is a mention in a channel, and
 // a direct message, which is a mention by context rather than by text. Everything
-// else is acknowledged and dropped. Messages from a bot are always dropped: a
+// else is acknowledged and dropped. A slash command an agent registered in a
+// code channel raises one too; it arrives on CommandsPath, signed the same way
+// (see command.go). Messages from a bot are always dropped: a
 // mesh whose sink posts into the same channel its trigger reads would otherwise
 // answer itself, forever, at whatever rate the model can produce tokens.
 //
@@ -33,6 +35,12 @@
 // mention's own timestamp as ?thread=, so a channel that tags an agent fifty
 // times has fifty threads rather than one flat conversation.
 //
+// # Sessions
+//
+// AgentAPI exposes session status and command registration. Applications decide
+// how their run lifecycle maps to those capabilities. A person pressing stop on
+// a session arrives as StopEvent and is handed to Config.Stopped (see stop.go).
+//
 // # Actor
 //
 // slack_post_message and slack_add_reaction. Both are ordinary Slack verbs, and
@@ -45,6 +53,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
@@ -114,6 +123,14 @@ type Config struct {
 	// Deliver overrides where a tag's events go. Empty answers in the thread the
 	// mention came from, which is what a human expects.
 	Deliver []envelope.Route
+
+	// Prepare applies application policy to a verified tag before handoff.
+	Prepare func(context.Context, *envelope.Tag) error
+
+	// Stopped handles a person pressing stop on an agent session. Nil
+	// acknowledges and ignores the event. Subscribe the app to StopEvent only
+	// when this is set: the subscription is what shows the button.
+	Stopped func(context.Context, Stop) error
 
 	// Interval coalesces edits. Zero means sink.DefaultInterval.
 	Interval time.Duration
@@ -193,7 +210,8 @@ func (c *Connector) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
 // and saying so keeps a load balancer from sending it traffic it will 503.
 func (c *Connector) Ingesting() bool { return c.pipe.Ingesting() }
 
-// ServeHTTP handles one Slack Events API request.
+// ServeHTTP handles one Slack request: an Events API delivery, or a slash
+// command invocation on CommandsPath.
 //
 // Slack expects an answer within three seconds and retries otherwise, so the
 // handler does exactly three things: authenticate, translate, hand off. The
@@ -202,6 +220,10 @@ func (c *Connector) Ingesting() bool { return c.pipe.Ingesting() }
 func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, ok := c.gate.Body(w, r)
 	if !ok {
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, CommandsPath) {
+		c.serveCommand(w, r, body)
 		return
 	}
 
@@ -220,11 +242,22 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if stop, ok := c.stopFrom(env); ok {
+		c.serveStop(r.Context(), w, stop)
+		return
+	}
+
 	tag, ok := c.tagFrom(env)
 	if !ok {
 		// Not for us: acknowledge, or Slack retries it three more times.
 		w.WriteHeader(http.StatusOK)
 		return
+	}
+	if c.cfg.Prepare != nil {
+		if err := c.cfg.Prepare(r.Context(), &tag); err != nil {
+			http.Error(w, "request refused", http.StatusForbidden)
+			return
+		}
 	}
 	if err := c.pipe.Send(r.Context(), tag); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
@@ -238,7 +271,10 @@ func (c *Connector) Deliver(ctx context.Context, target address.Address, e envel
 	if err := c.reachable(target); err != nil {
 		return err
 	}
-	return c.engine.Deliver(ctx, target, e)
+	if err := c.engine.Deliver(ctx, target, e); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Flush writes every run whose edits are still being coalesced. A server calls

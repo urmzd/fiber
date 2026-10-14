@@ -1,7 +1,6 @@
 package github
 
 import (
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -221,7 +220,7 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		subj = subjectOf(h)
 		switch h.Action {
 		case "labeled":
-			agent, text, ok = c.autoLabel(h, subj)
+			agent, text, ok = c.automation(h)
 		case "opened":
 			agent, text, ok = mention.Find(h.Issue.Title+"\n\n"+h.Issue.Body, c.agents())
 		}
@@ -239,11 +238,11 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 			if subj.draft || subj.state == "closed" || !validSHA(subj.sha) {
 				return envelope.Tag{}, false
 			}
-			if agent, text, ok = c.activeLabel(h, subj); !ok {
+			if agent, text, ok = c.automation(h); !ok {
 				return envelope.Tag{}, false
 			}
 		case "labeled":
-			if agent, text, ok = c.autoLabel(h, subj); !ok {
+			if agent, text, ok = c.automation(h); !ok {
 				return envelope.Tag{}, false
 			}
 		case "review_requested":
@@ -327,16 +326,12 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 	return tag, true
 }
 
-func (c *Connector) autoLabel(h hook, subj subject) (string, string, bool) {
-	if h.Label == nil {
+func (c *Connector) automation(h hook) (string, string, bool) {
+	if c.cfg.Automation == nil {
 		return "", "", false
 	}
-	repo := strings.ToLower(h.Repository.Owner.Login + "/" + h.Repository.Name)
-	agent, ok := c.cfg.AutoLabels[repo][h.Label.Name]
-	if !ok {
-		return "", "", false
-	}
-	return agent, strings.TrimSpace(subj.title + "\n\n" + subj.body), true
+	agent, text, ok := c.cfg.Automation(h)
+	return agent, text, ok && mention.Valid(agent)
 }
 
 // subjectOf normalizes the issue or pull request an event is about.
@@ -463,18 +458,4 @@ func latest(times ...time.Time) time.Time {
 		}
 	}
 	return out
-}
-
-// activeLabel chooses deterministically when several configured labels exist.
-// Keeping the activation on the PR makes commit triggers survive a restart.
-func (c *Connector) activeLabel(h hook, subj subject) (string, string, bool) {
-	labels := append([]string(nil), subj.labels...)
-	sort.Strings(labels)
-	for _, name := range labels {
-		h.Label = &label{Name: name}
-		if agent, text, ok := c.autoLabel(h, subj); ok {
-			return agent, "Review commit " + subj.sha + ".\n\n" + text, true
-		}
-	}
-	return "", "", false
 }

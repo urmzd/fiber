@@ -15,8 +15,6 @@ import (
 	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
-var commitSHA = strings.Repeat("a", 40)
-
 func TestChecksStreamAndKeepTheirPinnedCommit(t *testing.T) {
 	fake := github.NewFake()
 	c, err := github.New(github.Config{API: fake, Checks: true, Interval: -1})
@@ -49,23 +47,6 @@ func TestChecksStreamAndKeepTheirPinnedCommit(t *testing.T) {
 	}
 }
 
-func TestCheckConclusionReflectsReviewErrorsAndMalformedReports(t *testing.T) {
-	for _, tc := range []struct{ text, conclusion string }{
-		{`{"format":"mandatum.github.review.v1","summary":"Found a bug","findings":[{"severity":"error","title":"Bug","suggestion":"Fix it","evidence":[{"observation":"Failure","source":"test.go:1"}],"prompt":"Add a regression test"}]}`, "failure"},
-		{`{"format":"mandatum.github.review.v1","summary":"Missing evidence","findings":[{"severity":"error"}]}`, "action_required"},
-	} {
-		fake := github.NewFake()
-		c, _ := github.New(github.Config{API: fake, Checks: true})
-		p, _ := json.Marshal(map[string]string{"text": tc.text})
-		if err := c.Deliver(context.Background(), address.MustParse("github://acme/repo/pull/1").WithParam("head_sha", commitSHA), event(1, envelope.KindCompleted, string(p))); err != nil {
-			t.Fatal(err)
-		}
-		if got := fake.Checks()[0].Check.Conclusion; got != tc.conclusion {
-			t.Fatalf("conclusion %s", got)
-		}
-	}
-}
-
 func TestCheckRecoveryUsesExternalIDAndNeverPatchesTheHead(t *testing.T) {
 	posts, patches := 0, 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,44 +71,6 @@ func TestCheckRecoveryUsesExternalIDAndNeverPatchesTheHead(t *testing.T) {
 	id, err := api.EnsureCheck(context.Background(), github.Ref{Owner: "acme", Repo: "repo", Number: 1}, github.Check{Name: "mandatum/reviewer", ExternalID: "run-1", HeadSHA: commitSHA, Status: "in_progress"})
 	if err != nil || id != 17 || posts != 0 || patches != 1 {
 		t.Fatalf("id=%d posts=%d patches=%d err=%v", id, posts, patches, err)
-	}
-}
-
-func TestLabeledPRCommitsTriggerPinnedReviews(t *testing.T) {
-	for _, tc := range []struct {
-		name, action, sender string
-		labels               []string
-		draft, want          bool
-	}{
-		{"new commit", "synchronize", "User", []string{"auto"}, false, true},
-		{"bot fix commit", "synchronize", "Bot", []string{"auto"}, false, true},
-		{"inactive", "synchronize", "User", nil, false, false},
-		{"draft", "synchronize", "User", []string{"auto"}, true, false},
-		{"bot mention loop", "opened", "Bot", []string{"auto"}, false, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c, tags := start(t, github.Config{AutoLabels: map[string]map[string]string{"acme/repo": {"auto": "reviewer"}}})
-			labels := []map[string]string{}
-			for _, l := range tc.labels {
-				labels = append(labels, map[string]string{"name": l})
-			}
-			raw, _ := json.Marshal(map[string]any{"action": tc.action, "repository": map[string]any{"name": "repo", "owner": map[string]string{"login": "acme"}}, "sender": map[string]string{"type": tc.sender}, "pull_request": map[string]any{"number": 42, "title": "Change", "state": "open", "draft": tc.draft, "labels": labels, "head": map[string]string{"sha": commitSHA}}})
-			w := httptest.NewRecorder()
-			c.ServeHTTP(w, deliver(t, "pull_request", "delivery", string(raw)))
-			if w.Code != 200 {
-				t.Fatalf("status %d", w.Code)
-			}
-			select {
-			case tag := <-tags:
-				if !tc.want || tag.Source.Params["head_sha"] != commitSHA || tag.Meta["github_head_sha"] != commitSHA || !strings.Contains(tag.Text, commitSHA) {
-					t.Fatalf("tag %+v", tag)
-				}
-			default:
-				if tc.want {
-					t.Fatal("missing review")
-				}
-			}
-		})
 	}
 }
 
@@ -181,24 +124,50 @@ func TestIssuesDoNotCreateCommitChecks(t *testing.T) {
 	}
 }
 
-func TestAutomaticCommitReviewIdentityIgnoresDeliveryRetries(t *testing.T) {
-	c, tags := start(t, github.Config{AutoLabels: map[string]map[string]string{"acme/repo": {"auto": "reviewer"}}})
-	raw := fmt.Sprintf(`{"action":"synchronize","repository":{"name":"repo","owner":{"login":"acme"}},"sender":{"type":"User"},"pull_request":{"number":42,"labels":[{"name":"auto"}],"head":{"sha":%q}}}`, commitSHA)
-	ids := []string{}
-	for _, delivery := range []string{"first", "second"} {
-		w := httptest.NewRecorder()
-		c.ServeHTTP(w, deliver(t, "pull_request", delivery, raw))
-		if w.Code != 200 {
-			t.Fatalf("status %d", w.Code)
-		}
-		select {
-		case tag := <-tags:
-			ids = append(ids, tag.ID)
-		default:
-			t.Fatal("missing tag")
-		}
-	}
-	if ids[0] != ids[1] {
-		t.Fatalf("one commit has two run identities: %v", ids)
+func TestCompletedChecksUseApplicationConclusionOrDefaultToNeutral(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, outcome, want string
+	}{
+		{"ordinary text", "Tests passed", "", "neutral"},
+		{"structured text", `{"format":"mandatum.github.review.v1","findings":[{"severity":"error"}]}`, "", "neutral"},
+		{"application success", "Application verified the result", "success", "success"},
+		{"application failure", "Application found a failure", "failure", "failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := github.NewFake()
+			calls := 0
+			cfg := github.Config{API: fake, Checks: true, Interval: -1}
+			if tc.outcome != "" {
+				cfg.Conclusion = func(v github.View) string {
+					calls++
+					if v.Status != github.StatusDone || v.Text != tc.text {
+						t.Errorf("unexpected conclusion view: %+v", v)
+					}
+					return tc.outcome
+				}
+			}
+			c, err := github.New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := address.MustParse("github://acme/repo/pull/42").WithParam("head_sha", commitSHA)
+			if err := c.Deliver(context.Background(), target, event(1, envelope.KindStarted, `{}`)); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 0 {
+				t.Fatal("conclusion callback ran before completion")
+			}
+			payload, _ := json.Marshal(map[string]string{"text": tc.text})
+			if err := c.Deliver(context.Background(), target, event(2, envelope.KindCompleted, string(payload))); err != nil {
+				t.Fatal(err)
+			}
+			checks := fake.Checks()
+			if len(checks) != 1 || checks[0].Check.Conclusion != tc.want || checks[0].Check.Status != "completed" {
+				t.Fatalf("checks = %+v; want completed/%s", checks, tc.want)
+			}
+			if tc.outcome != "" && calls != 1 {
+				t.Fatalf("conclusion callback calls = %d; want 1", calls)
+			}
+		})
 	}
 }

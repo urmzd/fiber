@@ -56,6 +56,11 @@ func (c *Connector) tagFrom(env eventEnvelope) (envelope.Tag, bool) {
 	if env.Type != "event_callback" {
 		return envelope.Tag{}, false
 	}
+	// One app's signing secret can authenticate multiple installations. A
+	// verified delivery still has to belong to this connector's workspace.
+	if c.cfg.Team != "" && env.TeamID != c.cfg.Team {
+		return envelope.Tag{}, false
+	}
 	ev := env.Event
 
 	switch ev.Type {

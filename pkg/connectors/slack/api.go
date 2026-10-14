@@ -10,9 +10,10 @@ import (
 )
 
 // API is the slice of Slack's Web API this connector uses: post a message, edit
-// it, react to one. Four endpoints, behind an interface, so that every decision
-// above the wire — which message a run owns, when to edit it, what the body says
-// — is tested without a network and without credentials.
+// it, react to one, report a session's status, register a channel's commands.
+// A handful of endpoints, behind an interface, so that every decision above the
+// wire — which message a run owns, when to edit it, what the body says — is
+// tested without a network and without credentials.
 //
 // Workspace is on every request so that an implementation serving several Slack
 // workspaces can choose a token per request. HTTPAPI holds one token and ignores
@@ -26,6 +27,19 @@ type API interface {
 	// AddReaction adds an emoji reaction to a message.
 	AddReaction(ctx context.Context, r Reaction) error
 }
+
+// AgentAPI is the optional agent-session capability, separate from messaging.
+type AgentAPI interface {
+	// SetStatus reports where an agent session stands, creating the session if
+	// the thread or code channel has none yet.
+	SetStatus(ctx context.Context, s Session) error
+	// SetCommands replaces this agent's slash commands in a code channel. An
+	// empty set clears them.
+	SetCommands(ctx context.Context, workspace, channel string, commands []Command) error
+}
+
+// MaxCommands is Slack's channel-wide limit on registered agent commands.
+const MaxCommands = 10
 
 // Message is a message to post or edit.
 type Message struct {
@@ -48,6 +62,44 @@ type Reaction struct {
 	TS string
 	// Name is the emoji name without colons ("eyes", not ":eyes:").
 	Name string
+}
+
+// Status is where an agent session stands, in Slack's vocabulary.
+type Status string
+
+// The statuses agents.sessions.setStatus accepts.
+const (
+	// StatusProcessing shows Slack's "Working…" indicator. Slack reverts it to
+	// active after an hour without a refresh.
+	StatusProcessing Status = "processing"
+	// StatusActive means the turn is over and the agent is ready for the next.
+	StatusActive Status = "active"
+	// StatusSuspended means the agent is blocked until a human acts.
+	StatusSuspended Status = "suspended"
+	// StatusClosed means the conversation is finished. It does not archive a
+	// code channel.
+	StatusClosed Status = "closed"
+)
+
+// Session is a status report for one agent session.
+type Session struct {
+	Workspace string
+	Channel   string
+	// ThreadTS scopes the session to a thread. Slack requires it in an ordinary
+	// channel or a DM and forbids it in a code channel, where the channel
+	// itself is the session.
+	ThreadTS string
+	Status   Status
+}
+
+// Command is a slash command an agent offers in a code channel.
+type Command struct {
+	// Name is the command without its leading slash: "create-pr".
+	Name string `json:"name"`
+	// Description is shown beside the command in Slack's typeahead. Required.
+	Description string `json:"description"`
+	// ArgumentHint describes what follows the command: "[title]".
+	ArgumentHint string `json:"argument_hint,omitempty"`
 }
 
 // SlackBaseURL is the Web API root.
@@ -135,6 +187,25 @@ func (a *HTTPAPI) AddReaction(ctx context.Context, r Reaction) error {
 		return nil
 	}
 	return err
+}
+
+// SetStatus implements API.
+func (a *HTTPAPI) SetStatus(ctx context.Context, s Session) error {
+	req := map[string]any{"channel_id": s.Channel, "status": string(s.Status)}
+	if s.ThreadTS != "" {
+		req["thread_ts"] = s.ThreadTS
+	}
+	return a.call(ctx, "/agents.sessions.setStatus", req, &response{})
+}
+
+// SetCommands implements API.
+func (a *HTTPAPI) SetCommands(ctx context.Context, _, channel string, commands []Command) error {
+	if commands == nil {
+		// Slack clears the set on an empty array and rejects a missing one.
+		commands = []Command{}
+	}
+	req := map[string]any{"channel_id": channel, "commands": commands}
+	return a.call(ctx, "/agents.conversations.setCommands", req, &response{})
 }
 
 func (a *HTTPAPI) call(ctx context.Context, path string, in any, out *response) error {
