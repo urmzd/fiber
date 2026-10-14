@@ -93,8 +93,9 @@
 //
 // Every model call is published as usage.call as it happens, and a run's
 // total, delegations included and every call of every attempt counted once,
-// is on its terminal event and its Output. A failed attempt's calls are kept
-// on the run in the ledger so the total counts them; a replay counts nothing.
+// is on its terminal event and its Output. Every attempt's calls are kept on
+// the run in the ledger before it returns, so a retried or re-executed
+// attempt's calls are counted; a replay counts nothing.
 // See usage.go.
 //
 // # Single goroutine
@@ -773,7 +774,10 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 	prior, priorAttempts := r.priorUsage(ctx, req.RunID, attempt)
 	meter := &meter{s: spent{Attempt: attempt}}
 
-	out, err := r.execute(ctx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
+	// A Delegator's report of a child run is checked against the ledger and
+	// its total read from there; see ReportChildUsage.
+	execCtx := context.WithValue(ctx, childUsageKey{}, r.childUsage(in.Tag.Tenant, req.RunID))
+	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
 		// A call is counted when it is reported, before it is published:
 		// the tokens were spent whether or not the bus takes the event.
 		meter.observe(c)
@@ -786,10 +790,13 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		return r.publishRaw(ctx, in, seq, c.Kind, c.Payload)
 	})
 	mine := meter.snapshot()
+	// The attempt spent what it spent. Its calls go on the run before the
+	// outcome goes up, whatever the outcome: a failure is retried, and a
+	// success whose record is never written (the ledger write fails, the
+	// worker dies before it) is executed again too. Either way the attempt
+	// that finally records an outcome reads these calls and counts them.
+	recorded := r.recordSpent(ctx, req.RunID, mine)
 	if err != nil {
-		// The attempt spent what it spent. Its calls go on the run before
-		// the failure goes up, so the attempt that finishes counts them.
-		r.recordSpent(ctx, req.RunID, mine)
 		return out, fmt.Errorf("runtime: run %s: agent %q revision %d: %w", req.RunID, rev.Spec.Name, rev.Rev, err)
 	}
 	var tally payload.Tally
@@ -797,10 +804,15 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		prior[i].into(&tally)
 	}
 	mine.into(&tally)
-	if usage := tally.Usage(); usage.Total != (payload.Usage{}) {
+	if usage := tally.Usage(); !usage.Total.IsZero() {
 		out.Usage = &usage
 	}
 	out.UsageAttempts = priorAttempts
+	if recorded {
+		// Claimed by a replay of this attempt's outcome; this attempt's own
+		// frame never loaded it, so it has nothing to claim yet.
+		out.UsageAttempts = append(out.UsageAttempts, attempt)
+	}
 	return out, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/urmzd/duraturo"
+	drun "github.com/urmzd/duraturo/pkg/run"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
@@ -85,14 +87,7 @@ func tallied(t *testing.T, events []envelope.Event) payload.RunUsage {
 	return tally.Usage()
 }
 
-func sameUsage(a, b payload.Usage) bool {
-	ac, bc := a.Cost, b.Cost
-	a.Cost, b.Cost = nil, nil
-	if a != b || (ac == nil) != (bc == nil) {
-		return false
-	}
-	return ac == nil || *ac == *bc
-}
+func sameUsage(a, b payload.Usage) bool { return reflect.DeepEqual(a, b) }
 
 func usageRecords(t *testing.T, w *world, runID string) []string {
 	t.Helper()
@@ -266,8 +261,10 @@ func TestARetriedAttemptsSpendIsCountedOnceAndAReplayAddsNothing(t *testing.T) {
 	if calls := usageOf(t, events); len(calls) != 2 || calls[0].AccountingID == calls[1].AccountingID {
 		t.Errorf("usage.call events = %+v, want one per call with distinct keys", calls)
 	}
-	if keys := usageRecords(t, w, runID); fmt.Sprint(keys) != "[event:mandatum.usage.a1#0]" {
-		t.Errorf("usage records = %v, want only the failed attempt's", keys)
+	// Each attempt that executed the agent recorded its calls; the replay
+	// executed nothing and recorded nothing.
+	if keys := usageRecords(t, w, runID); fmt.Sprint(keys) != "[event:mandatum.usage.a1#0 event:mandatum.usage.a2#0]" {
+		t.Errorf("usage records = %v, want the two attempts that called the model", keys)
 	}
 }
 
@@ -411,13 +408,11 @@ func TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting(t *testing.T) {
 		if err != nil {
 			return "", err
 		}
-		if out.Usage != nil {
-			// Reported twice, as a host that retried its report would: the
-			// parent counts the child once.
-			for range 2 {
-				if err := runtime.ReportChildUsage(ctx, acc.RunID, target, out.Usage.Total); err != nil {
-					return "", err
-				}
+		// Reported twice, as a host that retried its report would: the
+		// parent counts the child once.
+		for range 2 {
+			if err := runtime.ReportChildUsage(ctx, acc.RunID); err != nil {
+				return "", err
 			}
 		}
 		return out.Text, nil
@@ -536,8 +531,143 @@ func TestSubTaskCallsRollUpIntoTheRunThatDelegated(t *testing.T) {
 // ReportChildUsage is the Delegator's, and only its: outside a delegation
 // there is no parent to report to.
 func TestReportingAChildRunOutsideADelegationIsRefused(t *testing.T) {
-	err := runtime.ReportChildUsage(context.Background(), "r1", "helper", payload.Usage{ModelCalls: 1})
+	err := runtime.ReportChildUsage(context.Background(), "r1")
 	if !errors.Is(err, runtime.ErrInvalid) {
 		t.Fatalf("ReportChildUsage = %v, want ErrInvalid", err)
+	}
+}
+
+// dropsTheAgentsResult is a ledger whose first write of the agent's successful
+// result fails: the attempt answered, and duraturo never recorded it.
+type dropsTheAgentsResult struct {
+	durableLedger
+	mu      sync.Mutex
+	dropped bool
+}
+
+func (l *dropsTheAgentsResult) Record(ctx context.Context, rec drun.Record) (drun.Record, error) {
+	if rec.Name == runtime.ActivityAgent && rec.Status == drun.RecordOK {
+		l.mu.Lock()
+		first := !l.dropped
+		l.dropped = true
+		l.mu.Unlock()
+		if first {
+			return drun.Record{}, errors.New("ledger unavailable")
+		}
+	}
+	return l.durableLedger.Record(ctx, rec)
+}
+
+// An attempt that succeeded and whose result was never recorded is executed
+// again, so it paid for a call the outcome it returned will never carry. That
+// call is still counted: every attempt records its calls before it returns,
+// success or not, and the run's total equals its call events.
+func TestAnAttemptWhoseResultWasNeverRecordedIsStillCounted(t *testing.T) {
+	w := newWorld(t)
+	w.ledger = &dropsTheAgentsResult{durableLedger: w.ledger}
+	exec := &spender{}
+	rt := w.runtime(t, exec)
+	w.work(t, rt, nil)
+
+	runID := w.accept(t, rt, tag("docs-bot", "evt-1", "explain"))
+	out := w.result(t, rt, runID)
+
+	if n := exec.count(); n != 2 {
+		t.Fatalf("the executor ran %d times, want 2: the first result was never recorded", n)
+	}
+	events := w.bus.of(runID)
+	if calls := usageOf(t, events); len(calls) != 2 {
+		t.Fatalf("published %d usage.call events, want 2", len(calls))
+	}
+	if out.Usage == nil || out.Usage.Total.ModelCalls != 2 || out.Usage.Total.PromptTokens != 300 {
+		t.Fatalf("Output.Usage = %+v, want both attempts' calls", out.Usage)
+	}
+	if sum := tallied(t, events); !sameUsage(sum.Total, out.Usage.Total) {
+		t.Errorf("the call events add up to %+v, the run reports %+v", sum.Total, out.Usage.Total)
+	}
+}
+
+// A Delegator's report names a run and nothing else is taken from it. The
+// runtime reads the child from the ledger and refuses a run that does not
+// exist, another tenant's run, the parent itself and a run that has not ended,
+// so a host cannot put a figure on a run that no child spent.
+func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
+	w := newWorld(t)
+	w.concurrency = 4
+	w.specs.revise("lead", "Lead.")
+	w.specs.revise("helper", "Help.")
+	w.specs.mu.Lock()
+	w.specs.revs["lead"][0].Spec.Access.Spawn = []string{"helper"}
+	w.specs.mu.Unlock()
+
+	var rt *runtime.Runtime
+	refusals := map[string]error{}
+	var mu sync.Mutex
+	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
+		foreign := tag(target, "evt-foreign", "theirs")
+		foreign.Tenant = "globex"
+		facc, err := rt.Accept(ctx, foreign)
+		if err != nil {
+			return "", err
+		}
+		if _, err := rt.Result(ctx, facc.RunID); err != nil {
+			return "", err
+		}
+		pending := tag(target, "evt-pending", "later")
+		pacc, err := rt.Accept(context.WithoutCancel(ctx), pending)
+		if err != nil {
+			return "", err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for name, id := range map[string]string{
+			"unknown":        runtime.RunID("acme", "no-such-tag"),
+			"another tenant": facc.RunID,
+			"the parent":     parent.RunID,
+		} {
+			refusals[name] = runtime.ReportChildUsage(ctx, id)
+		}
+		// Not ended, unless a worker raced it to the end: only a refusal
+		// that says so counts.
+		if err := runtime.ReportChildUsage(ctx, pacc.RunID); err != nil {
+			refusals["not ended"] = err
+		}
+		return "nothing to roll up", nil
+	}
+	models := map[string]saigetypes.Provider{
+		"lead": priced(
+			spending(agenttest.ToolCallResponse("call-1", runtime.DelegateToolName("helper"), map[string]any{"text": "go"}), 100, 10),
+			spending(agenttest.TextResponse("Done."), 100, 10),
+		),
+		"helper": priced(spending(agenttest.TextResponse("Helped."), 30, 3), spending(agenttest.TextResponse("Helped."), 30, 3)),
+	}
+	rt = w.runtime(t, sandboxOf(t, w.specs, models, runtime.WithDelegator(delegate)))
+	w.work(t, rt, nil)
+
+	lead := w.accept(t, rt, tag("lead", "evt-1", "go"))
+	out := w.result(t, rt, lead)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, name := range []string{"unknown", "another tenant", "the parent"} {
+		if !errors.Is(refusals[name], runtime.ErrNotAChild) {
+			t.Errorf("reporting %s: %v, want ErrNotAChild", name, refusals[name])
+		}
+	}
+	if err, ok := refusals["not ended"]; ok && !errors.Is(err, runtime.ErrNotAChild) {
+		t.Errorf("reporting a run that has not ended: %v, want ErrNotAChild", err)
+	}
+	// Another tenant's run is refused in the same words as one that does
+	// not exist, apart from the id.
+	if a, b := fmt.Sprint(refusals["unknown"]), fmt.Sprint(refusals["another tenant"]); !strings.Contains(a, "no run") || !strings.Contains(b, "no run") {
+		t.Errorf("refusals = %q and %q, want both to read as no such run", a, b)
+	}
+	if out.Usage == nil || out.Usage.Children.ModelCalls != 0 || out.Usage.Own.ModelCalls != 2 {
+		t.Errorf("Output.Usage = %+v, want the lead's own calls and no children", out.Usage)
+	}
+	for _, e := range w.bus.of(lead) {
+		if e.Kind == envelope.KindUsageChild {
+			t.Fatalf("a refused report reached the parent's stream: %s", e.Payload)
+		}
 	}
 }

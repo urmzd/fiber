@@ -1,6 +1,7 @@
 package agentrt_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/urmzd/saige/agent/agenttest"
@@ -87,13 +88,12 @@ func TestEachModelCallIsPublishedWithSaigesFigures(t *testing.T) {
 	}
 	want := []payload.UsageCall{
 		{
-			AccountingID: "acct-1", Agent: "docs-bot", Model: "claude-test-0", Requests: 1,
+			// Keyed by the turn's own prefix; saige's id rides beside it.
+			AccountingID: "run-x/a1/1", SaigeAccountingID: "acct-1", Agent: "docs-bot", Model: "claude-test-0", Requests: 1,
 			PromptTokens: 12_000, CachedPromptTokens: 9_000, CacheWriteTokens: 1_000, CompletionTokens: 400,
 			Cost: cost(first), ContextWindow: 200_000,
 		},
 		{
-			// saige gave this call no key, so it is keyed under the turn's
-			// prefix by its position.
 			AccountingID: "run-x/a1/2", Agent: "docs-bot", Model: "claude-test", Requests: 1,
 			PromptTokens: 13_000, CachedPromptTokens: 12_000, CompletionTokens: 250,
 			Cost: cost(second), ContextWindow: 200_000,
@@ -197,19 +197,7 @@ func TestAResponseCacheHitSpendsNothing(t *testing.T) {
 }
 
 func equalCall(a, b payload.UsageCall) bool {
-	ac, bc := a.Cost, b.Cost
-	a.Cost, b.Cost = nil, nil
-	if a != b || (ac == nil) != (bc == nil) {
-		return false
-	}
-	return ac == nil || *ac == *bc
+	return reflect.DeepEqual(a, b)
 }
 
-func equalUsage(a, b payload.Usage) bool {
-	ac, bc := a.Cost, b.Cost
-	a.Cost, b.Cost = nil, nil
-	if a != b || (ac == nil) != (bc == nil) {
-		return false
-	}
-	return ac == nil || *ac == *bc
-}
+func equalUsage(a, b payload.Usage) bool { return reflect.DeepEqual(a, b) }

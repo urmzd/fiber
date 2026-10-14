@@ -206,9 +206,9 @@ type Turn struct {
 	// title). It is rendered into the prompt in sorted key order so the same
 	// tag produces the same prompt on every attempt.
 	Meta map[string]string
-	// Accounting is the prefix a model call's usage is keyed under when
-	// saige reports no AccountingID for it: "<prefix>/<n>" for the turn's
-	// nth call. The caller makes it unique to this execution (pkg/runtime
+	// Accounting is the prefix a model call's usage is keyed under:
+	// "<prefix>/<n>" for the turn's nth call. saige's own AccountingID, when
+	// it reports one, is carried beside it and not used as the key. The caller makes it unique to this execution (pkg/runtime
 	// uses the run, the attempt and the delegation path), which makes every
 	// call's key unique. Empty is DefaultAccounting.
 	Accounting string

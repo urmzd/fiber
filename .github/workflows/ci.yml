@@ -130,7 +130,9 @@ jobs:
             ["runtime", "TestAFailedRunsUsageIsReadFromTheLedger"],
             ["runtime", "TestAStoppedRunRecordsTheUsageItSpent"],
             ["runtime", "TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting"],
-            ["runtime", "TestSubTaskCallsRollUpIntoTheRunThatDelegated"]
+            ["runtime", "TestSubTaskCallsRollUpIntoTheRunThatDelegated"],
+            ["runtime", "TestAnAttemptWhoseResultWasNeverRecordedIsStillCounted"],
+            ["runtime", "TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt"]
           ] | all(. as $required | any($events[];
             .Action == "pass"
             and .Package == ("github.com/urmzd/mandatum/pkg/" + $required[0])

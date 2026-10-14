@@ -47,15 +47,15 @@ func newAccountant(prefix, agent, model string, provider saigetypes.Provider) *a
 // itself settles it.
 func (a *accountant) call(d saigetypes.UsageDelta) payload.UsageCall {
 	a.calls++
-	id := d.AccountingID
-	if id == "" {
-		id = a.prefix + "/" + strconv.Itoa(a.calls)
-	}
 	c := payload.UsageCall{
-		AccountingID:  id,
-		Agent:         a.agent,
-		Model:         firstNonEmpty(d.ResponseModel, a.model),
-		ContextWindow: a.caps.ContextWindow,
+		// Always this turn's own key, never saige's: saige keeps its id
+		// stable across a durable replay of its own, so two attempts' real
+		// calls could share it and be counted once.
+		AccountingID:      a.prefix + "/" + strconv.Itoa(a.calls),
+		SaigeAccountingID: d.AccountingID,
+		Agent:             a.agent,
+		Model:             firstNonEmpty(d.ResponseModel, a.model),
+		ContextWindow:     a.caps.ContextWindow,
 	}
 	if d.CacheHit {
 		c.ResponseCacheHit = true

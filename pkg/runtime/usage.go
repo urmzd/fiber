@@ -28,24 +28,30 @@ import (
 //
 // What is counted, across duraturo's retries and replays:
 //
-//   - Every model call any attempt made, once. An attempt that fails after
-//     spending tokens did spend them, so its calls are written to the ledger
-//     (usageRecordName) before the failure is returned, and the attempt that
-//     finally runs the agent to an outcome reads them and counts them with its
-//     own. The record is per attempt and write-once.
+//   - Every model call any attempt made, once. Each attempt writes the calls
+//     it relayed to the ledger (usageRecordName) before it returns, whether it
+//     failed or succeeded: a failure is retried, and so is a success whose
+//     record was never written. The attempt that finally records an outcome
+//     reads the earlier attempts' records and counts them with its own. The
+//     record is per attempt and write-once.
 //   - Nothing for a replay. The agent activity's outcome is memoized, so a
 //     replay of the workflow body reads the recorded total and calls no model.
 //   - A child run once, however many attempts of the parent asked for it: its
 //     report is keyed by the child's run id.
 //
-// Keys come from saige (UsageDelta.AccountingID) when it reports one, and are
-// otherwise "<run>/a<attempt>[/<agent>.<sub>...]/<n>", which no other call of
-// any attempt can share. payload.Tally counts each key once, which is what
-// makes a report delivered or relayed twice harmless.
+// Keys are "<run>/a<attempt>[/<agent>.<sub>...]/<n>", which no other call of
+// any attempt can share. saige's own AccountingID is carried beside it and
+// never counted by. payload.Tally counts each key once, which is what makes a
+// report delivered or relayed twice harmless.
 //
-// The failed attempts' records need the ledger the runs execute from
-// (WithStopLedger). Without it the total counts the attempt that produced the
-// outcome and the per-call events still report every call.
+// What is not counted: an attempt that dies without returning (a crash, a
+// worker killed mid-turn) writes no record, so its calls are on the bus and
+// not in the total; and a superseded attempt that keeps running after another
+// has taken the run over may record after the run's outcome read the records.
+//
+// The records need the ledger the runs execute from (WithStopLedger). Without
+// it the total counts the attempt that produced the outcome and the per-call
+// events still report every call.
 
 // usageRecordName is the ledger record an attempt that failed after spending
 // tokens writes its calls to: "mandatum.usage.a<attempt>", as an event record
@@ -165,12 +171,12 @@ func usageRecords(records []run.Record) []spent {
 	return out
 }
 
-// recordSpent writes what a failed attempt spent on the run, so the attempt
-// that finally produces the outcome counts it. Write-once: a second write for
-// the same attempt keeps the first.
-func (r *Runtime) recordSpent(ctx context.Context, runID string, s spent) {
+// recordSpent writes what an attempt spent on the run, so the attempt that
+// finally records an outcome counts it, and reports whether the record is
+// there. Write-once: a second write for the same attempt keeps the first.
+func (r *Runtime) recordSpent(ctx context.Context, runID string, s spent) bool {
 	if r.stops == nil || s.empty() {
-		return
+		return false
 	}
 	body, err := json.Marshal(s)
 	if err == nil {
@@ -181,9 +187,11 @@ func (r *Runtime) recordSpent(ctx context.Context, runID string, s spent) {
 		})
 	}
 	if err != nil && !errors.Is(err, run.ErrAlreadyRecorded) {
-		r.logger.Warn("mandatum/runtime: could not record the usage of a failed attempt; the run's total will not count it",
+		r.logger.Warn("mandatum/runtime: could not record an attempt's usage; if the attempt is executed again its calls are not in the total",
 			"run_id", runID, "attempt", s.Attempt, "calls", len(s.Calls), "error", err)
+		return false
 	}
+	return true
 }
 
 // claimUsage reads, from the workflow body, the usage records the agent's
@@ -235,36 +243,93 @@ func RecordedUsage(records []run.Record) (payload.RunUsage, bool) {
 // is put on the parent's stream.
 type usageReporterKey struct{}
 
+// childUsageKey carries, on the context an Executor is called with, how a
+// child run reported by a Delegator is checked and read: see ReportChildUsage.
+type childUsageKey struct{}
+
+// childUsageOf returns the check the runtime put on ctx, or nil.
+func childUsageOf(ctx context.Context) func(context.Context, string) (payload.UsageChild, error) {
+	f, _ := ctx.Value(childUsageKey{}).(func(context.Context, string) (payload.UsageChild, error))
+	return f
+}
+
+// ErrNotAChild reports a run a Delegator cannot roll up: not in the ledger,
+// another tenant's, the parent itself, or not ended yet.
+var ErrNotAChild = errors.New("runtime: not a child run that can be rolled up")
+
+// childUsage reads a child run's total from the ledger for the parent run
+// executing under tenant, and refuses anything it cannot vouch for. Nothing the
+// host says about the child is trusted but its run id: the run must exist in
+// the ledger, belong to the parent's tenant, not be the parent, and have
+// ended, and its total and agent are read from its own record. Another
+// tenant's run is refused with the same error as a run that does not exist.
+func (r *Runtime) childUsage(tenant, parentRunID string) func(context.Context, string) (payload.UsageChild, error) {
+	return func(ctx context.Context, runID string) (payload.UsageChild, error) {
+		runID = strings.TrimSpace(runID)
+		if r.stops == nil {
+			return payload.UsageChild{}, fmt.Errorf("%w: rolling up a child run needs the run ledger (WithStopLedger)", ErrNotAChild)
+		}
+		if runID == "" || runID == parentRunID {
+			return payload.UsageChild{}, fmt.Errorf("%w: %q", ErrNotAChild, runID)
+		}
+		rec, records, err := r.stops.Load(ctx, runID)
+		switch {
+		case errors.Is(err, run.ErrNotFound):
+			return payload.UsageChild{}, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
+		case err != nil:
+			return payload.UsageChild{}, fmt.Errorf("runtime: read child run %s: %w", runID, err)
+		}
+		var in Input
+		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+			return payload.UsageChild{}, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
+		}
+		if !rec.Status.Terminal() {
+			return payload.UsageChild{}, fmt.Errorf("%w: run %q has not ended", ErrNotAChild, runID)
+		}
+		var total payload.Usage
+		if rec.Status == run.StatusSucceeded {
+			var out Output
+			if err := json.Unmarshal(rec.Output, &out); err == nil && out.Usage != nil {
+				total = out.Usage.Total
+			}
+		} else if u, ok := RecordedUsage(records); ok {
+			total = u.Total
+		}
+		return payload.UsageChild{
+			AccountingID: payload.ChildRunAccountingID(runID),
+			RunID:        runID,
+			Agent:        in.Tag.Agent,
+			Depth:        1,
+			Usage:        total,
+		}, nil
+	}
+}
+
 // ReportChildUsage rolls a child run up into the run whose turn delegated to
-// it. A Delegator calls it with the context it was given once the run it
-// started for the delegation has ended, with that run's total
-// (Output.Usage.Total, or RecordedUsage for a run that failed):
+// it. A Delegator calls it with the context it was given, once the run it
+// started for the delegation has ended:
 //
 //	out, err := rt.Result(ctx, childRunID)
 //	...
-//	err = runtime.ReportChildUsage(ctx, childRunID, target, out.Usage.Total)
+//	err = runtime.ReportChildUsage(ctx, childRunID)
 //
-// It publishes a usage.child event on the parent's stream, and the parent's
-// total counts it in Children. A child is counted once however many times it
-// is reported, keyed by its run id, so a parent attempt that delegates again
-// after a retry, and joins the same child run, does not count it twice.
+// Only the run id is taken from the host. The runtime reads the child from the
+// ledger, refuses it with ErrNotAChild unless it is a run of the parent's
+// tenant other than the parent that has ended, and reads its total (its own
+// calls and everything it delegated) from its record. It then publishes a
+// usage.child event on the parent's stream, and the parent's total counts it
+// in Children: once, however many times it is reported or however many
+// attempts of the parent delegated to it, keyed by its run id.
 //
-// It returns ErrInvalid outside a Delegator's context.
-func ReportChildUsage(ctx context.Context, runID, agent string, total payload.Usage) error {
-	report, ok := ctx.Value(usageReporterKey{}).(func(payload.UsageChild) error)
+// It needs the runtime to have the run ledger (WithStopLedger) and the
+// executor to be a Sandbox. It returns ErrInvalid outside a Delegator's
+// context.
+func ReportChildUsage(ctx context.Context, runID string) error {
+	report, ok := ctx.Value(usageReporterKey{}).(func(context.Context, string) error)
 	if !ok || report == nil {
 		return fmt.Errorf("%w: ReportChildUsage is called with the context a Delegator was given", ErrInvalid)
 	}
-	if strings.TrimSpace(runID) == "" {
-		return fmt.Errorf("%w: a child run's usage needs its run id", ErrInvalid)
-	}
-	return report(payload.UsageChild{
-		AccountingID: payload.ChildRunAccountingID(runID),
-		RunID:        runID,
-		Agent:        agent,
-		Depth:        1,
-		Usage:        total,
-	})
+	return report(ctx, runID)
 }
 
 // relayUsage rewrites a usage chunk that came up from a delegated sub-task so

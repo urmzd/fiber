@@ -168,6 +168,9 @@ type turn struct {
 	// stopped is the stop request the turn was handed, once it has been: how
 	// a delegation the stop cancels learns that it was a stop.
 	stopped atomic.Pointer[agentrt.Stop]
+	// childUsage checks and reads a child run a Delegator reports, from the
+	// runtime executing the turn. Nil when the runtime offered none.
+	childUsage func(context.Context, string) (payload.UsageChild, error)
 }
 
 // SandboxOption configures a Sandbox.
@@ -332,7 +335,7 @@ func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Co
 	// type: the channel holds the request until the turn reads it, so a
 	// request that arrives before the task has been picked up is not lost to
 	// timing.
-	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), abort: make(chan struct{})}); err != nil {
+	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx)}); err != nil {
 		return Outcome{}, err
 	}
 	// Detaching aborts the task if it is still running, which it is on every
@@ -738,7 +741,8 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 // are relayed onto the parent's stream as usage.call events one level deeper,
 // as they happen, so they are counted in the parent run's total (as Children)
 // whether the child answers, fails or is aborted. A host Delegator reports the
-// run it started with ReportChildUsage, from the context it is given.
+// run it started with ReportChildUsage, from the context it is given, and the
+// runtime reads that run's total from the ledger.
 func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, report func(payload.Action) error, send func(agentrt.Chunk) error) saigetypes.Tool {
 	return &saigetypes.ToolFunc{
 		Def: saigetypes.ToolDef{
@@ -763,7 +767,15 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			if s.delegator != nil && parent.RunID != "" {
 				dctx, done := s.delegationContext(ctx, parent.RunID)
 				defer done()
-				dctx = context.WithValue(dctx, usageReporterKey{}, func(c payload.UsageChild) error {
+				dctx = context.WithValue(dctx, usageReporterKey{}, func(ctx context.Context, runID string) error {
+					t := s.turn(parent.RunID)
+					if t == nil || t.childUsage == nil {
+						return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
+					}
+					c, err := t.childUsage(ctx, runID)
+					if err != nil {
+						return err
+					}
 					body, err := payload.Encode(c)
 					if err != nil {
 						return err
