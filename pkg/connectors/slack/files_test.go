@@ -115,8 +115,7 @@ func mentionWithFiles(base string) string {
 func TestFilesOnAMentionBecomeTheTagsAttachmentsInOrder(t *testing.T) {
 	store := blob.NewMemory()
 	api := slack.NewFake()
-	var srv *fileServer
-	srv = serveFiles(t, map[string]string{
+	srv := serveFiles(t, map[string]string{
 		"/files-pri/T01-F01SHOT/download/dashboard.png": pngBytes,
 		"/files-pri/T01-F02CLIP/audio_message.m4a":      m4aBytes,
 		"/files-pri/T01-F03DENY/download/notes.pdf":     signIn,
