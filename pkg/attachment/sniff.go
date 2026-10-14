@@ -84,7 +84,10 @@ func KindOf(mediaType string) Kind {
 //
 // Known limits, stated rather than hidden. An MP4 container holding only
 // audio is reported by its brand, so a voice clip saved as .mp4 with a
-// generic brand is video/mp4; a transcriber handles both. Text is recognized
+// generic brand is video/mp4 unless its name ends in .m4a; a transcriber
+// handles both. A WebM is audio when the codecs named in its first bytes are
+// all audio ones, which holds for recordings browsers make and is not a
+// parse of the container. Text is recognized
 // by the absence of binary bytes in the sniffed prefix, so a resolver must
 // still check the whole content before treating it as text.
 func Sniff(head []byte, name string) string {
@@ -93,6 +96,9 @@ func Sniff(head []byte, name string) string {
 	}
 	ext := strings.ToLower(path.Ext(name))
 	if mt := sniffSignature(head); mt != "" {
+		if refined, ok := audioOnly[mt][ext]; ok {
+			return refined
+		}
 		return mt
 	}
 	mt, _, _ := strings.Cut(http.DetectContentType(head), ";")
@@ -131,6 +137,16 @@ var textTypes = map[string]string{
 	".svg": "application/xml",
 }
 
+// audioOnly refines a media container already proven by its signature when
+// the extension names the audio-only form of that same container: a voice
+// clip saved as .m4a with a generic MP4 brand, or a .weba. The container is
+// the same either way, so the name decides only which of its two uses this
+// file is, never what kind of bytes it holds.
+var audioOnly = map[string]map[string]string{
+	"video/mp4":  {".m4a": "audio/mp4"},
+	"video/webm": {".weba": "audio/webm"},
+}
+
 // zipTypes refines content already proven to be a ZIP container.
 var zipTypes = map[string]string{
 	".docx": TypeDOCX, ".xlsx": TypeXLSX, ".pptx": TypePPTX,
@@ -149,6 +165,13 @@ func sniffSignature(b []byte) string {
 	case has(0, "\x1a\x45\xdf\xa3"):
 		// EBML. The doctype string follows within the header.
 		if bytes.Contains(b, []byte("webm")) {
+			// A recording made by a browser, such as a voice clip, names
+			// its codecs in the track entries near the front. Audio codecs
+			// and no video codec there is an audio file in a WebM
+			// container.
+			if hasAny(b, "A_OPUS", "A_VORBIS") && !hasAny(b, "V_VP8", "V_VP9", "V_AV1") {
+				return "audio/webm"
+			}
 			return "video/webm"
 		}
 		return "video/x-matroska"
@@ -221,4 +244,13 @@ func isoBrand(brand string) string {
 		return "video/3gpp"
 	}
 	return "video/mp4"
+}
+
+func hasAny(b []byte, subs ...string) bool {
+	for _, s := range subs {
+		if bytes.Contains(b, []byte(s)) {
+			return true
+		}
+	}
+	return false
 }
