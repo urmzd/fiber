@@ -242,24 +242,6 @@ func (g *compactionGuard) after(_ context.Context, ev *saige.CompactionEvent) er
 	return nil
 }
 
-// addUsage folds one model call's usage into a turn's total.
-//
-// saige reports usage once per completed provider request, already merged, so
-// each delta is one call. A response served from saige's response cache
-// repeats the token counts of the call it replayed; those tokens were not
-// spent again and are left out.
-func addUsage(u payload.Usage, d saigetypes.UsageDelta) payload.Usage {
-	u.ModelCalls++
-	if d.CacheHit {
-		return u
-	}
-	u.PromptTokens += d.PromptTokens
-	u.CachedPromptTokens += d.CachedPromptTokens
-	u.CacheWriteTokens += d.CacheWriteTokens
-	u.CompletionTokens += d.CompletionTokens
-	return u
-}
-
 // compactionRecord reduces saige's compaction record to the facts a caller
 // can act on. The node ids it drops name messages in a conversation tree that
 // does not outlive the turn.

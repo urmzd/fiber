@@ -59,11 +59,12 @@ func TestOfflineProviderStreamsAScriptedTurn(t *testing.T) {
 	if res.Text != "the docs are updated" {
 		t.Errorf("answer is %q, want %q", res.Text, "the docs are updated")
 	}
-	if len(got) != 1 || got[0].Kind != envelope.KindText {
-		t.Fatalf("got %d chunks (%v), want one text chunk", len(got), kinds(got))
+	// The answer, then the one model call's usage.
+	if len(got) != 2 || got[0].Kind != envelope.KindText || got[1].Kind != envelope.KindUsageCall {
+		t.Fatalf("got %d chunks (%v), want a text chunk and a usage.call", len(got), kinds(got))
 	}
-	if res.Chunks != 1 {
-		t.Errorf("Result.Chunks is %d, want 1", res.Chunks)
+	if res.Chunks != 2 {
+		t.Errorf("Result.Chunks is %d, want 2", res.Chunks)
 	}
 }
 
