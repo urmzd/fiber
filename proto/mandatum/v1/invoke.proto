@@ -163,9 +163,45 @@ message Tag {
   // and is worth being able to measure.
   google.protobuf.Timestamp at = 9;
 
+  // Attachments are the files that arrived with the tag, in the order the
+  // surface listed them. Each is a reference to content already in the
+  // server's blob store under the caller's tenant, never the bytes: a tag is
+  // the durable input of a run and is replayed on every attempt, so it has to
+  // stay small. A reference to a blob the tenant does not hold is rejected.
+  repeated Attachment attachments = 10;
+
   // Reserved for growth. Note that tenant will never be carved from this range:
   // see the message comment.
-  reserved 10 to 24;
+  reserved 11 to 24;
+}
+
+// Attachment is a reference to one stored file. The digest is the identity:
+// the same bytes uploaded twice are one blob, and a run that is replayed reads
+// exactly the bytes its first attempt read.
+message Attachment {
+  // Digest is the lowercase hex SHA-256 of the content.
+  string digest = 1;
+
+  // MediaType is the type detected from the content when it was stored. It is
+  // a hint for display: the server sniffs the stored bytes again before a
+  // model sees them and does not trust this field.
+  string media_type = 2;
+
+  // Name is the file name the surface gave, for display.
+  string name = 3;
+
+  // Size is the content length in bytes.
+  int64 size = 4;
+
+  // Origin is where the file was attached, when that differs from the tag's
+  // source or is worth citing.
+  Address origin = 5;
+
+  // Alt is the uploader's description of the file, if the surface has one.
+  string alt = 6;
+
+  // Reserved for growth.
+  reserved 7 to 15;
 }
 
 // InvokeResponse acknowledges an accepted tag. It returns as soon as the run is

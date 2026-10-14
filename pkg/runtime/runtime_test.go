@@ -146,6 +146,11 @@ type executor struct {
 	err      error
 	failures int
 	answer   string
+	// hook, when set, runs at the start of every execution, before anything
+	// is emitted. A test uses it to change the world between two attempts.
+	hook func(runtime.Request)
+	// prompt, when set, is what the executor reports having sent the model.
+	prompt func(runtime.Request) string
 }
 
 func newExecutor(answer string, chunks ...agentrt.Chunk) *executor {
@@ -174,6 +179,7 @@ func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(c
 	e.runs++
 	e.requests = append(e.requests, req)
 	chunks, failure, answer := e.chunks, e.err, e.answer
+	hook, prompt := e.hook, e.prompt
 	// A budgeted failure is spent here, so the next attempt succeeds without
 	// anyone having to heal the executor from outside.
 	if e.failures > 0 {
@@ -184,6 +190,9 @@ func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(c
 	}
 	e.mu.Unlock()
 
+	if hook != nil {
+		hook(req)
+	}
 	for _, c := range chunks {
 		if err := emit(ctx, c); err != nil {
 			return runtime.Outcome{}, err
@@ -192,7 +201,11 @@ func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(c
 	if failure != nil {
 		return runtime.Outcome{}, failure
 	}
-	return runtime.Outcome{Text: answer, Chunks: len(chunks)}, nil
+	out := runtime.Outcome{Text: answer, Chunks: len(chunks)}
+	if prompt != nil {
+		out.Prompt = prompt(req)
+	}
+	return out, nil
 }
 
 func (e *executor) count() int {
@@ -274,41 +287,115 @@ func tag(agent, id, text string) envelope.Tag {
 
 // ── tests ───────────────────────────────────────────────────────────
 
-// A run's identity is the tag's identity, so a redelivery joins the run it
-// duplicated. A tag id that cannot be a topic segment is hashed rather than
-// rewritten, because two distinct ids collapsing onto one run is the one failure
-// idempotency cannot survive.
-func TestRunIDPreservesTagIdentity(t *testing.T) {
+// A run's identity is a function of the tenant and the tag id, and of nothing
+// else: a redelivery lands on the run it duplicated, any tag id becomes a
+// usable topic segment, and distinct inputs never share a run.
+func TestRunIDIsADeterministicTopicSafeFunctionOfTenantAndTagID(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name  string
-		tagID string
-		want  string
-	}{
-		{"a slack event id is already topic safe", "Ev01ABCDEF", "Ev01ABCDEF"},
-		{"a github delivery guid is topic safe", "72d3162e-cc78-11e3-81ab-4c9367dc0958", "72d3162e-cc78-11e3-81ab-4c9367dc0958"},
+	ids := []string{"Ev01ABCDEF", "72d3162e-cc78-11e3-81ab-4c9367dc0958", "slack:1699123456.001", "a/b", "spaces here", "üñî", ""}
+	seen := map[string]string{}
+	for _, tenant := range []string{"acme", "globex"} {
+		for _, id := range ids {
+			got := runtime.RunID(tenant, id)
+			if _, err := topic.Run("docs-bot", got); err != nil {
+				t.Errorf("RunID(%q, %q) is %q, which is not a usable topic segment: %v", tenant, id, got, err)
+			}
+			if runtime.RunID(tenant, id) != got {
+				t.Errorf("RunID(%q, %q) is not deterministic", tenant, id)
+			}
+			if other, clash := seen[got]; clash {
+				t.Errorf("RunID(%q, %q) and RunID(%s) both produced %q", tenant, id, other, got)
+			}
+			seen[got] = fmt.Sprintf("%q, %q", tenant, id)
+		}
 	}
-	for _, tc := range tests {
-		if got := runtime.RunID(tc.tagID); got != tc.want {
-			t.Errorf("%s: RunID(%q) is %q, want %q", tc.name, tc.tagID, got, tc.want)
+}
+
+// The tenant and the tag id are separate fields, not one string. Moving a
+// character from one to the other must change the run, or a tenant could pick a
+// tag id that lands on a neighbour's.
+func TestRunIDKeepsTheTenantAndTheTagIDApart(t *testing.T) {
+	t.Parallel()
+
+	pairs := [][2][2]string{
+		{{"a_b", "c"}, {"a", "b_c"}},
+		{{"ab", "c"}, {"a", "bc"}},
+		{{"acme", ""}, {"", "acme"}},
+		{{"acme-globex", "Ev1"}, {"acme", "globex-Ev1"}},
+	}
+	for _, p := range pairs {
+		if a, b := runtime.RunID(p[0][0], p[0][1]), runtime.RunID(p[1][0], p[1][1]); a == b {
+			t.Errorf("RunID(%q, %q) and RunID(%q, %q) are both %q", p[0][0], p[0][1], p[1][0], p[1][1], a)
+		}
+	}
+}
+
+// Two tenants are free to raise tags with the same id: a tag id is whatever
+// the caller sent. Each gets its own run, on its own topic, carrying its own
+// tenant and its own request. Neither joins the other's, and neither learns
+// from its acceptance that the other exists.
+func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, newExecutor("ok"))
+	h.specs.revise("docs-bot", "v1")
+
+	first := tag("docs-bot", "Ev-shared", "acme's question")
+	second := tag("docs-bot", "Ev-shared", "globex's question")
+	second.Tenant = "globex"
+
+	a, err := h.rt.Accept(context.Background(), first)
+	if err != nil {
+		t.Fatalf("accept for acme: %v", err)
+	}
+	b, err := h.rt.Accept(context.Background(), second)
+	if err != nil {
+		t.Fatalf("accept for globex: %v", err)
+	}
+	if a.RunID == b.RunID {
+		t.Fatalf("both tenants were given run %q", a.RunID)
+	}
+	if a.Topic.String() == b.Topic.String() {
+		t.Fatalf("both tenants were given topic %q", a.Topic)
+	}
+
+	for _, want := range []struct {
+		runID  string
+		tenant string
+		text   string
+	}{{a.RunID, "acme", "acme's question"}, {b.RunID, "globex", "globex's question"}} {
+		rec, err := h.ledger.GetRun(context.Background(), want.runID)
+		if err != nil {
+			t.Fatalf("run %s: %v", want.runID, err)
+		}
+		var in runtime.Input
+		if err := json.Unmarshal(rec.Input, &in); err != nil {
+			t.Fatalf("decode run %s: %v", want.runID, err)
+		}
+		if in.Tag.Tenant != want.tenant || in.Tag.Text != want.text {
+			t.Errorf("run %s holds tenant %q text %q, want %q %q", want.runID, in.Tag.Tenant, in.Tag.Text, want.tenant, want.text)
+		}
+	}
+	for _, e := range h.bus.all() {
+		switch e.RunID {
+		case a.RunID:
+			if e.Tenant != "acme" {
+				t.Errorf("acme's run published an event for tenant %q", e.Tenant)
+			}
+		case b.RunID:
+			if e.Tenant != "globex" {
+				t.Errorf("globex's run published an event for tenant %q", e.Tenant)
+			}
+		default:
+			t.Errorf("an event was published for unknown run %q", e.RunID)
 		}
 	}
 
-	awkward := []string{"slack:1699123456.001", "a/b", "spaces here", "üñî"}
-	seen := map[string]string{}
-	for _, id := range awkward {
-		got := runtime.RunID(id)
-		if _, err := topic.Run("docs-bot", got); err != nil {
-			t.Errorf("RunID(%q) is %q, which is not a usable topic segment: %v", id, got, err)
-		}
-		if runtime.RunID(id) != got {
-			t.Errorf("RunID(%q) is not deterministic", id)
-		}
-		if other, clash := seen[got]; clash {
-			t.Errorf("RunID(%q) and RunID(%q) both produced %q", id, other, got)
-		}
-		seen[got] = id
+	// A redelivery within a tenant still joins that tenant's run.
+	again, err := h.rt.Accept(context.Background(), first)
+	if err != nil || again.RunID != a.RunID {
+		t.Errorf("acme's redelivery got run %q, %v; want %q", again.RunID, err, a.RunID)
 	}
 }
 
@@ -846,7 +933,7 @@ func TestAnUnknownAgentIsRefusedAtAcceptTime(t *testing.T) {
 	if got := len(h.bus.all()); got != 0 {
 		t.Errorf("%d events were published for a refused tag, want none", got)
 	}
-	if got, err := h.ledger.GetRun(context.Background(), runtime.RunID("Ev-x")); err == nil {
+	if got, err := h.ledger.GetRun(context.Background(), runtime.RunID("acme", "Ev-x")); err == nil {
 		t.Errorf("a run %+v was accepted for an unknown agent", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -32,19 +33,28 @@ func spec(name, prompt string) agentspec.AgentSpec {
 
 // newStore returns a store whose clock advances a second per read, so that
 // CreatedAt is deterministic and still strictly increasing.
-func newStore(t *testing.T) *registry.Memory {
+//
+// Which store is decided by the environment, not by the test: every property
+// in this file is a property of the Store contract, so the suite runs unchanged
+// against Postgres when $MANDATUM_POSTGRES_TEST_URL names one (see
+// postgres_test.go) and against Memory otherwise.
+func newStore(t *testing.T) registry.Store {
 	t.Helper()
 	var mu sync.Mutex
 	at := time.Date(2026, 7, 25, 0, 0, 0, 0, time.UTC)
-	return registry.NewMemory(registry.WithClock(func() time.Time {
+	clock := registry.WithClock(func() time.Time {
 		mu.Lock()
 		defer mu.Unlock()
 		at = at.Add(time.Second)
 		return at
-	}))
+	})
+	if url := os.Getenv(postgresEnv); url != "" {
+		return newPostgres(t, url, clock)
+	}
+	return registry.NewMemory(clock)
 }
 
-func mustCreate(t *testing.T, s *registry.Memory, tenant, name, prompt string) agentspec.Revision {
+func mustCreate(t *testing.T, s registry.Store, tenant, name, prompt string) agentspec.Revision {
 	t.Helper()
 	rev, err := s.Create(context.Background(), tenant, spec(name, prompt), "ada")
 	if err != nil {
@@ -53,7 +63,7 @@ func mustCreate(t *testing.T, s *registry.Memory, tenant, name, prompt string) a
 	return rev
 }
 
-func mustRevise(t *testing.T, s *registry.Memory, tenant, name, prompt string, expected int) agentspec.Revision {
+func mustRevise(t *testing.T, s registry.Store, tenant, name, prompt string, expected int) agentspec.Revision {
 	t.Helper()
 	rev, err := s.Revise(context.Background(), tenant, spec(name, prompt), expected, "grace")
 	if err != nil {
@@ -241,7 +251,7 @@ func TestTenantsAreIsolated(t *testing.T) {
 	}
 
 	// Deleting in one tenant does not touch the other.
-	if err := s.Delete(ctx, tenantB, "docs-bot"); err != nil {
+	if err := s.Delete(ctx, tenantB, "docs-bot", 0); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if _, err := s.Get(ctx, tenantA, "docs-bot", 0); err != nil {
@@ -278,7 +288,7 @@ func TestDeleteTombstonesButPinnedRevisionsStillResolve(t *testing.T) {
 
 	pinned := mustCreate(t, s, tenantA, "docs-bot", "v1")
 	mustRevise(t, s, tenantA, "docs-bot", "v2", 1)
-	if err := s.Delete(ctx, tenantA, "docs-bot"); err != nil {
+	if err := s.Delete(ctx, tenantA, "docs-bot", 0); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
@@ -289,7 +299,7 @@ func TestDeleteTombstonesButPinnedRevisionsStillResolve(t *testing.T) {
 	if _, err := s.Revise(ctx, tenantA, spec("docs-bot", "v3"), 0, "ada"); !errors.Is(err, registry.ErrNotFound) {
 		t.Fatalf("Revise after delete = %v, want ErrNotFound", err)
 	}
-	if err := s.Delete(ctx, tenantA, "docs-bot"); !errors.Is(err, registry.ErrNotFound) {
+	if err := s.Delete(ctx, tenantA, "docs-bot", 0); !errors.Is(err, registry.ErrNotFound) {
 		t.Fatalf("second Delete = %v, want ErrNotFound", err)
 	}
 	revs, _, err := s.List(ctx, tenantA, registry.Page{})
@@ -313,6 +323,88 @@ func TestDeleteTombstonesButPinnedRevisionsStillResolve(t *testing.T) {
 	}
 }
 
+// A retirement that names the revision it was approved against refuses to
+// retire anything else. The agent stays live at the revision nobody approved
+// retiring, and a retirement that names the right one still works.
+func TestDeleteWithAnExpectedRevRefusesToRetireANewerOne(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	mustCreate(t, s, tenantA, "docs-bot", "v1")
+	mustRevise(t, s, tenantA, "docs-bot", "v2", 1)
+
+	if err := s.Delete(ctx, tenantA, "docs-bot", 1); !errors.Is(err, registry.ErrConflict) {
+		t.Fatalf("Delete(expected 1) at revision 2: got %v, want ErrConflict", err)
+	}
+	if got, err := s.Get(ctx, tenantA, "docs-bot", 0); err != nil || got.Rev != 2 {
+		t.Fatalf("a refused retirement changed the agent: rev %d, %v", got.Rev, err)
+	}
+	if err := s.Delete(ctx, tenantA, "docs-bot", -1); !errors.Is(err, registry.ErrInvalid) {
+		t.Errorf("Delete(expected -1): got %v, want ErrInvalid", err)
+	}
+	if err := s.Delete(ctx, tenantA, "docs-bot", 2); err != nil {
+		t.Fatalf("Delete(expected 2) at revision 2: %v", err)
+	}
+	if _, err := s.Get(ctx, tenantA, "docs-bot", 0); !errors.Is(err, registry.ErrNotFound) {
+		t.Errorf("the agent is still live after its retirement: %v", err)
+	}
+}
+
+// The check and the retirement are one step. Race a retirement approved at
+// revision N against a revise to N+1: either the retirement wins and the
+// revise finds nothing to revise, or the revise wins and the retirement is
+// refused. What can never happen is both succeeding, which would retire a
+// revision nobody approved retiring.
+func TestAGuardedDeleteNeverRetiresARevisionThatRacedPastIt(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	for round := range 40 {
+		name := fmt.Sprintf("racer-%02d", round)
+		mustCreate(t, s, tenantA, name, "v1")
+
+		var (
+			wg                   sync.WaitGroup
+			deleteErr, reviseErr error
+			start                = make(chan struct{})
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			deleteErr = s.Delete(ctx, tenantA, name, 1)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, reviseErr = s.Revise(ctx, tenantA, spec(name, "v2"), 1, "grace")
+		}()
+		close(start)
+		wg.Wait()
+
+		switch {
+		case deleteErr == nil && reviseErr == nil:
+			t.Fatalf("round %d: the retirement approved at revision 1 succeeded and so did a revise to 2", round)
+		case deleteErr == nil:
+			if !errors.Is(reviseErr, registry.ErrNotFound) {
+				t.Fatalf("round %d: retirement won, revise got %v, want ErrNotFound", round, reviseErr)
+			}
+			history, err := s.History(ctx, tenantA, name)
+			if err != nil || len(history) != 1 {
+				t.Fatalf("round %d: retired agent has %d revisions (%v), want exactly the approved one", round, len(history), err)
+			}
+		case reviseErr == nil:
+			if !errors.Is(deleteErr, registry.ErrConflict) {
+				t.Fatalf("round %d: revise won, retirement got %v, want ErrConflict", round, deleteErr)
+			}
+			if got, err := s.Get(ctx, tenantA, name, 0); err != nil || got.Rev != 2 {
+				t.Fatalf("round %d: after the revise won the agent is rev %d (%v), want live at 2", round, got.Rev, err)
+			}
+		default:
+			t.Fatalf("round %d: both lost: delete %v, revise %v", round, deleteErr, reviseErr)
+		}
+	}
+}
+
 // Re-creating a retired name must not hand an old run a new definition, so the
 // numbering continues instead of restarting.
 func TestRecreatingADeletedNameContinuesItsNumbering(t *testing.T) {
@@ -322,7 +414,7 @@ func TestRecreatingADeletedNameContinuesItsNumbering(t *testing.T) {
 
 	pinned := mustCreate(t, s, tenantA, "docs-bot", "v1")
 	mustRevise(t, s, tenantA, "docs-bot", "v2", 1)
-	if err := s.Delete(ctx, tenantA, "docs-bot"); err != nil {
+	if err := s.Delete(ctx, tenantA, "docs-bot", 0); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
@@ -345,7 +437,7 @@ func TestRecreatingADeletedNameContinuesItsNumbering(t *testing.T) {
 	}
 	// Reviving with the definition that was already there is still a no-op:
 	// the tombstone is lifted, the numbering is not spent.
-	if err := s.Delete(ctx, tenantA, "docs-bot"); err != nil {
+	if err := s.Delete(ctx, tenantA, "docs-bot", 0); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	again, err := s.Create(ctx, tenantA, spec("docs-bot", "reborn"), "ada")
@@ -517,7 +609,7 @@ func TestAStaleTokenNeitherSkipsNorRepeats(t *testing.T) {
 
 	// The world moves under the cursor: one already-returned agent is
 	// deleted, one is added before the cursor and one after it.
-	if err := s.Delete(ctx, tenantA, "agent-00"); err != nil {
+	if err := s.Delete(ctx, tenantA, "agent-00", 0); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	mustCreate(t, s, tenantA, "agent-00b", "v1")
@@ -663,7 +755,7 @@ func TestInvalidDefinitionsAreRejected(t *testing.T) {
 	if _, err := s.History(ctx, tenantA, ""); !errors.Is(err, registry.ErrInvalid) {
 		t.Fatalf("History with no name = %v, want ErrInvalid", err)
 	}
-	if err := s.Delete(ctx, tenantA, ""); !errors.Is(err, registry.ErrInvalid) {
+	if err := s.Delete(ctx, tenantA, "", 0); !errors.Is(err, registry.ErrInvalid) {
 		t.Fatalf("Delete with no name = %v, want ErrInvalid", err)
 	}
 }
@@ -695,7 +787,7 @@ func TestUnknownAgentsAreNotFound(t *testing.T) {
 	if _, err := s.History(ctx, tenantA, "ghost"); !errors.Is(err, registry.ErrNotFound) {
 		t.Errorf("History = %v, want ErrNotFound", err)
 	}
-	if err := s.Delete(ctx, tenantA, "ghost"); !errors.Is(err, registry.ErrNotFound) {
+	if err := s.Delete(ctx, tenantA, "ghost", 0); !errors.Is(err, registry.ErrNotFound) {
 		t.Errorf("Delete = %v, want ErrNotFound", err)
 	}
 	if _, err := s.Revise(ctx, tenantA, spec("ghost", "v1"), 0, "ada"); !errors.Is(err, registry.ErrNotFound) {

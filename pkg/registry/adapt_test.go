@@ -224,7 +224,7 @@ func TestSpecsResolvesPinnedRevisionsForever(t *testing.T) {
 	if _, err := store.Revise(ctx, tenantA, spec("docs-bot", "v2"), 1, "grace"); err != nil {
 		t.Fatalf("Revise: %v", err)
 	}
-	if err := store.Delete(ctx, tenantA, "docs-bot"); err != nil {
+	if err := store.Delete(ctx, tenantA, "docs-bot", 0); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 

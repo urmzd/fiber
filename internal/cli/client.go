@@ -1,14 +1,21 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"connectrpc.com/connect"
 
+	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
 	"github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect"
+	"github.com/urmzd/mandatum/pkg/attachment"
 )
 
 // clients are the three Connect stubs a client command talks through. They are
@@ -19,6 +26,45 @@ type clients struct {
 	agents mandatumv1connect.AgentServiceClient
 	bus    mandatumv1connect.BusServiceClient
 	invoke mandatumv1connect.InvokeServiceClient
+
+	http *http.Client
+	base string
+}
+
+// upload stores a local file on the server and returns the reference a tag
+// carries. The bytes go up once, here; the tag then names them by digest.
+func (c *clients) upload(ctx context.Context, path string) (*mandatumv1.Attachment, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, usagef("--attach: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	q := url.Values{"name": {filepath.Base(path)}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/blobs?"+q.Encode(), f)
+	if err != nil {
+		return nil, fmt.Errorf("cli: upload %s: %w", path, err)
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: upload %s: %w", errUnavailable, path, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusCreated {
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return nil, fmt.Errorf("cli: upload %s: %s: %s", path, res.Status, strings.TrimSpace(string(msg)))
+	}
+	var att attachment.Attachment
+	if err := json.NewDecoder(res.Body).Decode(&att); err != nil {
+		return nil, fmt.Errorf("cli: upload %s: decode reference: %w", path, err)
+	}
+	return &mandatumv1.Attachment{
+		Digest:    att.Digest,
+		MediaType: att.MediaType,
+		Name:      att.Name,
+		Size:      att.Size,
+		Alt:       att.Alt,
+	}, nil
 }
 
 // dial resolves --server and --token into stubs.
@@ -49,6 +95,8 @@ func dial() (*clients, error) {
 		agents: mandatumv1connect.NewAgentServiceClient(hc, base),
 		bus:    mandatumv1connect.NewBusServiceClient(hc, base),
 		invoke: mandatumv1connect.NewInvokeServiceClient(hc, base),
+		http:   hc,
+		base:   base,
 	}, nil
 }
 

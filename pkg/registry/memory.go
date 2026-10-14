@@ -30,8 +30,24 @@ type Memory struct {
 	tenants map[string]map[string]*record
 
 	// Immutable after New, so they need no lock.
+	settings
+}
+
+// settings is what every Store implementation is configured with. It is shared
+// so that an Option means the same thing whichever backend it is handed to: a
+// deployment that widens the provider table must not find that the widening
+// only applied to the store it tested against.
+type settings struct {
 	clock     func() time.Time
 	providers []string
+}
+
+func newSettings(opts []Option) settings {
+	s := settings{clock: time.Now, providers: agentspec.KnownProviders()}
+	for _, opt := range opts {
+		opt(&s)
+	}
+	return s
 }
 
 // record is one agent's whole life: its revisions in order, and whether the
@@ -41,15 +57,15 @@ type record struct {
 	deleted bool
 }
 
-// Option configures a Memory.
-type Option func(*Memory)
+// Option configures a Store implementation.
+type Option func(*settings)
 
 // WithClock replaces the source of CreatedAt. A test that needs to assert on
 // timestamps supplies its own rather than sleeping.
 func WithClock(now func() time.Time) Option {
-	return func(m *Memory) {
+	return func(s *settings) {
 		if now != nil {
-			m.clock = now
+			s.clock = now
 		}
 	}
 }
@@ -61,20 +77,15 @@ func WithClock(now func() time.Time) Option {
 // control plane would reject definitions the runtime can execute, which is the
 // worst of both: valid work refused, with no way to say so.
 func WithProviders(providers ...string) Option {
-	return func(m *Memory) { m.providers = slices.Clone(providers) }
+	return func(s *settings) { s.providers = slices.Clone(providers) }
 }
 
 // NewMemory returns an empty store.
 func NewMemory(opts ...Option) *Memory {
-	m := &Memory{
-		tenants:   make(map[string]map[string]*record),
-		clock:     time.Now,
-		providers: agentspec.KnownProviders(),
+	return &Memory{
+		tenants:  make(map[string]map[string]*record),
+		settings: newSettings(opts),
 	}
-	for _, opt := range opts {
-		opt(m)
-	}
-	return m
 }
 
 // Memory is the reference implementation, so the compiler is asked to say so.
@@ -199,13 +210,7 @@ func (m *Memory) List(ctx context.Context, tenant string, page Page) ([]agentspe
 	if err != nil {
 		return nil, "", err
 	}
-	size := page.Size
-	switch {
-	case size <= 0:
-		size = DefaultPageSize
-	case size > MaxPageSize:
-		size = MaxPageSize
-	}
+	size := page.size()
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -274,7 +279,7 @@ func (m *Memory) History(ctx context.Context, tenant, name string) ([]agentspec.
 // retired name is fine — would make Delete the one operation that can see a
 // tombstone, and the invariant that a tombstoned agent is absent to everything
 // meaning "the agent now" is worth more than the convenience.
-func (m *Memory) Delete(ctx context.Context, tenant, name string) error {
+func (m *Memory) Delete(ctx context.Context, tenant, name string, expectedRev int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -286,12 +291,19 @@ func (m *Memory) Delete(ctx context.Context, tenant, name string) error {
 		return fmt.Errorf("%w: no agent name", ErrInvalid)
 	}
 
+	if expectedRev < 0 {
+		return fmt.Errorf("%w: expected revision %d is negative", ErrInvalid, expectedRev)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	rec := m.lookup(tenant, key)
 	if rec == nil || rec.deleted {
 		return fmt.Errorf("%w: agent %q", ErrNotFound, key)
+	}
+	if current := len(rec.revs); expectedRev != 0 && expectedRev != current {
+		return fmt.Errorf("%w: agent %q is at revision %d, not %d; re-read it before retiring it", ErrConflict, key, current, expectedRev)
 	}
 	rec.deleted = true
 	return nil
@@ -301,7 +313,7 @@ func (m *Memory) Delete(ctx context.Context, tenant, name string) error {
 // waiting, the tenant is real, and the definition is one this deployment
 // accepts. Validation happens outside the lock because it is the most expensive
 // thing a write does and none of it depends on stored state.
-func (m *Memory) prepare(ctx context.Context, tenant string, spec agentspec.AgentSpec) (agentspec.AgentSpec, error) {
+func (s settings) prepare(ctx context.Context, tenant string, spec agentspec.AgentSpec) (agentspec.AgentSpec, error) {
 	if err := ctx.Err(); err != nil {
 		return agentspec.AgentSpec{}, err
 	}
@@ -309,7 +321,7 @@ func (m *Memory) prepare(ctx context.Context, tenant string, spec agentspec.Agen
 		return agentspec.AgentSpec{}, err
 	}
 	canonical := spec.Normalize()
-	if err := canonical.ValidateWith(m.providers); err != nil {
+	if err := canonical.ValidateWith(s.providers); err != nil {
 		return agentspec.AgentSpec{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	return canonical, nil

@@ -32,6 +32,8 @@ import (
 const (
 	tokenAcme  = "token-acme"
 	tokenOther = "token-other"
+	// tokenSurface is a front end trusted to say who it is acting for.
+	tokenSurface = "token-surface"
 
 	tenantAcme  = "acme"
 	tenantOther = "other"
@@ -387,8 +389,9 @@ func newHarness(t *testing.T, mutate func(*Config)) *harness {
 	t.Helper()
 
 	auth, err := NewTokens(map[string]Identity{
-		tokenAcme:  {Tenant: tenantAcme, Subject: subjectAcme},
-		tokenOther: {Tenant: tenantOther, Subject: "user-2"},
+		tokenAcme:    {Tenant: tenantAcme, Subject: subjectAcme},
+		tokenOther:   {Tenant: tenantOther, Subject: "user-2"},
+		tokenSurface: {Tenant: tenantAcme, Subject: "slack-surface", ActAs: true},
 	})
 	if err != nil {
 		t.Fatalf("NewTokens: %v", err)

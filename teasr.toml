@@ -1,0 +1,24 @@
+[output]
+dir = "./showcase"
+formats = [{ output_type = "png" }]
+
+[font]
+family = "Menlo"
+size = 16
+
+# Real offline example output: no credentials or running services needed.
+# Run `go run ./examples/local` once to warm the build cache before capturing.
+[[scenes]]
+type = "terminal"
+name = "durable-replay"
+theme = "dracula"
+cols = 100
+rows = 32
+command = "sh -c 'go run ./examples/local | tail -n 30'"
+
+[[scenes.interactions]]
+type = "wait"
+duration = 5000
+
+[[scenes.interactions]]
+type = "snapshot"

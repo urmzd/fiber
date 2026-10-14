@@ -50,6 +50,7 @@ func runWork(ctx context.Context, ui *ui, tenant string, verbose bool) error {
 	c, err := newCore(coreConfig{
 		Tenant:    tenant,
 		Redis:     redisURL,
+		Postgres:  os.Getenv(EnvPostgres),
 		Workspace: os.Getenv(EnvWorkspace),
 		Log:       newLogger(ui, verbose),
 	})

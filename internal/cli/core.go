@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/urmzd/duraturo"
 	"github.com/urmzd/duraturo/pkg/ledger"
@@ -26,13 +27,21 @@ import (
 	"github.com/urmzd/legatus/pkg/workspace"
 
 	"github.com/urmzd/mandatum/internal/server"
+	"github.com/urmzd/mandatum/pkg/agentrt"
+	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/mandatum/pkg/attachment/resolve"
+	"github.com/urmzd/mandatum/pkg/blob"
 	"github.com/urmzd/mandatum/pkg/bus"
 	"github.com/urmzd/mandatum/pkg/connector"
+	"github.com/urmzd/mandatum/pkg/connectors/author"
 	"github.com/urmzd/mandatum/pkg/connectors/cron"
+	"github.com/urmzd/mandatum/pkg/durable"
 	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/mandatum/pkg/knowledge"
 	"github.com/urmzd/mandatum/pkg/registry"
 	"github.com/urmzd/mandatum/pkg/router"
 	"github.com/urmzd/mandatum/pkg/runtime"
+	"github.com/urmzd/mandatum/pkg/thread"
 	"github.com/urmzd/mandatum/pkg/topic"
 )
 
@@ -45,6 +54,21 @@ const (
 	// broker, which is a complete implementation of the same interface and
 	// exactly as correct — for one process.
 	EnvRedis = "MANDATUM_REDIS_URL"
+
+	// EnvPostgres points the agent registry at Postgres. Unset keeps the
+	// in-memory registry, which enforces every rule the Postgres one does and
+	// forgets all of it on exit.
+	EnvPostgres = "MANDATUM_POSTGRES_URL"
+
+	// EnvAuthorProvider and EnvAuthorModel choose what the built-in author
+	// agent runs on. Unset keeps the offline provider, which seeds the agent
+	// and its tools without calling a model.
+	EnvAuthorProvider = "MANDATUM_AUTHOR_PROVIDER"
+	EnvAuthorModel    = "MANDATUM_AUTHOR_MODEL"
+
+	// EnvCompactTokens is the input size, in tokens, above which a run's
+	// history is compacted. Unset or zero never compacts.
+	EnvCompactTokens = "MANDATUM_COMPACT_TOKENS"
 
 	// EnvWorkspace is the directory agent artifacts are written under. Unset
 	// takes a directory under the user's cache.
@@ -65,6 +89,21 @@ type coreConfig struct {
 
 	// Redis is a redis:// URL. Empty selects the in-memory bus.
 	Redis string
+
+	// Postgres is a postgres:// URL. Empty selects the in-memory registry.
+	Postgres string
+
+	// Embeddings selects the model the knowledge layer embeds with. The zero
+	// value is the offline hashing embedder.
+	Embeddings embeddingsConfig
+
+	// AuthorProvider and AuthorModel are what the built-in author agent runs
+	// on. Empty takes the offline provider.
+	AuthorProvider, AuthorModel string
+
+	// CompactTokens is the history size that triggers compaction. Zero never
+	// compacts.
+	CompactTokens int
 
 	// Workspace is where the sandbox writes agent artifacts.
 	Workspace string
@@ -98,13 +137,15 @@ type core struct {
 	cfg coreConfig
 	log *slog.Logger
 
-	store   *registry.Memory
+	store   registry.Store
+	docs    knowledge.Store
+	blobs   blob.Store
 	broker  bus.Bus
 	sinks   *connector.Registry
 	deliver *router.Router
 	rt      *runtime.Runtime
-	ledger  *ledger.Memory
-	queue   *dqueue.Memory
+	ledger  runLedger
+	queue   dqueue.Queue
 
 	// webhooks are the connectors that serve their own HTTP, mounted under
 	// /connectors/{name}. A trigger authenticates its own requests, so the
@@ -112,6 +153,12 @@ type core struct {
 	webhooks map[string]http.Handler
 
 	closers []func() error
+}
+
+// runLedger is the ledger plus the point read Run polls with.
+type runLedger interface {
+	ledger.Ledger
+	ledger.RunGetter
 }
 
 // newCore assembles the system. It is deliberately linear: read it top to
@@ -139,7 +186,50 @@ func newCore(cfg coreConfig) (*core, error) {
 	}
 
 	// The control plane: append-only agent definitions, scoped by tenant.
-	c.store = registry.NewMemory()
+	// Postgres, when configured, holds everything that has to outlive the
+	// process: agent definitions and the run ledger and queue. One pool serves
+	// all of it.
+	pool, err := newPostgres(cfg.Postgres)
+	if err != nil {
+		_ = c.close()
+		return nil, err
+	}
+	if pool != nil {
+		c.closers = append(c.closers, func() error { pool.Close(); return nil })
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), postgresStartTimeout)
+	defer cancel()
+
+	// The control plane: append-only agent definitions, scoped by tenant.
+	c.store, err = newRegistry(ctx, pool)
+	if err != nil {
+		_ = c.close()
+		return nil, err
+	}
+
+	// What agents know: the corpus a revision's sources are retrieved from.
+	c.docs, err = newKnowledge(ctx, pool, cfg.Embeddings)
+	if err != nil {
+		_ = c.close()
+		return nil, err
+	}
+
+	// Files. Content-addressed and tenant-scoped, under the workspace so one
+	// volume holds everything this process writes to disk.
+	files, err := blob.NewFS(filepath.Join(workspaceDir(cfg), "blobs"))
+	if err != nil {
+		_ = c.close()
+		return nil, fmt.Errorf("cli: blob store: %w", err)
+	}
+	c.blobs = files
+	c.closers = append(c.closers, files.Close)
+
+	// What a thread remembers: the conversation a run continues.
+	threads, err := newThreads(ctx, pool)
+	if err != nil {
+		_ = c.close()
+		return nil, err
+	}
 
 	// The mesh. Roles are derived from the interfaces each connector
 	// implements, never declared, so registering is the whole wiring.
@@ -148,6 +238,14 @@ func newCore(cfg coreConfig) (*core, error) {
 		return nil, err
 	}
 	c.sinks = sinks
+
+	// The author: the control plane offered to an agent as tools, and the
+	// agent that holds them. Its actions act as whoever raised the run, which
+	// is read from the ledger and never from what the model passed.
+	if err := c.addAuthor(ctx); err != nil {
+		_ = c.close()
+		return nil, err
+	}
 	for _, t := range sinks.Triggers() {
 		if h, ok := t.(http.Handler); ok {
 			c.webhooks[t.Name()] = h
@@ -162,14 +260,17 @@ func newCore(cfg coreConfig) (*core, error) {
 	// The agent side. A turn runs as a legatus task under the NGAC policy
 	// compiled from the pinned revision's Access grant, so what an agent may
 	// touch is enforced rather than documented.
-	exec, err := newExecutor(cfg, c.store, sinks, log, rec)
+	exec, err := newExecutor(cfg, c.store, c.docs, c.blobs, sinks, log, rec)
 	if err != nil {
 		return nil, err
 	}
 
 	// Durable execution: the ledger is truth, the queue is disposable flow.
-	c.ledger = ledger.NewMemory()
-	c.queue = dqueue.NewMemory()
+	c.ledger, c.queue, err = newDurable(ctx, pool)
+	if err != nil {
+		_ = c.close()
+		return nil, err
+	}
 
 	rt, err := runtime.New(
 		duraturo.New(c.ledger, c.queue),
@@ -177,6 +278,8 @@ func newCore(cfg coreConfig) (*core, error) {
 		broker,
 		exec,
 		runtime.WithLogger(log),
+		runtime.WithThreads(threads),
+		runtime.WithMessageID(surfaceMessageID),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cli: runtime: %w", err)
@@ -210,6 +313,152 @@ func newBus(redisURL string) (bus.Bus, func() error, error) {
 	return bus.NewRedis(client), client.Close, nil
 }
 
+// addAuthor registers the author connector and seeds the author agent for this
+// deployment's tenant. Seeding is safe on every start: an unchanged definition
+// is a no-op, and one an operator has edited or deleted is left alone.
+func (c *core) addAuthor(ctx context.Context) error {
+	a, err := author.New(author.Config{
+		Store:      c.store,
+		Principals: author.PrincipalFunc(c.principal),
+		Catalog: func() []string {
+			var names []string
+			for _, act := range c.sinks.Actions() {
+				names = append(names, act.Name)
+			}
+			return names
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("cli: author: %w", err)
+	}
+	if err := c.sinks.Register(a); err != nil {
+		return fmt.Errorf("cli: register %s: %w", a.Name(), err)
+	}
+	if c.cfg.Tenant == "" {
+		return nil
+	}
+	provider, model := c.cfg.AuthorProvider, c.cfg.AuthorModel
+	if provider == "" {
+		provider = agentspec.ProviderOffline
+	}
+	if model == "" {
+		model = "claude-sonnet-5-5"
+	}
+	if _, err := author.Seed(ctx, c.store, c.cfg.Tenant, author.Spec(model, provider)); err != nil {
+		return fmt.Errorf("cli: seed author: %w", err)
+	}
+	return nil
+}
+
+// principal resolves a run to the tenant and actor on its accepted tag. It is
+// the only way an action learns who it acts as, and it reads the ledger: the
+// tag there was stamped by the transport from a credential, which is the one
+// account of identity a model cannot rewrite.
+func (c *core) principal(ctx context.Context, runID string) (author.Principal, error) {
+	if c.ledger == nil {
+		return author.Principal{}, errors.New("cli: run ledger not ready")
+	}
+	rec, err := c.ledger.GetRun(ctx, runID)
+	if err != nil {
+		return author.Principal{}, fmt.Errorf("cli: read run %q: %w", runID, err)
+	}
+	var in runtime.Input
+	if err := json.Unmarshal(rec.Input, &in); err != nil {
+		return author.Principal{}, fmt.Errorf("cli: decode run %q input: %w", runID, err)
+	}
+	p := author.Principal{Tenant: in.Tag.Tenant}
+	if in.Tag.Actor.ID != "" {
+		p.Actor = in.Tag.Origin + ":" + in.Tag.Actor.ID
+	}
+	return p, nil
+}
+
+// postgresStartTimeout bounds how long startup waits for Postgres. A database
+// that cannot be reached is a deployment that cannot resolve an agent or accept
+// a run, so failing here, with the reason, beats serving requests that all fail
+// later.
+const postgresStartTimeout = 30 * time.Second
+
+// newPostgres opens the pool the durable backends share. An empty URL returns
+// nil, which every constructor below reads as "stay in memory".
+func newPostgres(url string) (*pgxpool.Pool, error) {
+	if strings.TrimSpace(url) == "" {
+		return nil, nil
+	}
+	pool, err := pgxpool.New(context.Background(), url)
+	if err != nil {
+		return nil, usagef("$%s is not a postgres URL: %v", EnvPostgres, err)
+	}
+	return pool, nil
+}
+
+// newRegistry selects the control plane's store. The schema is migrated here
+// rather than by a separate command because a server that starts against an
+// unmigrated database has nothing useful to do but report that.
+func newRegistry(ctx context.Context, pool *pgxpool.Pool) (registry.Store, error) {
+	if pool == nil {
+		return registry.NewMemory(), nil
+	}
+	store := registry.NewPostgres(pool)
+	if err := store.Migrate(ctx); err != nil {
+		return nil, fmt.Errorf("%w: $%s: %w", errUnavailable, EnvPostgres, err)
+	}
+	return store, nil
+}
+
+// newThreads selects the conversation journal: Postgres when there is a pool,
+// so a thread survives a restart alongside the runs that continue it.
+func newThreads(ctx context.Context, pool *pgxpool.Pool) (thread.Store, error) {
+	if pool == nil {
+		return thread.NewMemory(), nil
+	}
+	store := thread.NewPostgres(pool)
+	if err := store.Migrate(ctx); err != nil {
+		return nil, fmt.Errorf("%w: $%s: %w", errUnavailable, EnvPostgres, err)
+	}
+	return store, nil
+}
+
+// surfaceMessageID names the surface message that raised a tag, from the
+// metadata the triggers already set. It is what lets a later reconcile
+// recognise that message instead of journaling it a second time.
+func surfaceMessageID(tag envelope.Tag) string {
+	switch tag.Origin {
+	case "slack":
+		return tag.Meta["slack_ts"]
+	case "github":
+		return tag.Meta["github_comment_id"]
+	}
+	return ""
+}
+
+// newDurable selects the run ledger and queue. On Postgres a run accepted
+// before a restart is still there after it, and its lease expires and is
+// reclaimed by whichever worker comes up next.
+func newDurable(ctx context.Context, pool *pgxpool.Pool) (runLedger, dqueue.Queue, error) {
+	if pool == nil {
+		return ledger.NewMemory(), dqueue.NewMemory(), nil
+	}
+	lgr, q, err := durable.Open(ctx, pool)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: $%s: %w", errUnavailable, EnvPostgres, err)
+	}
+	return lgr, q, nil
+}
+
+// workspaceDir is the directory everything this process writes to disk lives
+// under: agent artifacts and uploaded files, each in its own subdirectory.
+func workspaceDir(cfg coreConfig) string {
+	if dir := strings.TrimSpace(cfg.Workspace); dir != "" {
+		return dir
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "mandatum")
+}
+
 // newExecutor builds the sandbox a turn runs in.
 //
 // The tool registry and the workspace are shared with the control plane rather
@@ -218,15 +467,8 @@ func newBus(redisURL string) (bus.Bus, func() error, error) {
 // scopes what that tool can see comes from the pinned revision, one deployment
 // per (agent, revision), which is what stops a revised Access grant from
 // widening a run already in flight.
-func newExecutor(cfg coreConfig, store registry.Store, sinks *connector.Registry, log *slog.Logger, rec metrics.Recorder) (runtime.Executor, error) {
-	dir := strings.TrimSpace(cfg.Workspace)
-	if dir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			base = os.TempDir()
-		}
-		dir = filepath.Join(base, "mandatum", "workspace")
-	}
+func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, files blob.Store, sinks *connector.Registry, log *slog.Logger, rec metrics.Recorder) (runtime.Executor, error) {
+	dir := filepath.Join(workspaceDir(cfg), "workspace")
 	ws, err := workspace.NewLocal(dir)
 	if err != nil {
 		return nil, fmt.Errorf("cli: workspace %q: %w", dir, err)
@@ -234,11 +476,18 @@ func newExecutor(cfg coreConfig, store registry.Store, sinks *connector.Registry
 	tools := tool.NewRegistry()
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), rec)
 
+	agentOpts := []agentrt.Option{agentrt.WithAttachments(resolve.New(files))}
+	if cfg.CompactTokens > 0 {
+		agentOpts = append(agentOpts, agentrt.WithCompaction(agentrt.Compaction{MaxInputTokens: cfg.CompactTokens}))
+	}
+
 	exec, err := runtime.NewSandbox(plane, tools, registry.NewSpecs(store),
+		runtime.WithAgentOptions(agentOpts...),
 		// A spec's tool names resolve against the actions every registered
 		// connector advertises, so granting "github.comment" in a spec is the
 		// whole of wiring an agent to GitHub's write side.
 		runtime.WithCatalog(runtime.Connectors(sinks)),
+		runtime.WithKnowledge(retrieverFor(docs)),
 		runtime.WithSandboxLogger(log),
 	)
 	if err != nil {
@@ -256,7 +505,7 @@ func newExecutor(cfg coreConfig, store registry.Store, sinks *connector.Registry
 // pure function of the tag id, so the routes can be registered before the run
 // exists.
 func (c *core) Invoke(ctx context.Context, tag envelope.Tag) (server.Accepted, error) {
-	if err := c.deliver.Register(runtime.RunID(tag.ID), tag.Routes()); err != nil {
+	if err := c.deliver.Register(runtime.RunID(tag.Tenant, tag.ID), tag.Routes()); err != nil {
 		return server.Accepted{}, fmt.Errorf("cli: register routes: %w", err)
 	}
 	acc, err := c.rt.Accept(ctx, tag)
