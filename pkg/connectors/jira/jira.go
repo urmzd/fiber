@@ -67,7 +67,10 @@ import (
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment/intake"
 	"github.com/urmzd/mandatum/pkg/connector"
+	"github.com/urmzd/mandatum/pkg/connectors"
+	"github.com/urmzd/mandatum/pkg/connectors/internal/files"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/inbound"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/sink"
@@ -135,6 +138,15 @@ type Config struct {
 
 	// MaxBody bounds an inbound request body. Zero means inbound.DefaultMaxBody.
 	MaxBody int64
+
+	// Tenant is the authorization scope this connector's tags belong to. It
+	// is stamped on every tag it raises, and files are stored under it.
+	Tenant string
+
+	// Files brings in issue attachments as the tag's attachments (see
+	// attachments.go). Needs Tenant. A site's credentials go to that site's
+	// host only, never to the media host its downloads redirect to.
+	Files connectors.Files
 }
 
 // Connector is the Jira peer. It implements pkg/connector's Trigger, Sink and
@@ -149,6 +161,12 @@ type Connector struct {
 	gate   inbound.Gate
 	pipe   inbound.Pipe
 	engine *sink.Engine
+
+	// fetcher downloads attachments; nil when file intake is off.
+	fetcher *intake.Fetcher
+	// redirectForTest, set only by tests, points a content URL at a local
+	// server. It is nil in every deployment.
+	redirectForTest func(string) string
 }
 
 // Compile-time proof of the faces. RolesOf derives them from the type, so these
@@ -194,6 +212,14 @@ func New(cfg Config) (*Connector, error) {
 		c.bots[strings.ToLower(account)] = agent
 	}
 
+	if cfg.Files.Enabled() {
+		if cfg.Tenant == "" {
+			return nil, fmt.Errorf("jira: file intake needs a tenant to store files under")
+		}
+		c.fetcher = intake.NewFetcher(cfg.Files.Store, c.fileAllowed,
+			intake.WithHeaders(c.fileHeaders),
+			intake.WithMaxBytes(cfg.Files.Caps.MaxFileBytes))
+	}
 	c.gate = inbound.Gate{Verifier: cfg.Verifier, MaxBody: cfg.MaxBody}
 	interval := cfg.Interval
 	if interval == 0 {
@@ -240,7 +266,13 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if err := c.pipe.Send(r.Context(), tag); err != nil {
+	if c.cfg.Tenant != "" {
+		tag.Tenant = c.cfg.Tenant
+	}
+	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, tag.Tenant, &tag,
+		c.candidates(tag.Source.Workspace, filesOf(h, tag.Meta["jira_assigned"] == "true")))
+	defer cancel()
+	if err := c.pipe.Send(ctx, tag); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
 		return
 	}

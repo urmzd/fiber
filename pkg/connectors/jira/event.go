@@ -112,6 +112,9 @@ type jiraIssue struct {
 		Assignee *jiraUser `json:"assignee"`
 		Reporter *jiraUser `json:"reporter"`
 		Labels   []string  `json:"labels"`
+		// Attachment is the issue's files. Jira sends it on issue events,
+		// not always on comment events.
+		Attachment []jiraAttachment `json:"attachment"`
 	} `json:"fields"`
 }
 

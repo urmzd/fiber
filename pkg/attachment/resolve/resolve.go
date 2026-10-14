@@ -410,6 +410,12 @@ func (r *Resolver) one(ctx context.Context, req Request, budget *Budget, a attac
 		out.Reason = "its reference is malformed"
 		return out, []types.UserPart{types.Text("[A file was attached but could not be read: its reference is malformed.]")}, nil, nil
 	}
+	if a.Unread != "" {
+		// The file never reached the store: the surface it was attached on
+		// refused it, or it was over a cap at intake. There is nothing to
+		// read and nothing to spend, only the fact to report.
+		return note(a.Unread)
+	}
 	if !budget.takeFile(r.limits.Files) {
 		return note(fmt.Sprintf("this run already has %d attachments, which is the limit", r.limits.Files))
 	}

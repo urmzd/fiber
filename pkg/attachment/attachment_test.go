@@ -58,6 +58,10 @@ func TestMediaTypeIsDecidedByContentAndTheNameOnlyRefinesIt(t *testing.T) {
 		{"an mp4 named as a png is video", []byte("\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00"), "x.png", "video/mp4", attachment.KindVideo},
 		{"quicktime screen recording", []byte("\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00"), "rec.mov", "video/quicktime", attachment.KindVideo},
 		{"webm", []byte("\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\x82\x84webm"), "", "video/webm", attachment.KindVideo},
+		{"webm voice clip names only an audio codec", []byte("\x1a\x45\xdf\xa3\x9f\x42\x82\x84webm\x16\x54\xae\x6b\x86A_OPUS"), "audio_message.webm", "audio/webm", attachment.KindAudio},
+		{"webm with a video track stays video", []byte("\x1a\x45\xdf\xa3\x42\x82\x84webmA_OPUS\x86V_VP8"), "", "video/webm", attachment.KindVideo},
+		{"generic mp4 named m4a is audio", []byte("\x00\x00\x00\x18ftypisom\x00\x00\x02\x00"), "audio_message.m4a", "audio/mp4", attachment.KindAudio},
+		{"a png named m4a is still an image", []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), "x.m4a", "image/png", attachment.KindImage},
 		{"matroska", []byte("\x1a\x45\xdf\xa3\x9f\x42\x82\x88matroska"), "", "video/x-matroska", attachment.KindVideo},
 		{"avi", []byte("RIFF\x24\x00\x00\x00AVI LIST"), "", "video/x-msvideo", attachment.KindVideo},
 		{"heic is an image the content proves", []byte("\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"), "", "image/heic", attachment.KindImage},
@@ -201,5 +205,39 @@ func TestAChildRunInheritsEachFileOnceInAStableOrder(t *testing.T) {
 	_ = attachment.Inherit(parent, []attachment.Attachment{b})
 	if len(parent) != 1 || parent[0].Digest != a.Digest {
 		t.Error("Inherit modified the parent's list")
+	}
+}
+
+func TestAFileThatWasNeverStoredIsAReferenceWithAReasonAndNoContent(t *testing.T) {
+	origin := address.MustParse("slack://T01/C02?thread=1699.001")
+	m := attachment.Missing("../../etc/clip.webm", origin, "standup\nnotes", "it is larger than the 25 MB limit\nfor one file")
+	if err := m.Validate(); err != nil {
+		t.Fatalf("Missing built a reference Validate refuses: %v", err)
+	}
+	if m.Name != "clip.webm" || m.Alt != "standup notes" || m.Unread != "it is larger than the 25 MB limit for one file" {
+		t.Errorf("Missing did not clean its fields: %+v", m)
+	}
+	if m.Digest != "" || m.Size != 0 {
+		t.Errorf("an unread reference names content: %+v", m)
+	}
+	if got := attachment.Missing("x", address.Address{}, "", "  "); got.Unread == "" {
+		t.Error("a blank reason produced a reference that would read as a stored file")
+	}
+	bad := map[string]attachment.Attachment{
+		"unread with a digest":    {Digest: digest, MediaType: "image/png", Unread: "refused"},
+		"unread with a size":      {Size: 10, Unread: "refused"},
+		"unread multi-line":       {Unread: "one\ntwo"},
+		"unread oversized":        {Unread: strings.Repeat("r", attachment.MaxUnread+1)},
+		"unread with a bad type":  {MediaType: "Image/PNG", Unread: "refused"},
+		"unread with a path name": {Name: "a/b.png", Unread: "refused"},
+	}
+	for name, a := range bad {
+		if err := a.Validate(); !errors.Is(err, attachment.ErrInvalid) {
+			t.Errorf("%s: Validate = %v, want ErrInvalid", name, err)
+		}
+	}
+	twice := attachment.Inherit([]attachment.Attachment{m}, []attachment.Attachment{m, attachment.Missing("other.png", origin, "", "refused")})
+	if len(twice) != 2 {
+		t.Errorf("Inherit = %+v, want the repeated unread file once and the other kept", twice)
 	}
 }

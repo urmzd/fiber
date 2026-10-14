@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/urmzd/mandatum/pkg/blob"
 	"github.com/urmzd/mandatum/pkg/connector"
+	"github.com/urmzd/mandatum/pkg/connectors"
 	"github.com/urmzd/mandatum/pkg/connectors/cron"
 	"github.com/urmzd/mandatum/pkg/connectors/github"
 	"github.com/urmzd/mandatum/pkg/connectors/jira"
@@ -18,7 +20,24 @@ import (
 	"github.com/urmzd/mandatum/pkg/connectors/webhook"
 	"github.com/urmzd/mandatum/pkg/registry"
 	"github.com/urmzd/mandatum/pkg/signature"
+	"github.com/urmzd/mandatum/pkg/thread"
 )
+
+// listers collects the connectors that can list a thread's surface, keyed
+// by the address scheme each owns, for runtime.WithReconciler.
+func listers(reg *connector.Registry) thread.Listers {
+	out := thread.Listers{}
+	for _, name := range reg.Names() {
+		c, err := reg.Get(name)
+		if err != nil {
+			continue
+		}
+		if l, ok := c.(thread.Lister); ok {
+			out[name] = l
+		}
+	}
+	return out
+}
 
 // Environment variables that turn a connector on.
 //
@@ -35,6 +54,9 @@ const (
 	EnvSlackTeam    = "MANDATUM_SLACK_TEAM"
 	EnvSlackBots    = "MANDATUM_SLACK_BOTS"
 	EnvSlackDefault = "MANDATUM_SLACK_DEFAULT_AGENT"
+	// EnvSlackAppID is the app's id ("A0123..."): what marks a message in a
+	// thread as one this deployment posted when the thread is reconciled.
+	EnvSlackAppID = "MANDATUM_SLACK_APP_ID"
 
 	// GitHub.
 	EnvGitHubReadRepositories = "MANDATUM_GITHUB_READ_REPOSITORIES"
@@ -64,7 +86,7 @@ const (
 // sink, one that implements Ingest is a trigger, and the registry works that
 // out from the types. So this function only has to construct; nothing here says
 // what any connector is for.
-func buildConnectors(cfg coreConfig, store registry.Store) (*connector.Registry, error) {
+func buildConnectors(cfg coreConfig, store registry.Store, blobs blob.Store) (*connector.Registry, error) {
 	for _, name := range []string{"MANDATUM_GITHUB_AUTO_LABELS", "MANDATUM_GITHUB_GUIDES", "MANDATUM_GITHUB_MUTATIONS", "MANDATUM_SLACK_SESSIONS", "MANDATUM_SLACK_COMMANDS"} {
 		if os.Getenv(name) != "" {
 			return nil, usagef("%s moved to collegium; use COLLEGIUM_* with collegium serve", name)
@@ -76,11 +98,17 @@ func buildConnectors(cfg coreConfig, store registry.Store) (*connector.Registry,
 	// syntax on every one of these surfaces, and guessing would start a run
 	// each time one human tagged another.
 	agents := agentNames{store: store, tenant: cfg.Tenant}
+	// Files on a triggering message are brought in under the deployment's
+	// tenant, into the same store the server's uploads use.
+	var files connectors.Files
+	if cfg.Tenant != "" && blobs != nil {
+		files = connectors.Files{Store: blobs, Log: cfg.Log}
+	}
 
-	for _, build := range []func(coreConfig, mention.Set) (connector.Connector, error){
+	for _, build := range []func(coreConfig, mention.Set, connectors.Files) (connector.Connector, error){
 		newSlack, newGitHub, newJira, newWebhook, newCron,
 	} {
-		c, err := build(cfg, agents)
+		c, err := build(cfg, agents, files)
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +122,7 @@ func buildConnectors(cfg coreConfig, store registry.Store) (*connector.Registry,
 	return reg, nil
 }
 
-func newSlack(cfg coreConfig, agents mention.Set) (connector.Connector, error) {
+func newSlack(cfg coreConfig, agents mention.Set, files connectors.Files) (connector.Connector, error) {
 	token, secret := os.Getenv(EnvSlackToken), os.Getenv(EnvSlackSecret)
 	if token == "" && secret == "" {
 		return nil, nil
@@ -109,6 +137,10 @@ func newSlack(cfg coreConfig, agents mention.Set) (connector.Connector, error) {
 		Bots:         pairs(os.Getenv(EnvSlackBots)),
 		Agents:       agents,
 		DefaultAgent: os.Getenv(EnvSlackDefault),
+		Tenant:       cfg.Tenant,
+		Files:        files,
+		FileToken:    token,
+		AppID:        os.Getenv(EnvSlackAppID),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cli: slack: %w", err)
@@ -116,7 +148,7 @@ func newSlack(cfg coreConfig, agents mention.Set) (connector.Connector, error) {
 	return c, nil
 }
 
-func newGitHub(cfg coreConfig, agents mention.Set) (connector.Connector, error) {
+func newGitHub(cfg coreConfig, agents mention.Set, files connectors.Files) (connector.Connector, error) {
 	token, secret := os.Getenv(EnvGitHubToken), os.Getenv(EnvGitHubSecret)
 	if token == "" && secret == "" {
 		return nil, nil
@@ -140,6 +172,8 @@ func newGitHub(cfg coreConfig, agents mention.Set) (connector.Connector, error) 
 		Agents:           agents,
 		Checks:           checks,
 		ReadRepositories: list(os.Getenv(EnvGitHubReadRepositories)),
+		Tenant:           cfg.Tenant,
+		Files:            files,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cli: github: %w", err)
@@ -147,7 +181,7 @@ func newGitHub(cfg coreConfig, agents mention.Set) (connector.Connector, error) 
 	return c, nil
 }
 
-func newJira(cfg coreConfig, agents mention.Set) (connector.Connector, error) {
+func newJira(cfg coreConfig, agents mention.Set, files connectors.Files) (connector.Connector, error) {
 	spec := os.Getenv(EnvJiraSites)
 	if spec == "" {
 		return nil, nil
@@ -177,6 +211,8 @@ func newJira(cfg coreConfig, agents mention.Set) (connector.Connector, error) {
 		Verifier: jiraSecret(secret),
 		Bots:     pairs(os.Getenv(EnvJiraBots)),
 		Agents:   agents,
+		Tenant:   cfg.Tenant,
+		Files:    files,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cli: jira: %w", err)
@@ -184,7 +220,9 @@ func newJira(cfg coreConfig, agents mention.Set) (connector.Connector, error) {
 	return c, nil
 }
 
-func newWebhook(cfg coreConfig, _ mention.Set) (connector.Connector, error) {
+// newWebhook builds the outbound webhook sink. It raises no tags, so it has
+// no files to bring in.
+func newWebhook(cfg coreConfig, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
 	spec := os.Getenv(EnvWebhookEndpoints)
 	if spec == "" {
 		return nil, nil
@@ -208,7 +246,7 @@ func newWebhook(cfg coreConfig, _ mention.Set) (connector.Connector, error) {
 	return c, nil
 }
 
-func newCron(cfg coreConfig, _ mention.Set) (connector.Connector, error) {
+func newCron(cfg coreConfig, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
 	if len(cfg.Schedules) == 0 {
 		return nil, nil
 	}

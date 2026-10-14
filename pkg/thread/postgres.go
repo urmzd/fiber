@@ -2,6 +2,7 @@ package thread
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
@@ -23,6 +25,12 @@ import (
 //
 // mandatum_thread_entries holds what does not change. This package never
 // issues an UPDATE or a DELETE against it.
+//
+// attachments was added after the table first shipped, so it arrives by an
+// ALTER that is safe to run on every start: IF NOT EXISTS makes it a no-op
+// once applied, and the constant default means a row written before it
+// existed reads back as an entry with no attachments, without a rewrite of
+// the table. The column holds references (digest, type, name), never bytes.
 //
 // The two partial unique indexes are the idempotency rule written as
 // constraints: at most one entry per (run, role), at most one per surface
@@ -62,6 +70,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS mandatum_thread_entries_run
 CREATE UNIQUE INDEX IF NOT EXISTS mandatum_thread_entries_surface
 	ON mandatum_thread_entries (tenant, agent, surface, surface_id)
 	WHERE surface_id <> '';
+
+ALTER TABLE mandatum_thread_entries
+	ADD COLUMN IF NOT EXISTS attachments jsonb NOT NULL DEFAULT '[]'::jsonb;
 `
 
 // migrateLock is the advisory lock Migrate holds, the same one every mandatum
@@ -107,7 +118,7 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	return nil
 }
 
-const entryColumns = `seq, role, body, actor_id, actor_display, actor_bot, run_id, surface_id, at`
+const entryColumns = `seq, role, body, actor_id, actor_display, actor_bot, run_id, surface_id, at, attachments`
 
 // Append adds entries to the end of a thread.
 //
@@ -184,12 +195,16 @@ func (p *Postgres) Append(ctx context.Context, key Key, entries ...Entry) ([]Ent
 			j.entries = append(j.entries, e)
 			j.index(e, len(j.entries)-1)
 			out[i] = e
+			files, err := encodeAttachments(e.Attachments)
+			if err != nil {
+				return err
+			}
 			batch.Queue(
 				`INSERT INTO mandatum_thread_entries
-				   (tenant, agent, surface, seq, role, body, actor_id, actor_display, actor_bot, run_id, surface_id, at)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+				   (tenant, agent, surface, seq, role, body, actor_id, actor_display, actor_bot, run_id, surface_id, at, attachments)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 				key.Tenant, key.Agent, key.Surface, head, string(e.Role), e.Text,
-				e.Actor.ID, e.Actor.Display, e.Actor.Bot, e.RunID, e.SurfaceID, e.At)
+				e.Actor.ID, e.Actor.Display, e.Actor.Bot, e.RunID, e.SurfaceID, e.At, files)
 		}
 		if batch.Len() == 0 {
 			return nil
@@ -266,18 +281,36 @@ func collect(rows pgx.Rows) ([]Entry, error) {
 	out := []Entry{}
 	for rows.Next() {
 		var (
-			e    Entry
-			seq  int64
-			role string
-			a    envelope.Actor
+			e     Entry
+			seq   int64
+			role  string
+			a     envelope.Actor
+			files []byte
 		)
-		if err := rows.Scan(&seq, &role, &e.Text, &a.ID, &a.Display, &a.Bot, &e.RunID, &e.SurfaceID, &e.At); err != nil {
+		if err := rows.Scan(&seq, &role, &e.Text, &a.ID, &a.Display, &a.Bot, &e.RunID, &e.SurfaceID, &e.At, &files); err != nil {
 			return nil, err
 		}
 		e.Seq, e.Role, e.Actor, e.At = uint64(seq), Role(role), a, e.At.UTC()
-		out = append(out, e)
+		if err := json.Unmarshal(files, &e.Attachments); err != nil {
+			return nil, fmt.Errorf("decode attachments of entry %d: %w", seq, err)
+		}
+		out = append(out, e.clone())
 	}
 	return out, rows.Err()
+}
+
+// encodeAttachments renders an entry's attachment list for its column. No
+// attachments is the empty array the column defaults to, so an entry written
+// now with none is stored exactly as a row written before the column existed.
+func encodeAttachments(as []attachment.Attachment) ([]byte, error) {
+	if len(as) == 0 {
+		return []byte("[]"), nil
+	}
+	b, err := json.Marshal(as)
+	if err != nil {
+		return nil, fmt.Errorf("encode attachments: %w", err)
+	}
+	return b, nil
 }
 
 // wrap adds this package's context to a database failure and leaves the

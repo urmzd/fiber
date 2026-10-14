@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/thread"
 )
 
@@ -145,6 +147,114 @@ func TestPostgresConstraintsRefuseADuplicateWrittenBehindTheStore(t *testing.T) 
 	}
 	if err := insert(2, "", "1699.002"); err == nil {
 		t.Error("a second entry for one surface message was accepted")
+	}
+}
+
+// legacySchema is the journal as it shipped before entries carried
+// attachments. The migration test builds it by hand, writes a row the old way,
+// and then lets the current Migrate bring it forward.
+const legacySchema = `
+CREATE TABLE mandatum_threads (
+	tenant  text   NOT NULL,
+	agent   text   NOT NULL,
+	surface text   NOT NULL,
+	head    bigint NOT NULL CHECK (head >= 0),
+	PRIMARY KEY (tenant, agent, surface)
+);
+CREATE TABLE mandatum_thread_entries (
+	tenant        text        NOT NULL,
+	agent         text        NOT NULL,
+	surface       text        NOT NULL,
+	seq           bigint      NOT NULL CHECK (seq >= 1),
+	role          text        NOT NULL CHECK (role IN ('user', 'assistant')),
+	body          text        NOT NULL,
+	actor_id      text        NOT NULL,
+	actor_display text        NOT NULL,
+	actor_bot     boolean     NOT NULL,
+	run_id        text        NOT NULL,
+	surface_id    text        NOT NULL,
+	at            timestamptz NOT NULL,
+	PRIMARY KEY (tenant, agent, surface, seq),
+	FOREIGN KEY (tenant, agent, surface) REFERENCES mandatum_threads (tenant, agent, surface)
+);
+`
+
+// A journal written before entries had attachments is upgraded in place: the
+// migration adds the column without touching a row, the old rows read back
+// exactly as they were with no attachments, a pinned history over them is
+// unchanged, and new entries with files append after them. Running the
+// migration again changes nothing.
+func TestPostgresMigrationAddsAttachmentsWithoutChangingOldEntries(t *testing.T) {
+	url := postgresURL(t)
+	ctx := context.Background()
+	schema := fmt.Sprintf("mandatumtest_thread_legacy_%d_%d", time.Now().UnixNano(), schemas.Add(1))
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 4
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ident := pgx.Identifier{schema}.Sanitize()
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA "+ident); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DROP SCHEMA "+ident+" CASCADE")
+		pool.Close()
+	})
+	if _, err := pool.Exec(ctx, legacySchema); err != nil {
+		t.Fatalf("legacy schema: %v", err)
+	}
+	key := slackThread("docs-bot")
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `INSERT INTO mandatum_threads VALUES ($1, $2, $3, 2)`, key.Tenant, key.Agent, key.Surface); err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range []struct{ role, body, run string }{{"user", "old question", "run-1"}, {"assistant", "old answer", "run-1"}} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO mandatum_thread_entries VALUES ($1, $2, $3, $4, $5, $6, 'U1', 'ada', false, $7, '', $8)`,
+			key.Tenant, key.Agent, key.Surface, i+1, row.role, row.body, row.run, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := thread.NewPostgres(pool)
+	for range 2 {
+		if err := store.Migrate(ctx); err != nil {
+			t.Fatalf("Migrate over the legacy schema: %v", err)
+		}
+	}
+	old, err := store.History(ctx, key, 2)
+	if err != nil {
+		t.Fatalf("History of legacy rows: %v", err)
+	}
+	if len(old) != 2 || old[0].Text != "old question" || old[1].Text != "old answer" || !old[0].At.Equal(at) {
+		t.Fatalf("legacy rows read back as %+v", old)
+	}
+	for _, e := range old {
+		if e.Attachments != nil {
+			t.Errorf("legacy entry %d read back with attachments %#v, want nil", e.Seq, e.Attachments)
+		}
+	}
+
+	q := user("run-2", "and this screenshot?")
+	q.Attachments = []attachment.Attachment{{Digest: strings.Repeat("c", 64), MediaType: "image/png", Name: "s.png", Size: 9}}
+	mustAppend(t, store, key, q)
+	after, err := store.History(ctx, key, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, old) {
+		t.Fatalf("history pinned over legacy rows changed after an append with files:\n got %+v\nwant %+v", after, old)
+	}
+	all := mustHistory(t, store, key)
+	if len(all) != 3 || !reflect.DeepEqual(all[2].Attachments, q.Attachments) {
+		t.Fatalf("new entry after migration = %+v", all)
 	}
 }
 

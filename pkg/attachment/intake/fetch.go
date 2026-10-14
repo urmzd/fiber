@@ -33,6 +33,26 @@ var (
 	ErrTooManyRedirects = errors.New("intake: too many redirects")
 )
 
+// StatusError is a response other than 200 or a redirect. It matches
+// ErrStatus, and carries the code so a connector can tell a refusal (401,
+// 403) from a file that is not there. It names the host and never the URL.
+type StatusError struct {
+	Code int
+	Host string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s: %d from %s", ErrStatus, e.Code, e.Host)
+}
+
+// Is makes a StatusError match ErrStatus.
+func (e *StatusError) Is(target error) bool { return target == ErrStatus }
+
+// Refused reports a status that means the credentials were not accepted.
+func (e *StatusError) Refused() bool {
+	return e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden
+}
+
 // Fetch defaults.
 const (
 	// DefaultTimeout bounds a whole fetch: resolution, connection, every
@@ -380,7 +400,7 @@ func redirectTarget(from *url.URL, resp *http.Response) (*url.URL, bool, error) 
 
 func (f *Fetcher) store200(ctx context.Context, tenant string, u *url.URL, resp *http.Response, meta Meta) (attachment.Attachment, error) {
 	if resp.StatusCode != http.StatusOK {
-		return attachment.Attachment{}, fmt.Errorf("%w: %d from %s", ErrStatus, resp.StatusCode, u.Hostname())
+		return attachment.Attachment{}, &StatusError{Code: resp.StatusCode, Host: u.Hostname()}
 	}
 	// A declared length over the cap is refused without reading a byte. An
 	// absent or dishonest length is still held to the cap by the store.

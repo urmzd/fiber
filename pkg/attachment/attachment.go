@@ -85,6 +85,14 @@ type Attachment struct {
 	// text or a Slack file title. It is the uploader's words and is presented
 	// to a model as such.
 	Alt string `json:"alt,omitempty"`
+	// Unread, when set, says why a file that was attached could not be
+	// brought in: it was over a size cap, its host was refused, the surface
+	// refused the credentials. Such a reference names no content, so Digest
+	// and Size are empty, and it resolves to a note saying a file was there
+	// and why it could not be read. It exists because a file that silently
+	// vanished would have the agent answer a different question from the one
+	// it was asked.
+	Unread string `json:"unread,omitempty"`
 }
 
 // Kind returns the routing kind of the attachment's media type.
@@ -99,18 +107,34 @@ func (a Attachment) Label() string {
 	return "unnamed file"
 }
 
+// MaxUnread bounds Unread in bytes.
+const MaxUnread = 256
+
+// Missing returns the reference for a file that was attached and could not be
+// brought in, with reason saying why. reason is a plain clause that reads
+// after "could not be read:", and is cleaned to one line.
+func Missing(name string, origin address.Address, alt, reason string) Attachment {
+	reason = clean(reason, MaxUnread)
+	if reason == "" {
+		reason = "it could not be fetched"
+	}
+	return Attachment{Name: CleanName(name), Origin: origin, Alt: CleanAlt(alt), Unread: reason}
+}
+
 // Validate checks that the attachment is well formed. It is what a server
 // applies to an attachment that arrived on the wire, where every field is a
 // claim.
 func (a Attachment) Validate() error {
+	if a.Unread != "" {
+		return a.validateUnread()
+	}
 	if err := validDigest(a.Digest); err != nil {
 		return err
 	}
 	if a.Size < 0 {
 		return fmt.Errorf("%w: negative size %d", ErrInvalid, a.Size)
 	}
-	if a.MediaType == "" || len(a.MediaType) > 127 || !strings.Contains(a.MediaType, "/") ||
-		strings.ContainsAny(a.MediaType, " ;\t") || a.MediaType != strings.ToLower(a.MediaType) || !printable(a.MediaType) {
+	if !validMediaType(a.MediaType) {
 		return fmt.Errorf("%w: media type %q is not a bare lowercase type/subtype", ErrInvalid, a.MediaType)
 	}
 	if a.Name != CleanName(a.Name) {
@@ -120,6 +144,29 @@ func (a Attachment) Validate() error {
 		return fmt.Errorf("%w: alt text is not clean: at most %d bytes on one line", ErrInvalid, MaxAlt)
 	}
 	return nil
+}
+
+// validateUnread checks a reference to a file that was never stored: it must
+// name no content, and its reason must be one clean line.
+func (a Attachment) validateUnread() error {
+	switch {
+	case a.Digest != "" || a.Size != 0:
+		return fmt.Errorf("%w: an unread file names no content, so it has no digest or size", ErrInvalid)
+	case a.MediaType != "" && !validMediaType(a.MediaType):
+		return fmt.Errorf("%w: media type %q is not a bare lowercase type/subtype", ErrInvalid, a.MediaType)
+	case a.Unread != clean(a.Unread, MaxUnread):
+		return fmt.Errorf("%w: unread reason is not clean: at most %d bytes on one line", ErrInvalid, MaxUnread)
+	case a.Name != CleanName(a.Name):
+		return fmt.Errorf("%w: name is not clean: it must be a bare file name of at most %d bytes with no control characters", ErrInvalid, MaxName)
+	case a.Alt != CleanAlt(a.Alt):
+		return fmt.Errorf("%w: alt text is not clean: at most %d bytes on one line", ErrInvalid, MaxAlt)
+	}
+	return nil
+}
+
+func validMediaType(mt string) bool {
+	return mt != "" && len(mt) <= 127 && strings.Contains(mt, "/") &&
+		!strings.ContainsAny(mt, " ;\t") && mt == strings.ToLower(mt) && printable(mt)
 }
 
 // ValidateAll checks a tag's attachment list: each entry, and the count.
@@ -151,14 +198,23 @@ func Inherit(parent, own []Attachment) []Attachment {
 	out := make([]Attachment, 0, len(parent)+len(own))
 	for _, list := range [][]Attachment{parent, own} {
 		for _, a := range list {
-			if seen[a.Digest] {
+			if seen[a.identity()] {
 				continue
 			}
-			seen[a.Digest] = true
+			seen[a.identity()] = true
 			out = append(out, a)
 		}
 	}
 	return out
+}
+
+// identity is what makes two references the same file: the digest, or for a
+// file that was never stored, everything that describes it.
+func (a Attachment) identity() string {
+	if a.Unread == "" {
+		return a.Digest
+	}
+	return "unread\x00" + a.Name + "\x00" + a.Origin.String() + "\x00" + a.Alt + "\x00" + a.Unread
 }
 
 // CleanName reduces an uploader's file name to a display label: the final

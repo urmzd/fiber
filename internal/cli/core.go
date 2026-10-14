@@ -234,7 +234,7 @@ func newCore(cfg coreConfig) (*core, error) {
 
 	// The mesh. Roles are derived from the interfaces each connector
 	// implements, never declared, so registering is the whole wiring.
-	sinks, err := buildConnectors(cfg, c.store)
+	sinks, err := buildConnectors(cfg, c.store, c.blobs)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +280,10 @@ func newCore(cfg coreConfig) (*core, error) {
 		exec,
 		runtime.WithLogger(log),
 		runtime.WithThreads(threads),
+		// Before a run's history is pinned, its thread catches up with
+		// what people said on the surface without tagging the agent.
+		// Failing to list a surface is logged and the run goes ahead.
+		runtime.WithReconciler(listers(sinks)),
 		runtime.WithMessageID(surfaceMessageID),
 		// A stop asked for before a run's turn starts is recorded on the
 		// run, so it does not depend on the bus still holding it.

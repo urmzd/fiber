@@ -2,9 +2,9 @@
 // messages in memory and lets a test do to them what people do on a real
 // surface, which is post, edit and delete.
 //
-// It exists because no connector implements thread.Lister yet, and the
-// reconciliation rules (append only, in surface order, never rewriting what
-// the journal already holds) have to be provable without one.
+// It exists so that the reconciliation rules (append only, in surface order,
+// never rewriting what the journal already holds, files brought in once) are
+// provable without a real surface.
 package threadtest
 
 import (
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/thread"
 )
@@ -25,6 +26,7 @@ type Surface struct {
 	threads map[string][]thread.Message // tenant + canonical surface -> messages
 	next    int
 	lists   int
+	fetches int
 	err     error
 }
 
@@ -40,6 +42,34 @@ func slot(tenant string, surface address.Address) string {
 // Post adds a message from a person to a thread and returns its id.
 func (s *Surface) Post(tenant string, surface address.Address, who, text string) string {
 	return s.post(tenant, surface, thread.Message{Text: text, Actor: envelope.Actor{ID: who, Display: who}})
+}
+
+// PostFiles adds a message from a person with files on it and returns its
+// id. The files are handed to a reconciliation through Message.Files, and
+// every call of it is counted (see Fetches), which is how a test proves a
+// file is brought in once rather than on every reconciliation.
+func (s *Surface) PostFiles(tenant string, surface address.Address, who, text string, files ...attachment.Attachment) string {
+	held := append([]attachment.Attachment(nil), files...)
+	return s.post(tenant, surface, thread.Message{
+		Text:  text,
+		Actor: envelope.Actor{ID: who, Display: who},
+		Files: func(ctx context.Context) ([]attachment.Attachment, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			s.mu.Lock()
+			s.fetches++
+			s.mu.Unlock()
+			return append([]attachment.Attachment(nil), held...), nil
+		},
+	})
+}
+
+// Fetches reports how many times a message's files were brought in.
+func (s *Surface) Fetches() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fetches
 }
 
 // PostOwn adds a message the deployment itself posted, such as an agent's

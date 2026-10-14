@@ -851,9 +851,17 @@ func historyOf(entries []thread.Entry) []agentrt.Message {
 	out := make([]agentrt.Message, 0, len(entries))
 	for _, e := range entries {
 		m := agentrt.Message{Role: agentrt.Role(e.Role), Text: e.Text}
+		if e.Role == thread.RoleUser {
+			m.Attachments = e.Attachments
+		}
 		if e.RunID == "" && e.Role == thread.RoleUser {
 			if who := firstNonEmpty(e.Actor.Display, e.Actor.ID); who != "" {
 				m.Text = who + ": " + e.Text
+				if e.Text == "" {
+					// A message that was only files: the label alone,
+					// with the files after it.
+					m.Text = who + ":"
+				}
 			}
 		}
 		out = append(out, m)
@@ -879,10 +887,14 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	}
 	runID := RunID(in.Tag.Tenant, in.Tag.ID)
 	entries := make([]thread.Entry, 0, 2)
-	if said := firstNonEmpty(out.Prompt, in.Tag.Text); strings.TrimSpace(said) != "" {
+	// The request's files are journaled with it, as the references the run
+	// was handed, so a later run in the thread is shown them where this run
+	// was: after the request's text.
+	if said := firstNonEmpty(out.Prompt, in.Tag.Text); strings.TrimSpace(said) != "" || len(in.Tag.Attachments) > 0 {
 		entries = append(entries, thread.Entry{
 			Role: thread.RoleUser, Text: said, Actor: in.Tag.Actor,
 			RunID: runID, SurfaceID: r.surfaceID(in.Tag), At: in.Tag.At,
+			Attachments: in.Tag.Attachments,
 		})
 	}
 	answer := out.Text

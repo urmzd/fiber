@@ -60,13 +60,13 @@ func (m *Memory) Append(ctx context.Context, key Key, entries ...Entry) ([]Entry
 	out := make([]Entry, len(prepared))
 	for i, e := range prepared {
 		if at, ok := j.held(e); ok {
-			out[i] = j.entries[at]
+			out[i] = j.entries[at].clone()
 			continue
 		}
 		e.Seq = uint64(len(j.entries)) + 1
 		j.entries = append(j.entries, e)
 		j.index(e, len(j.entries)-1)
-		out[i] = e
+		out[i] = e.clone()
 	}
 	return out, nil
 }
@@ -123,6 +123,11 @@ func (m *Memory) History(ctx context.Context, key Key, upTo uint64) ([]Entry, er
 	if upTo > uint64(len(held)) {
 		return nil, fmt.Errorf("%w: thread %s holds %d entries, not the %d asked for", ErrGap, key, len(held), upTo)
 	}
-	// A copy, so a caller cannot reach back into the journal and edit it.
-	return append([]Entry{}, held[:upTo]...), nil
+	// A copy, attachment lists included, so a caller cannot reach back into
+	// the journal and edit it.
+	out := make([]Entry, upTo)
+	for i, e := range held[:upTo] {
+		out[i] = e.clone()
+	}
+	return out, nil
 }
