@@ -22,7 +22,7 @@ sandboxing and access control.
 
 | Package | Role |
 |---------|------|
-| `pkg/topic` | Topic addressing: `agent`, `agent:<name>`, `agent:<name>:<run>`. Prefix containment, no wildcards. The reserved control namespace `agent:_control:<verb>-<run>`. Leaf. |
+| `pkg/topic` | Topic addressing: `agent`, `agent:<name>`, `agent:<name>:<run>`. Prefix containment, no wildcards. The reserved control namespace `agent:_control:<verb>-<key>`. Leaf. |
 | `pkg/address` | Mesh endpoint URIs: `github://urmzd/mandatum/issues/42`, `slack://T01/C02?thread=...`. Leaf. |
 | `pkg/envelope` | Wire contract: `Tag`, `Event`, `Kind`, `Route`, `Filter`, `Subscription`. Leaf. |
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
@@ -105,6 +105,9 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 - **A run's topic has one writer.** Only the attempt executing a run publishes
   to `agent:<name>:<run>`, with sequence numbers it chose. Anything addressed
   to a run, such as a stop request, goes to its control topic instead.
+- **A stop is recorded before it is announced.** `Runtime.Stop` writes the
+  request on the run in the ledger and only then publishes it; the bus is the
+  fast path, never the only copy. Hosts pass `runtime.WithStopLedger`.
 - **A stopped run is a result, not an error.** The agent activity returns a
   stopped outcome and the workflow body decides from that record alone, so a
   replay announces the same stop. Never read "has a stop been requested" in

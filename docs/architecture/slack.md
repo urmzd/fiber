@@ -37,7 +37,9 @@ Stopped: func(ctx context.Context, stop slack.Stop) error {
 ```
 
 The run id is the one `Acceptance.RunID` reported and every event of the run
-carries. It is not the Slack event id the tag was raised with. The run then ends
+carries, `runtime.RunID(tenant, tagID)`. It is not the Slack event id the tag
+was raised with. The runtime must be built with `runtime.WithStopLedger` for
+the stop to be recorded before it is announced. The run then ends
 with `lifecycle.stopped`, and the sink edits the session's message to say so
 under what the agent had written. The standalone mandatum CLI does not set
 `Stopped`, because it keeps no session-to-run mapping.
