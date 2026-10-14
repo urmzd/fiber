@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.0 (2026-10-14)
+
+### Features
+
+- **cli**: reconcile threads through their connectors and bring files in from Slack, GitHub and Jira ([9b45449](https://github.com/urmzd/mandatum/commit/9b454490ad91c2b1b127c8cead30fd1a030a153c))
+- **jira**: bring issue attachments in through the site's content endpoint ([3bda4e4](https://github.com/urmzd/mandatum/commit/3bda4e49c8d023be23c5ac55fe1bc08471108364))
+- **github**: bring attached images and videos in as attachments and list conversations for reconciliation ([51fb1a8](https://github.com/urmzd/mandatum/commit/51fb1a812fd3a20a7d17edfd904055009689a8e1))
+- **slack**: bring message files in as attachments and list threads for reconciliation ([d23632e](https://github.com/urmzd/mandatum/commit/d23632e4dd0a2db3b5e131c2bd9a0f0eaeb21274))
+- **attachment**: recognise voice clips in audio-only WebM and M4A containers ([a675aea](https://github.com/urmzd/mandatum/commit/a675aea9600dcc4c58a6d543c0feeab08a022de0))
+- **intake**: collect a message's files under per-tag caps without failing the tag ([61b039e](https://github.com/urmzd/mandatum/commit/61b039e4dcb38b1fc6f440adfee8e8c2738c6adc))
+- **runtime**: journal a request's files and replay them byte-stably in later turns ([3b21ba2](https://github.com/urmzd/mandatum/commit/3b21ba2520fe4ed2462f68fa546a1574f5d52bf4))
+- **thread**: journal attachments with each entry and reconcile surface files once ([c6d6e97](https://github.com/urmzd/mandatum/commit/c6d6e97b5d85fb98f2c2f6e8b1661e46c82a7f63))
+- **attachment**: reference a file that could not be fetched so the agent is told ([1eb1ca5](https://github.com/urmzd/mandatum/commit/1eb1ca5fd4c865e54cb0db9dacfbb9cb6984b490))
+
+### Misc
+
+- **slack**: merge declaration flagged by staticcheck ([924bba0](https://github.com/urmzd/mandatum/commit/924bba0aa75c16a27730ec57ec14db1a859ad8ef))
+- **github**: gofmt attachment tests ([2fbda0f](https://github.com/urmzd/mandatum/commit/2fbda0f6f3e4342ec57927b4c9df24d72e3dc9d6))
+
+[Full Changelog](https://github.com/urmzd/mandatum/compare/v0.8.0...v0.9.0)
+
+
 ## 0.8.0 (2026-10-14)
 
 ### Features
