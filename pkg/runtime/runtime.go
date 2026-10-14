@@ -647,11 +647,18 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	}
 
 	if out.StopRecorded {
-		// Claim the request the ledger holds, so the run ends with no record
-		// that no call read. The outcome says it exists, and records are
-		// never removed, so this never waits; if it fails the outcome stands
-		// regardless, so it is only logged.
-		if _, err := duraturo.Event[json.RawMessage](ctx, stopRecordName); err != nil {
+		// Claim the request, for the one case where it matters: duraturo
+		// replays from the records it loaded when the attempt began, and
+		// logs any of those that no call read. A request recorded before this
+		// attempt began is among them and is claimed here. One recorded
+		// during the attempt is not among them; it reads as an event that
+		// has not happened (ErrParked), which here means only that there is
+		// nothing to claim, and the body carries on. The claim is advisory
+		// either way: the outcome is already decided.
+		_, err := duraturo.Event[json.RawMessage](ctx, stopRecordName)
+		switch {
+		case err == nil, errors.Is(err, run.ErrParked):
+		default:
 			r.logger.Warn("mandatum/runtime: could not claim the recorded stop request",
 				"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
 		}

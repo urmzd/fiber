@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"strings"
@@ -179,6 +180,8 @@ type world struct {
 	specs   *specs
 	threads *spied
 	busOnly bool
+	// log, when set, receives what the runtimes and workers log.
+	log *slog.Logger
 }
 
 func newWorld(t *testing.T) *world {
@@ -212,6 +215,9 @@ func (w *world) restarted() *world {
 func (w *world) runtime(t *testing.T, exec runtime.Executor, opts ...runtime.Option) *runtime.Runtime {
 	t.Helper()
 	base := []runtime.Option{runtime.WithThreads(w.threads)}
+	if w.log != nil {
+		base = append(base, runtime.WithLogger(w.log))
+	}
 	if !w.busOnly {
 		base = append(base, runtime.WithStopLedger(w.ledger))
 	}
@@ -232,7 +238,12 @@ func (w *world) work(t *testing.T, rt *runtime.Runtime, between func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		logger := w.log
+		if logger == nil {
+			logger = slog.Default()
+		}
 		_ = worker.New(w.ledger, w.queue,
+			worker.WithLogger(logger),
 			worker.WithRegistry(rt.Registry()),
 			worker.WithConcurrency(2),
 			worker.WithJanitorEvery(0),

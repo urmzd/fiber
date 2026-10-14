@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	goruntime "runtime"
 	"strings"
@@ -800,4 +801,57 @@ func TestADelegatorCanTellAStopFromAnyOtherCancellation(t *testing.T) {
 			t.Fatalf("cause = %v, want a plain cancellation", cause)
 		}
 	})
+}
+
+// warnings is a logger that keeps every record at warning level or above.
+type warnings struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (w *warnings) Enabled(_ context.Context, l slog.Level) bool { return l >= slog.LevelWarn }
+func (w *warnings) Handle(_ context.Context, r slog.Record) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.seen = append(w.seen, r.Message)
+	return nil
+}
+func (w *warnings) WithAttrs([]slog.Attr) slog.Handler { return w }
+func (w *warnings) WithGroup(string) slog.Handler      { return w }
+func (w *warnings) all() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.seen...)
+}
+
+// An ordinary stop is not an incident. Neither the runtime nor duraturo's
+// worker warns about anything, whether the request was recorded during the
+// turn (it is not in the attempt's replay set) or before it (the workflow body
+// claims it).
+func TestAStopLogsNoWarning(t *testing.T) {
+	for _, before := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded before the attempt %v", before), func(t *testing.T) {
+			w := newWorld(t)
+			seen := &warnings{}
+			w.log = slog.New(seen)
+			exec := newPatient("Half an ")
+			rt := w.runtime(t, exec)
+			runID := w.accept(t, rt, tag("docs-bot", "evt-1", "explain"))
+			if before {
+				w.stop(t, rt, "acme", runID, "early", "U1")
+			}
+			w.work(t, rt, nil)
+			if !before {
+				exec.inFlight(t)
+				w.stop(t, rt, "acme", runID, "live", "U1")
+			}
+			if out := w.result(t, rt, runID); out.Stopped == nil {
+				t.Fatalf("Output = %+v, want stopped", out)
+			}
+			time.Sleep(50 * time.Millisecond) // the worker logs after it settles the run
+			if got := seen.all(); len(got) != 0 {
+				t.Fatalf("a stop logged warnings: %q", got)
+			}
+		})
+	}
 }
