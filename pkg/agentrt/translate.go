@@ -48,7 +48,7 @@ func NewTranslator() *Translator { return &Translator{} }
 // retrieval instead (see Citations). saige's CitationDelta, which reports what
 // a model or tool cited, is not translated yet and is dropped with the framing.
 //
-// Two deltas are dropped for reasons worth stating:
+// Three deltas are not translated here, for reasons worth stating:
 //
 //   - ErrorDelta becomes the turn's error, not an event. Failure is a run
 //     lifecycle fact and pkg/runtime publishes it with the attempt and
@@ -56,9 +56,10 @@ func NewTranslator() *Translator { return &Translator{} }
 //     less and could contradict the lifecycle event that follows.
 //   - StoppedDelta becomes Result.Stopped for the same reason: a stopped run
 //     is announced by pkg/runtime as lifecycle.stopped, once, with the attempt.
-//   - UsageDelta is telemetry. It belongs on a metrics path, and putting token
-//     counts on a fan-out bus that connectors render would leak cost data into
-//     Slack threads.
+//   - UsageDelta is accounting, and Runner.Run publishes it as usage.call
+//     with what only the runner knows: the call's key, the model's price and
+//     its context window. Connectors do not render that kind, so token counts
+//     never reach a Slack thread.
 func (t *Translator) Delta(d saigetypes.Delta) (Chunk, bool) {
 	switch v := d.(type) {
 	case saigetypes.PartDelta:

@@ -140,6 +140,7 @@ func renderEventText(u *ui, e *mandatumv1.Event, answerOnly bool) {
 		}
 		if answerOnly {
 			u.logf("%s\n", paint(line))
+			logUsage(u, v.Usage)
 			return
 		}
 		u.printf("%s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), paint(line))
@@ -160,6 +161,7 @@ func renderEventText(u *ui, e *mandatumv1.Event, answerOnly bool) {
 		}
 		if answerOnly {
 			u.logf("%s\n", u.yellow(line))
+			logUsage(u, v.Usage)
 			return
 		}
 		u.printf("%s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), u.yellow(line))
@@ -173,11 +175,130 @@ func renderEventText(u *ui, e *mandatumv1.Event, answerOnly bool) {
 	case payload.Action:
 		u.logf("%s %s\n", u.green("action"), oneLine(v.Summary))
 
+	case payload.UsageCall:
+		// One line per call in listen, where the stream is the point. In
+		// tag the run's total follows the terminal event instead, so the
+		// answer is not interleaved with accounting.
+		if answerOnly {
+			return
+		}
+		line := callLine(v)
+		u.printf("%s %s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), u.dim(string(kind)), line)
+
+	case payload.UsageChild:
+		if answerOnly {
+			return
+		}
+		u.printf("%s %s %s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), u.dim(string(kind)),
+			oneLine(firstNonEmptyString(v.Agent, v.RunID)), usageLine(v.Usage))
+
 	default:
 		if !answerOnly {
 			u.printf("%s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), kind)
 		}
 	}
+}
+
+// logUsage writes a run's total after its terminal event, on stderr: it is
+// about the run, not part of the answer.
+func logUsage(u *ui, usage *payload.RunUsage) {
+	if usage == nil || usage.Total.ModelCalls == 0 {
+		return
+	}
+	line := usageLine(usage.Total)
+	if c := usage.Context; c != nil && c.Window > 0 {
+		line += fmt.Sprintf(", context %s/%s", count(c.Tokens), count(c.Window))
+	}
+	u.logf("%s %s\n", u.dim("usage"), u.dim(line))
+}
+
+// usageLine renders summed usage for a person: calls, tokens, and the cost
+// only where every call was priced, said to be partial otherwise.
+func usageLine(t payload.Usage) string {
+	calls := "calls"
+	if t.ModelCalls == 1 {
+		calls = "call"
+	}
+	line := fmt.Sprintf("%d %s, %s in", t.ModelCalls, calls, count(t.PromptTokens))
+	if t.CachedPromptTokens > 0 || t.CacheWriteTokens > 0 {
+		line += fmt.Sprintf(" (%s cached, %s written)", count(t.CachedPromptTokens), count(t.CacheWriteTokens))
+	}
+	line += fmt.Sprintf(", %s out", count(t.CompletionTokens))
+	costs := ""
+	if t.Cost != nil {
+		costs = money(*t.Cost)
+	}
+	for _, c := range t.OtherCosts {
+		if costs != "" {
+			costs += " + "
+		}
+		costs += money(c)
+	}
+	switch {
+	case costs != "" && t.UnpricedCalls == 0:
+		line += ", " + costs
+	case costs != "":
+		line += fmt.Sprintf(", at least %s (%d calls unpriced)", costs, t.UnpricedCalls)
+	default:
+		line += ", cost unknown"
+	}
+	return line
+}
+
+// callLine renders one model call.
+func callLine(c payload.UsageCall) string {
+	line := c.Model
+	if c.Depth > 0 {
+		line = fmt.Sprintf("%s via %s", line, c.Agent)
+	}
+	if c.ResponseCacheHit {
+		return line + " response cache, nothing spent"
+	}
+	line += fmt.Sprintf(" %s in, %s out", count(c.PromptTokens), count(c.CompletionTokens))
+	if c.ContextWindow > 0 {
+		line += fmt.Sprintf(", context %s/%s", count(c.PromptTokens), count(c.ContextWindow))
+	}
+	if c.Cost != nil {
+		line += ", " + money(*c.Cost)
+	} else {
+		line += ", cost unknown"
+	}
+	return strings.TrimSpace(line)
+}
+
+// money renders integer micro-units exactly: six decimal places, no rounding.
+func money(c payload.Cost) string {
+	sign := ""
+	m := c.Micros
+	if m < 0 {
+		sign, m = "-", -m
+	}
+	s := fmt.Sprintf("%s %s%d.%06d", c.Currency, sign, m/1_000_000, m%1_000_000)
+	if c.AsOf != "" {
+		s += " as of " + c.AsOf
+	}
+	return s
+}
+
+// count renders a token count with thousands separators.
+func count(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if n < 0 {
+		return s
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // oneLine flattens a fragment for a single-line render. Deltas arrive with

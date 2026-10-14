@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/urmzd/mandatum/pkg/agentrt"
 	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
 // loopProvider is a model that calls a tool for a fixed number of turns and
@@ -441,7 +443,7 @@ func TestWhatVariesBetweenRunsComesAfterWhatDoesNot(t *testing.T) {
 
 // Cache health has to be measurable from outside the provider: a turn reports
 // how much of its input was read from the cache and how much was written, on
-// its result rather than on the bus.
+// its result and on one usage.call per model call, and nowhere else.
 func TestUsageAccountsForCacheReadsAndWritesAcrossATurn(t *testing.T) {
 	t.Parallel()
 
@@ -463,17 +465,27 @@ func TestUsageAccountsForCacheReadsAndWritesAcrossATurn(t *testing.T) {
 		kinds = append(kinds, string(c.Kind))
 	}
 
-	want := payload.Usage{ModelCalls: 4, PromptTokens: 4000, CachedPromptTokens: 3200, CacheWriteTokens: 600, CompletionTokens: 80}
-	if res.Usage != want {
+	// The test provider declares no rate card, so the calls are counted and
+	// not priced.
+	want := payload.Usage{ModelCalls: 4, Requests: 4, PromptTokens: 4000, CachedPromptTokens: 3200, CacheWriteTokens: 600, CompletionTokens: 80, UnpricedCalls: 4}
+	if !reflect.DeepEqual(res.Usage, want) {
 		t.Errorf("Usage = %+v, want %+v", res.Usage, want)
 	}
 	if got := res.Usage.CacheReadRatio(); got != 0.8 {
 		t.Errorf("CacheReadRatio = %v, want 0.8", got)
 	}
+	calls := 0
 	for _, c := range chunks {
-		if strings.Contains(string(c.Payload), "prompt_tokens") {
-			t.Errorf("token counts were published as a %s event (%v); they are telemetry and must stay off the bus", c.Kind, kinds)
+		if c.Kind == envelope.KindUsageCall {
+			calls++
+			continue
 		}
+		if strings.Contains(string(c.Payload), "prompt_tokens") {
+			t.Errorf("token counts were published as a %s event (%v); they belong on usage.call only", c.Kind, kinds)
+		}
+	}
+	if calls != 4 {
+		t.Errorf("published %d usage.call events, want one per model call (4): %v", calls, kinds)
 	}
 }
 

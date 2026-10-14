@@ -85,6 +85,17 @@
 // caller that retries failures must not retry it. This package does not decide
 // what a stopped turn means for a run or a thread; pkg/runtime does.
 //
+// # Usage
+//
+// Every model call the turn makes is published as a usage.call event the
+// moment saige reports it: the tokens in and out, the prompt cache's share,
+// the model, the cost where saige's price catalog has a rate card for it, and
+// the model's context window. Publishing per call rather than once at the end
+// is what keeps the tokens of a turn that fails or is stopped on the record:
+// they were spent either way. Result.Usage is the same calls summed. Nothing
+// is priced from anything but saige's catalog; an unknown model reports its
+// tokens and no cost.
+//
 // # Revisions are pinned, not resolved
 //
 // New takes a Revision, never an agent name. Nothing in this package can look
@@ -107,6 +118,7 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/mandatum/pkg/envelope"
 
 	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/attachment/resolve"
@@ -194,6 +206,12 @@ type Turn struct {
 	// title). It is rendered into the prompt in sorted key order so the same
 	// tag produces the same prompt on every attempt.
 	Meta map[string]string
+	// Accounting is the prefix a model call's usage is keyed under:
+	// "<prefix>/<n>" for the turn's nth call. saige's own AccountingID, when
+	// it reports one, is carried beside it and not used as the key. The caller makes it unique to this execution (pkg/runtime
+	// uses the run, the attempt and the delegation path), which makes every
+	// call's key unique. Empty is DefaultAccounting.
+	Accounting string
 }
 
 // Result is what a turn produced.
@@ -211,9 +229,11 @@ type Result struct {
 	Chunks int
 	// Citations counts the retrieved passages the turn was grounded in.
 	Citations int
-	// Usage is the tokens the turn spent across all its model calls, with
-	// the share read from and written to the prompt cache. It is reported
-	// for a failed turn too, since the tokens were spent either way.
+	// Usage is what the turn's own model calls spent, with the share read
+	// from and written to the prompt cache and the cost where saige can
+	// price the model. It is reported for a failed turn too, since the
+	// tokens were spent either way. Calls made by agents this turn delegated
+	// to are not in it; they are reported as usage.call events of their own.
 	Usage payload.Usage
 	// Compactions lists each time the turn's history was summarized, in
 	// order. It is empty unless WithCompaction set a budget and the turn
@@ -491,6 +511,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 
 	stream := agent.Invoke(ctx, input)
 	translator := NewTranslator()
+	accounts := newAccountant(t.Accounting, r.rev.Spec.Name, r.rev.Spec.Model, r.provider)
 
 	// The stop request is applied from its own goroutine, because this one is
 	// busy draining the stream and saige's Stop is safe to call from anywhere.
@@ -537,9 +558,22 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			// lifecycle fact and not an event of its own; the request it
 			// answers is read off the stream once it has drained.
 		case saigetypes.UsageDelta:
-			// Telemetry, so it goes on the Result and not on the bus (see
-			// Translator.Delta).
-			res.Usage = addUsage(res.Usage, v)
+			// One model call, reported as it completes so that a call the
+			// turn never finishes (a failure, a stop) is still on the
+			// record. See "Usage" in the package documentation.
+			call := accounts.call(v)
+			res.Usage = res.Usage.AddCall(call)
+			c, ok := chunk(envelope.KindUsageCall, call)
+			if !ok {
+				continue
+			}
+			if err := send(c); err != nil {
+				stream.Cancel()
+				drain(stream)
+				settle()
+				return res, err
+			}
+			continue
 		case saigetypes.CompactionDelta:
 			res.Compactions = append(res.Compactions, compactionRecord(v))
 		case saigetypes.MarkerDelta:

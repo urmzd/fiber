@@ -9,6 +9,7 @@ import (
 
 	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/topic"
@@ -321,10 +322,47 @@ func runToProto(r Run) *mandatumv1.Run {
 		Error:      r.Error,
 		StopReason: r.StopReason,
 		StoppedBy:  r.StoppedBy,
+		Usage:      runUsageToProto(r.Usage),
 		CreatedAt:  timeToProto(r.CreatedAt),
 		StartedAt:  timeToProto(r.StartedAt),
 		EndedAt:    timeToProto(r.EndedAt),
 	}
+}
+
+// runUsageToProto renders what a run spent. Nil stays unset: a run with no
+// record of usage is not a run that spent nothing.
+func runUsageToProto(u *payload.RunUsage) *mandatumv1.RunUsage {
+	if u == nil {
+		return nil
+	}
+	out := &mandatumv1.RunUsage{
+		Own:      usageToProto(u.Own),
+		Children: usageToProto(u.Children),
+		Total:    usageToProto(u.Total),
+	}
+	if c := u.Context; c != nil {
+		out.Context = &mandatumv1.ContextUsage{Model: c.Model, Window: int64(c.Window), Tokens: int64(c.Tokens)}
+	}
+	return out
+}
+
+func usageToProto(u payload.Usage) *mandatumv1.Usage {
+	out := &mandatumv1.Usage{
+		ModelCalls:         int64(u.ModelCalls),
+		Requests:           int64(u.Requests),
+		PromptTokens:       int64(u.PromptTokens),
+		CachedPromptTokens: int64(u.CachedPromptTokens),
+		CacheWriteTokens:   int64(u.CacheWriteTokens),
+		CompletionTokens:   int64(u.CompletionTokens),
+		UnpricedCalls:      int64(u.UnpricedCalls),
+	}
+	if c := u.Cost; c != nil {
+		out.Cost = &mandatumv1.Cost{Micros: c.Micros, Currency: c.Currency, AsOf: c.AsOf}
+	}
+	for _, c := range u.OtherCosts {
+		out.OtherCosts = append(out.OtherCosts, &mandatumv1.Cost{Micros: c.Micros, Currency: c.Currency, AsOf: c.AsOf})
+	}
+	return out
 }
 
 // statusToProto maps a run status onto the wire enum. An unrecognised status

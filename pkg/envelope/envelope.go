@@ -68,6 +68,19 @@ const (
 	// "the agent said something".
 	KindActionTaken Kind = "action.taken"
 
+	// What a run spent. They are accounting, not conversation, and a route
+	// receives them only by asking: a route with no kind filter, or one that
+	// selects "delta" or "lifecycle", never does. Select "usage" for both,
+	// or one of them by name. A subscription with no filter sees them like
+	// any other kind.
+	//
+	// KindUsageCall reports one model call as it completes: tokens, the
+	// model, its cost where saige can price it, and its context window.
+	KindUsageCall Kind = "usage.call"
+	// KindUsageChild reports a child run's whole usage once it has ended,
+	// so the run that delegated to it can count it.
+	KindUsageChild Kind = "usage.child"
+
 	// Control-plane changes, on the same bus as the data so a dashboard sees
 	// an agent get revised in the same stream as the runs that follow it.
 	KindAgentCreated Kind = "control.created"
@@ -82,7 +95,7 @@ const (
 )
 
 // Family returns the leading component of a kind: "delta", "lifecycle",
-// "action", or "control".
+// "action", "usage", or "control".
 func (k Kind) Family() string {
 	for i := 0; i < len(k); i++ {
 		if k[i] == '.' {
@@ -116,19 +129,33 @@ type Actor struct {
 // Route is one delivery instruction: where to send events, and which ones.
 //
 // Kinds is a set of selectors matched against Event.Kind. An empty Kinds
-// means every kind. This is what makes a single run serve both a connector
-// rendering a live stream and a webhook that only wants the outcome.
+// means every kind except the usage family (see OptIn). This is what makes a
+// single run serve both a connector rendering a live stream and a webhook
+// that only wants the outcome.
 type Route struct {
 	Target address.Address `json:"target"`
 	Kinds  []string        `json:"kinds,omitempty"`
 }
 
+// OptIn reports whether a route must name k's family or k itself to receive
+// it. The usage family is opt-in: it was added after routes with no kind
+// filter were already delivering to receivers that knew a fixed set of kinds,
+// and an event per model call that such a receiver refuses, or fails on and
+// has retried in the run's ordered delivery lane, would cost every route that
+// never asked for it. As the root topic does not cover the control namespace,
+// "everything" does not cover accounting.
+func (k Kind) OptIn() bool { return k.Family() == "usage" }
+
 // Wants reports whether an event of kind k should be delivered on this route.
+// An opt-in kind is delivered only to a route that names it or its family.
 func (r Route) Wants(k Kind) bool {
 	if len(r.Kinds) == 0 {
-		return true
+		return !k.OptIn()
 	}
 	for _, sel := range r.Kinds {
+		if sel == "" && k.OptIn() {
+			continue
+		}
 		if k.Matches(sel) {
 			return true
 		}

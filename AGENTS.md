@@ -38,7 +38,7 @@ sandboxing and access control.
 | `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. `payload/` holds typed event bodies. |
-| `pkg/runtime` | The durable duraturo turn: revision pinning, legatus sandbox, dual publish, and stopping a run mid-turn. |
+| `pkg/runtime` | The durable duraturo turn: revision pinning, legatus sandbox, dual publish, stopping a run mid-turn, and per-run usage. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
 | `internal/server` | Connect handlers, SSE, webhook ingress, tenant interceptor. |
 | `internal/cli` | Command tree. `core.go` is the composition root. |
@@ -115,6 +115,13 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 - **Nothing about a particular stop reaches the thread journal.** A stopped
   turn is journaled as its partial answer plus `runtime.StopMarker`, a
   constant. The reason and the asker go on `lifecycle.stopped`.
+- **Usage is counted from what an attempt relayed, once.** A run's total is
+  built from the `usage.call` and `usage.child` events its attempts published,
+  keyed by mandatum's attempt-unique `accounting_id`, inside the memoized agent
+  activity. Every attempt records its calls on the run before it returns,
+  success or failure; the workflow body never reads usage. Cost comes only
+  from saige's price catalog, as integer micro-units, never converted or
+  estimated. Usage is opt-in for routes and chat sinks do not render it.
 - **Sinks must be idempotent.** Delivery is at-least-once. Render one message
   per run and edit it; never post per delta.
 - **Tenant is never read from a request body.** The server sets it from the

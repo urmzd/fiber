@@ -953,3 +953,30 @@ func equalSeqs(got, want []uint64) bool {
 	}
 	return true
 }
+
+// A route with no kind filter is delivered everything except usage, which a
+// route receives only by naming it: a receiver written before usage existed is
+// never sent an event per model call it would refuse or fail on.
+func TestUsageReachesOnlyARouteThatAskedForIt(t *testing.T) {
+	slack, hook := newSink("slack"), newSink("webhook")
+	h := start(t, registry(t, slack, hook))
+	if err := h.Register("run_1", []envelope.Route{
+		{Target: address.MustParse(slackTarget)},
+		{Target: address.MustParse(hookTarget), Kinds: []string{"usage", "lifecycle.completed"}},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	published := []envelope.Kind{envelope.KindText, envelope.KindUsageCall, envelope.KindUsageChild, envelope.KindCompleted}
+	for i, kind := range published {
+		h.publish(t, event("docs-bot", "run_1", uint64(i+1), kind))
+	}
+	slack.waitFor(t, 2)
+	hook.waitFor(t, 3)
+	time.Sleep(waitIdle)
+	if got, want := kindsOf(slack.events()), []envelope.Kind{envelope.KindText, envelope.KindCompleted}; !equalKinds(got, want) {
+		t.Errorf("the unfiltered route received %v, want %v", got, want)
+	}
+	if got, want := kindsOf(hook.events()), []envelope.Kind{envelope.KindUsageCall, envelope.KindUsageChild, envelope.KindCompleted}; !equalKinds(got, want) {
+		t.Errorf("the route that asked for usage received %v, want %v", got, want)
+	}
+}
