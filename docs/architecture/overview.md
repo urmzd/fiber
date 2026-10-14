@@ -247,7 +247,7 @@ reads, so they cannot push that tenant's own request out of it.
 | Between two attempts | The next attempt reads it from the ledger before its turn. |
 | After the process restarts | The ledger survived, and the next attempt stops. |
 | After the run ended | Nothing is published. Nothing is recorded either, unless the run ends between `Stop`'s check and its write, in which case the request is recorded on the finished run, where no attempt reads it and `StopRequested` reports it. |
-| While the run is parked | Recorded; it takes effect when the run resumes. mandatum itself never parks a run today. |
+| While the run is parked on a person | Recorded, and the question it waits on is resolved as stopped. The run is woken and ends `lifecycle.stopped` without resuming its turn: see [Parking a run on a person](#parking-a-run-on-a-person). |
 | A second time | The first recorded request is the one the run honours. |
 
 **Tenant isolation does not rest on secret ids.** Run ids are derived from the
@@ -462,6 +462,145 @@ exactly one run's `Own`.
   of runs roll up with each call counted once at the origin.
 - **A tag raised at another agent** is an unrelated run and does not roll up.
 
+## Parking a run on a person
+
+A run can wait for a person: to approve a tool call, to choose among options,
+or to reply in their own words. It parks while it waits: it holds no worker,
+no goroutine and no lease, costs no retry budget, and survives any restart. A
+host shows the question and answers it, and the run resumes with the answer.
+
+### How a question is raised
+
+| Question | Raised by | The answer |
+|---|---|---|
+| `approval` | A call to a tool the spec lists in `approvals`, or any tool the host's catalog wrapped with a saige marker (`types.MarkedTool`) | `approve` (optionally with edited arguments) or `deny` (optionally with a note the model is shown) |
+| `choice` | The built-in `ask_person` tool with `options` | One of the options |
+| `reply` | `ask_person` without `options` | Free text |
+
+Both are saige's own vocabulary. An approval is saige's marker: saige stops
+at the call and asks. `ask_person` is a tool the agent calls when its spec
+lists it; its result is the answer. A spec may name the person or role it
+wants an answer from (`asked_of`, a hint for routing, never an
+authorization) and, for `ask_person`, a `default`.
+
+The question is typed (`payload.Question`): its id, kind, prompt, options,
+for an approval the tool, the call id, the arguments and the tool's schema,
+`asked_of`, when it expires and what it defaults to. It travels on
+`lifecycle.parked` (`Lifecycle.Question`), and `GetRun` reports a parked run
+as `RUN_STATUS_PARKED` with `pending_question`, read from the run's records
+(`Runtime.PendingQuestion`).
+
+### Ending the turn at the question
+
+The model's message can ask for several tool calls at once. When one of them
+needs a person and has no answer, none of them runs: an unmarked call next to
+the question would otherwise take effect before the person decided, and again
+when the batch is continued. The turn ends at that message
+(`agentrt.Result.Parked`) with the question, the message itself, and the
+conversation up to it exactly as saige holds it. What the turn had said so
+far is published and kept.
+
+### Durable and deterministic
+
+```
+agent activity (memoized)        returns the parked turn
+  -> step mandatum.question.<id>   announces lifecycle.parked once; the record is the question
+  -> event mandatum.answer.<id>    the resolution: absent, the body returns ErrParked and the run waits
+Runtime.Answer                   checks the answer, writes the resolution (first write wins), wakes the run
+  -> next attempt replays         the turn and the question from records, reads the resolution
+  -> mandatum.turn.resume          continues the turn with the answer (memoized)
+```
+
+The resolution is a write-once duraturo event record, and it is the only
+thing the workflow body decides from. An answer writes it, a stop writes it,
+an expiry writes it; each reads back whichever was first. That is what makes
+an answer exactly-once under concurrent answers (every caller is told the
+recorded answer; one is told it was theirs), and a replay decide the same way
+whatever has been asked since. A replay announces nothing it announced before:
+an attempt opens (`lifecycle.started` or `resumed`) only when it has something
+new to publish, so a parked run polled by the worker's janitor with no answer
+publishes nothing at all. An attempt runs at most one turn: the attempt that
+asked parks even when an answer lands a moment later, and the answer's
+wake-up starts the next attempt, so each attempt's sequence band, usage
+record and accounting keys stay its own.
+
+`Runtime.Answer` (`InvokeService.Answer`, `mandatum answer`) is scoped to the
+caller's tenant: a question of another tenant's run is reported exactly like
+one that does not exist. Who answered comes from the credential, as for a tag
+or a stop. An answer is checked against its question before it is recorded:
+a decision is `approve` or `deny` and only an approval carries arguments,
+which must satisfy the tool's schema (saige's validator); a choice must be one
+of the options; a reply must have text. Answer wakes the run through the queue
+(`runtime.WithWaker`); without it, or if that enqueue is lost, the janitor's
+poll wakes it.
+
+### The conversation across the park
+
+The resumed turn has the whole context because it is the same conversation.
+The continuation rebuilds what the parked turn sent from what is pinned and
+recorded: the thread's history up to the pinned sequence, the request exactly
+as it was sent (retrieved passages included, never retrieved again), then the
+messages the turn had added, then the parked message. Its first model call is
+not sent: it is answered with the recorded message, so saige executes that
+batch itself, with the answer, through its normal tool path (markers, hooks,
+the schema check of edited arguments), and the model's next request is byte
+for byte what an uninterrupted turn would have sent. The provider's prompt
+cache therefore reads the whole conversation across the park. The recorded
+call's deltas and usage are not published again. A turn that compacted before
+it parked records its whole conversation instead of the part after the
+request.
+
+A batch with two questions parks twice, once per question; the second
+continuation carries both answers, and the batch runs once, after both.
+
+### Expiry and defaults
+
+Every question has a deadline (`runtime.WithQuestionTTL`, 24 hours by
+default). Once it has passed, the next attempt to find the question
+unanswered records its default as the resolution, and the run continues with
+it:
+
+| Question | Default |
+|---|---|
+| `approval` | Denied, with "nobody answered before the question expired"; the tool does not run |
+| `choice`, `reply` with a `default` | That default |
+| `choice`, `reply` without one | No answer: the tool tells the model nobody answered, and it carries on |
+
+An answer that arrives after the deadline records the default too, and is told
+so (`expired`). A question is never expired in the attempt that asked it, so
+a person always sees it first. The clock only decides whether to write the
+default; what the run does is decided by the record.
+
+### Stop, usage, and delegated runs
+
+- **Stop ends a parked run without resuming it.** `Stop` records the request,
+  then resolves the pending question as stopped and wakes the run, which ends
+  `lifecycle.stopped` with what it said before it asked and what it had spent.
+  Its turn is not continued, no model is called, and the question then
+  refuses answers (`ErrQuestionClosed`, `FAILED_PRECONDITION`). A stop
+  recorded while the turn ran, before it parked, is found the same way.
+- **Usage before the park is counted once.** The parked turn's calls are
+  recorded on the run like any attempt's; the continuation counts them with
+  its own, so the run's total is every call once, as usage counts across
+  retries.
+- **Delegated runs park like any run.** A host Delegator that starts a run for
+  a delegation and waits on it calls `runtime.WatchChildQuestions(ctx,
+  childRunID)` with the context it was given. Each question the child parks
+  on is published on the parent's stream as `lifecycle.child.parked`
+  (`payload.ChildQuestion`, with the child's run id to answer), and sinks show
+  the parent waiting on it until the delegation returns. The parent itself is
+  not parked: its turn is waiting on the child, holding its worker.
+
+### What surfaces show
+
+Sinks render a parked run as "waiting on a person", with the question, the
+call an approval would run, the options, and who it is asked of, in plain
+words: a waiting run is not working and must not look as if it were (nothing
+animates, and calls in the parked batch read "waiting", not "running"). Once
+it resumes, they show how it was answered ("answered: approved by ana", or
+"nobody answered in time"). Answering happens on the host; a chat surface
+shows the question and does not take the answer.
+
 ## Package DAG
 
 Dependencies run one way. Leaves are stdlib-only and know nothing about
@@ -482,7 +621,7 @@ seams
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations
-  pkg/runtime      the durable duraturo turn, legatus sandbox, stop, usage
+  pkg/runtime      the durable duraturo turn, legatus sandbox, stop, usage, parking
   pkg/router       delivery fan-out to sinks
   pkg/connectors   slack, github, jira, cron, webhook
   internal/server  Connect handlers, SSE, webhook ingress
@@ -507,7 +646,8 @@ set, so gRPC clients and browsers share one contract and one codegen path.
 | `AgentService.*` | Agent spec control plane |
 | `GET /v1/sse` | The same stream, browser-native, resumable via `Last-Event-ID` |
 | `POST /v1/runs/{id}/stop` | Ask a run to stop; answers 202 for every run id. `GetRun` reports `RUN_STATUS_STOPPED` |
-| `InvokeService.GetRun` | A run's record, its usage included (`Run.usage`) |
+| `InvokeService.GetRun` | A run's record, its usage included (`Run.usage`), and the question a parked run waits on (`Run.pending_question`) |
+| `InvokeService.Answer` | Answer a parked run's question; the first answer recorded is the answer |
 | `POST /v1/webhooks/{connector}` | HMAC-verified ingress |
 
 `InvokeStream` exists because doing invoke and subscribe separately races: events
@@ -623,6 +763,31 @@ Verified against the code, and honest.
 - **Roll-up of delegated runs is the host's call.** mandatum cannot see a run
   a Delegator started until the host reports it with
   `runtime.ReportChildUsage`, and the host must report it after it ended.
+- **Parking needs the ledger.** A question and its answer are records on the
+  run, so a runtime without `WithStopLedger` cannot park: its turns refuse
+  approvals and tell the model that `ask_person` cannot be answered.
+- **Expiry waits for a poll.** Nothing wakes a run at its question's
+  deadline. The worker's janitor polls parked runs (every 30 seconds by
+  default, and only runs older than one lease), so a default applies up to
+  that long after the deadline, or at once if someone answers late.
+- **An answer that lands while its run is parking waits for a wake-up.**
+  `Answer` enqueues the run three times over about a second, because an
+  enqueue of a run a worker still holds is dropped. If all three are lost the
+  janitor's poll resumes it.
+- **A parent waiting on a parked child holds its worker.** The Delegator
+  waits on the child run, so the parent's turn, and its worker, wait too. Only
+  the child is parked.
+- **An in-turn sub-task cannot park.** A `tag_<agent>` call without a host
+  Delegator is part of its parent's turn, not a run: approvals inside it are
+  refused and `ask_person` tells it nobody can be asked.
+- **A parked turn's record holds its conversation.** The continuation needs
+  the messages the turn added, with any media a tool returned inline, so they
+  are in the agent activity's record. A turn that compacted records its whole
+  conversation, history included.
+- **A question's tool arguments are re-read from JSON.** On the continuation
+  the parked call's arguments come back from the record with numbers as
+  `json.Number`, as saige's durable engine reads them; a tool that type-asserts
+  `float64` sees the difference.
 - **A stop cannot be made for a run before it is accepted.** Nothing is
   recorded or published for a run the ledger does not hold yet; ask again once
   `Accept` has returned the run id.

@@ -38,7 +38,7 @@ sandboxing and access control.
 | `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. `payload/` holds typed event bodies. |
-| `pkg/runtime` | The durable duraturo turn: revision pinning, legatus sandbox, dual publish, stopping a run mid-turn, and per-run usage. |
+| `pkg/runtime` | The durable duraturo turn: revision pinning, legatus sandbox, dual publish, stopping a run mid-turn, per-run usage, and parking a run on a person. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
 | `internal/server` | Connect handlers, SSE, webhook ingress, tenant interceptor. |
 | `internal/cli` | Command tree. `core.go` is the composition root. |
@@ -122,6 +122,18 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   success or failure; the workflow body never reads usage. Cost comes only
   from saige's price catalog, as integer micro-units, never converted or
   estimated. Usage is opt-in for routes and chat sinks do not render it.
+- **A parked run decides from its records.** A question is a duraturo step the
+  body records once; its resolution is the write-once event record
+  `event:mandatum.answer.<id>#0`, written by `Runtime.Answer`, by a stop, or by
+  an expiry, and whichever was first is the answer. The body never reads the
+  clock or a request to decide; it reads that record. An attempt runs at most
+  one turn: the attempt that asked parks, and the answer wakes the next.
+- **A continuation sends what an uninterrupted turn would have.** The resumed
+  turn rebuilds the parked conversation from the pinned history, the recorded
+  request and the recorded transcript, and answers its first model call with
+  the recorded message. Nothing may be re-rendered, re-retrieved or reordered
+  on the way, or the prompt cache misses and the model sees a different
+  conversation.
 - **Sinks must be idempotent.** Delivery is at-least-once. Render one message
   per run and edit it; never post per delta.
 - **Tenant is never read from a request body.** The server sets it from the

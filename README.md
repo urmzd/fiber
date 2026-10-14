@@ -66,6 +66,7 @@ event. Each run pins an agent revision, so retries use the same definition.
 - **Revisions are pinned per run.** A run accepted under revision 6 executes as revision 6 forever, even after a revise, because replay demands it.
 - **Citations are first-class events**, carrying the exact quoted source and resolvable provenance.
 - **Every run reports what it spent.** Each model call is a `usage.call` event (tokens, cache share, model, context window, and cost where saige's price catalog has the model), and the run's total, delegations included and each call counted once, is on its terminal event and `GetRun`.
+- **A run can wait for a person.** A tool listed in a spec's `approvals`, or the built-in `ask_person` tool, parks the run on a question (approve or deny a call, pick an option, or reply). The run frees its worker, survives restarts, publishes the question on `lifecycle.parked`, and resumes with the first answer (`InvokeService.Answer`, `mandatum answer`). An unanswered question takes its default when it expires.
 - **One contract, three transports.** Connect serves gRPC, gRPC-Web and HTTP/JSON, plus resumable SSE for browsers.
 
 ## Installation
@@ -191,6 +192,7 @@ See [the example index](examples/README.md) for more.
 | `mandatum tag` | Tag an agent and stream its answer |
 | `mandatum listen` | Subscribe to a topic and print events |
 | `mandatum stop` | Ask a run to stop; it keeps what it had said and ends with `lifecycle.stopped` |
+| `mandatum answer` | Answer the question a parked run is waiting on (`--approve`, `--deny`, `--choose`, `--reply`) |
 | `mandatum index` | Index files into a named knowledge source in Postgres |
 | `mandatum version` | Version, commit, build date |
 | `mandatum update` | Self-update from GitHub releases |
@@ -265,6 +267,7 @@ connecting from a host CLI. Connector setup is covered in the
 - The bus is at-least-once with no consumer groups. If durable competing consumers become a requirement, NATS JetStream behind the `Bus` interface is a better answer than growing a broker here.
 - Agent specs load from JSON, not YAML.
 - Stopping a run is the HTTP route `POST /v1/runs/{id}/stop`, not an RPC; `GetRun` reports the result as `RUN_STATUS_STOPPED`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
+- A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. A parent run waiting on a delegated child that parks keeps its worker. Approvals inside an in-turn sub-task (a `tag_<agent>` call without a host Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
 - Cost is reported only for models saige's price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to routes that select `usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
 
 ## Reproduce the Screenshot
