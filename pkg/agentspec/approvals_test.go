@@ -54,3 +54,36 @@ func TestAnApprovalMustNameAGrantedTool(t *testing.T) {
 		}
 	}
 }
+
+// Who may answer is part of what a revision is: it is hashed when set, a
+// spec that names approvers or self-approval must require some approval, and
+// a spec that sets none of it hashes as before.
+func TestWhoMayAnswerIsPartOfTheRevision(t *testing.T) {
+	t.Parallel()
+	base := valid()
+	base.Approvals = []string{"fetch"}
+	for _, mod := range []func(*agentspec.AgentSpec){
+		func(s *agentspec.AgentSpec) { s.Approvers = []string{"carol"} },
+		func(s *agentspec.AgentSpec) { s.SelfApproval = true },
+		func(s *agentspec.AgentSpec) { s.Answerers = []string{"role:oncall"} },
+	} {
+		s := base
+		mod(&s)
+		if s.Hash() == base.Hash() {
+			t.Errorf("%+v hashes like a spec without it", s)
+		}
+		if err := s.Validate(); err != nil {
+			t.Errorf("%+v: %v", s, err)
+		}
+	}
+	orphan := valid()
+	orphan.Approvers = []string{"carol"}
+	if err := orphan.Validate(); !errors.Is(err, agentspec.ErrInvalid) {
+		t.Errorf("approvers without approvals: %v", err)
+	}
+	answerers := valid()
+	answerers.Answerers = []string{"carol"}
+	if err := answerers.Validate(); err != nil {
+		t.Errorf("answerers without approvals are for ask_person: %v", err)
+	}
+}

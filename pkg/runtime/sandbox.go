@@ -749,6 +749,9 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 // run it started with ReportChildUsage, from the context it is given, and the
 // runtime reads that run's total from the ledger.
 func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, report func(payload.Action) error, send func(agentrt.Chunk) error) saigetypes.Tool {
+	if parent.ChildRuns && parent.RunID != "" {
+		return &childRunTool{s: s, parent: parent, target: target, send: send}
+	}
 	return &saigetypes.ToolFunc{
 		Def: saigetypes.ToolDef{
 			Name:        DelegateToolName(target),
@@ -951,4 +954,70 @@ func (s *Sandbox) await(ctx context.Context, deployment, taskID string) (Outcome
 		}
 		return out, nil
 	}
+}
+
+// childRunTool is the delegation tool of a durable run whose delegations are
+// child runs (WithChildRuns). The turn parks at a call to it (it is
+// agentrt.Awaiting), the runtime starts the child, and the continuation runs
+// the call with the child's ending as its answer.
+type childRunTool struct {
+	s      *Sandbox
+	parent Request
+	target string
+	send   func(agentrt.Chunk) error
+}
+
+var _ agentrt.Awaiting = (*childRunTool)(nil)
+
+func (t *childRunTool) Definition() saigetypes.ToolDef {
+	return saigetypes.ToolDef{
+		Name:        DelegateToolName(t.target),
+		Description: fmt.Sprintf("Tag the %q agent with a request and wait for its answer.", t.target),
+		Parameters: saigetypes.ParameterSchema{
+			Type:     "object",
+			Required: []string{"text"},
+			Properties: map[string]saigetypes.PropertyDef{
+				"text": {Type: "string", Description: "The request to send to " + t.target},
+			},
+		},
+	}
+}
+
+// AwaitQuestion describes the wait a call parks on. A call with no request
+// text is not a delegation: it runs, and tells the model what was wrong.
+func (t *childRunTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
+	text, _ := call.Arguments["text"].(string)
+	if strings.TrimSpace(text) == "" {
+		return payload.Question{}, false
+	}
+	args, _ := json.Marshal(call.Arguments)
+	return payload.Question{
+		Prompt: text,
+		Tool:   &payload.QuestionTool{Name: call.Name, CallID: call.ID, Arguments: args},
+	}, true
+}
+
+// Execute returns the child run's answer, and puts what the child spent on
+// the parent's stream.
+func (t *childRunTool) Execute(ctx context.Context, args map[string]any) (string, error) {
+	if text, _ := args["text"].(string); strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("%w: delegation to %q needs a text request", ErrInvalid, t.target)
+	}
+	a, ok := agentrt.AnswerFor(ctx)
+	if !ok {
+		return "", fmt.Errorf("runtime: delegation to %q: the run it started has not answered", t.target)
+	}
+	if a.RunID != "" {
+		if turn := t.s.turn(t.parent.RunID); turn != nil && turn.childUsage != nil {
+			if c, err := turn.childUsage(ctx, a.RunID); err == nil {
+				if body, err := payload.Encode(c); err == nil {
+					_ = t.send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
+				}
+			}
+		}
+	}
+	if a.Text == "" && a.Note != "" {
+		return "", errors.New(a.Note)
+	}
+	return a.Text, nil
 }

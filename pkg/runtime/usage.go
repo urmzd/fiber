@@ -135,7 +135,7 @@ func (r *Runtime) priorUsage(ctx context.Context, runID string, attempt int) ([]
 	if r.stops == nil || attempt <= 1 {
 		return nil, nil
 	}
-	_, records, err := r.stops.Load(ctx, runID)
+	_, records, err := r.recordsOf(ctx, runID, false, prefixUsage)
 	if err != nil {
 		r.logger.Warn("mandatum/runtime: could not read the usage of earlier attempts; the total counts this one",
 			"run_id", runID, "error", err)

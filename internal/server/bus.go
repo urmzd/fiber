@@ -88,6 +88,13 @@ func (s *busService) Publish(ctx context.Context, req *connect.Request[mandatumv
 	if e.Kind.Family() == "usage" {
 		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q events are published by the run that spent the tokens, not directly", ErrInvalid, e.Kind))
 	}
+	// A run's lifecycle is the run's to report. A client publishing one by
+	// hand could show a run as finished, failed, or parked on a question it
+	// never asked, and a host that answers what lifecycle.parked shows would
+	// be answering a forgery. Control kinds are the control plane's.
+	if f := e.Kind.Family(); f == "lifecycle" || f == "control" {
+		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q events are published by the run or the control plane, not directly", ErrInvalid, e.Kind))
+	}
 	e.Tenant = id.Tenant
 	e.Seq = 0
 	e.At = s.srv.now()

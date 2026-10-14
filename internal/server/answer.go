@@ -27,6 +27,8 @@ type AnswerRequest struct {
 	// By is who answered: the credential's subject, unless the credential
 	// may act for others and named someone.
 	By string
+	// Via is the credential's own subject, whoever it named.
+	Via string
 }
 
 // Answerer answers the questions runs are parked on. It is separate from
@@ -36,8 +38,9 @@ type AnswerRequest struct {
 // Answer returns the answer the question has, which is this one only when
 // first is true. It reports a question that does not exist, or belongs to
 // another tenant's run, as ErrNotFound; an answer that does not fit the
-// question as ErrInvalid; and a question whose run was stopped or ended as
-// ErrClosed.
+// question as ErrInvalid; a caller who may not answer it (the requester
+// approving their own call, someone outside the spec's approvers) as
+// ErrForbidden; and a question whose run was stopped or ended as ErrClosed.
 type Answerer interface {
 	Answer(ctx context.Context, req AnswerRequest) (payload.Answer, bool, error)
 }
@@ -66,7 +69,7 @@ func (s *invokeService) Answer(ctx context.Context, req *connect.Request[mandatu
 	}
 	got, first, err := s.answerer.Answer(ctx, AnswerRequest{
 		Tenant: id.Tenant, RunID: runID, QuestionID: qid,
-		Answer: answerFromProto(req.Msg.GetAnswer()), By: by,
+		Answer: answerFromProto(req.Msg.GetAnswer()), By: by, Via: id.Subject,
 	})
 	if err != nil {
 		return nil, fail(s.log, "answer", err)

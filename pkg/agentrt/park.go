@@ -1,6 +1,7 @@
 package agentrt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,8 +82,15 @@ type Parked struct {
 	// Prompt is the request the turn sent, exactly: a continuation sends it
 	// again rather than rendering or retrieving anew.
 	Prompt string `json:"prompt"`
-	// CallID is the tool call the question is about.
+	// CallID is where the answer goes among Answers: the tool call the
+	// question is about, or, for a delegation's result, the call's id with
+	// "/await" after it.
 	CallID string `json:"call_id"`
+	// Since is set by a runtime that stores a parked turn's record as the
+	// part of the transcript after the first Since messages of the previous
+	// park's: Transcript is then only what the turn added. A continuation
+	// is always given the whole transcript.
+	Since int `json:"since,omitempty"`
 	// Transcript is the conversation the turn had when it parked, oldest
 	// first, as saige messages in their persisted wire form (see
 	// EncodeMessage). Without Whole it is only what the turn added after the
@@ -157,6 +165,32 @@ func (askPerson) Execute(ctx context.Context, args map[string]any) (string, erro
 }
 
 type answersKey struct{}
+
+// Awaiting is a tool whose result does not come from running it in the turn
+// but arrives later from outside: a delegation to a child run that the
+// runtime starts and that answers when it ends. A turn that may park ends at a
+// call to it, as at a question, with the question AwaitQuestion describes,
+// and the continuation runs the call with the answer it was given (AnswerFor).
+type Awaiting interface {
+	AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool)
+}
+
+// AnswerFor returns the answer the tool call ctx belongs to was continued
+// with, for an Awaiting tool's Execute.
+func AnswerFor(ctx context.Context) (payload.Answer, bool) {
+	info, ok := saigetypes.ToolCallInfoFromContext(ctx)
+	if !ok {
+		return payload.Answer{}, false
+	}
+	answers, _ := ctx.Value(answersKey{}).(map[string]payload.Answer)
+	a, ok := answers[awaitKey(info.ID)]
+	return a, ok
+}
+
+// awaitKey is where a call's awaited result is kept among a batch's answers.
+// It is apart from the call's own id because one call can need both: an
+// approval to start a delegation, then the delegation's result.
+func awaitKey(callID string) string { return callID + "/await" }
 
 // askArgs are ask_person's arguments, validated.
 type askArgs struct {
@@ -291,12 +325,17 @@ func (p *parker) afterModel(msg saigetypes.AssistantMessage) {
 	var q *payload.Question
 	var callID string
 	for _, tc := range calls {
-		if _, answered := p.answers[tc.ID]; answered {
-			continue
+		if _, answered := p.answers[tc.ID]; !answered {
+			if built, ok := p.need(tc); ok {
+				q, callID = &built, tc.ID
+				break
+			}
 		}
-		if built, ok := p.need(tc); ok {
-			q, callID = &built, tc.ID
-			break
+		if _, arrived := p.answers[awaitKey(tc.ID)]; !arrived {
+			if built, ok := p.await(tc); ok {
+				q, callID = &built, awaitKey(tc.ID)
+				break
+			}
 		}
 	}
 	if q == nil {
@@ -372,6 +411,30 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 	return q, true
 }
 
+// await reports the wait a call to an Awaiting tool parks on.
+func (p *parker) await(tc saigetypes.ToolCallPart) (payload.Question, bool) {
+	t, ok := p.tools.Get(tc.Name)
+	if !ok {
+		return payload.Question{}, false
+	}
+	if marked, ok := t.(*saigetypes.MarkedTool); ok {
+		t = marked.Inner
+	}
+	aw, ok := t.(Awaiting)
+	if !ok {
+		return payload.Question{}, false
+	}
+	q, ok := aw.AwaitQuestion(tc)
+	if !ok {
+		return payload.Question{}, false
+	}
+	q.Kind = payload.QuestionDelegation
+	q.Agent, q.At = p.agent, p.now().UTC()
+	q.ExpiresAt, q.Default = time.Time{}, nil
+	q.ID = saigetypes.InterruptID(p.scope, nil, q.Kind, tc.ID)
+	return q, true
+}
+
 func (p *parker) isParking() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -421,8 +484,12 @@ func resolution(a payload.Answer) (saige.Resolution, error) {
 	}
 	r := saige.Resolution{Approved: true, Message: a.Note, Approver: a.By}
 	if len(a.Arguments) > 0 {
+		// Numbers stay json.Number, as saige reads tool arguments from a
+		// record: an integer above 2^53 must not come back rounded.
 		var args map[string]any
-		if err := json.Unmarshal(a.Arguments, &args); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(a.Arguments))
+		dec.UseNumber()
+		if err := dec.Decode(&args); err != nil {
 			return saige.Resolution{}, fmt.Errorf("edited arguments: %w", err)
 		}
 		r.ModifiedArgs = args

@@ -11,6 +11,7 @@ import (
 
 	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
 	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
 // fakeAnswerer records what the edge asked the runtime to record.
@@ -52,11 +53,11 @@ func TestAnAnswerCarriesTheCredentialsTenantAndAnswerer(t *testing.T) {
 		want        AnswerRequest
 	}{
 		{"an ordinary credential is itself", tokenAcme, "someone-else",
-			AnswerRequest{Tenant: tenantAcme, RunID: "r1", QuestionID: "q1", By: subjectAcme}},
+			AnswerRequest{Tenant: tenantAcme, RunID: "r1", QuestionID: "q1", By: subjectAcme, Via: subjectAcme}},
 		{"a surface names the person", tokenSurface, "slack:U1",
-			AnswerRequest{Tenant: tenantAcme, RunID: "r1", QuestionID: "q1", By: "slack:U1"}},
+			AnswerRequest{Tenant: tenantAcme, RunID: "r1", QuestionID: "q1", By: "slack:U1", Via: "slack-surface"}},
 		{"another tenant is itself", tokenOther, "",
-			AnswerRequest{Tenant: tenantOther, RunID: "r1", QuestionID: "q1", By: "user-2"}},
+			AnswerRequest{Tenant: tenantOther, RunID: "r1", QuestionID: "q1", By: "user-2", Via: "user-2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			answerer := &fakeAnswerer{}
@@ -99,6 +100,7 @@ func TestAnAnswerTheRuntimeRefusesIsClassified(t *testing.T) {
 		{fmt.Errorf("%w: question", ErrNotFound), connect.CodeNotFound},
 		{fmt.Errorf("%w: not an option", ErrInvalid), connect.CodeInvalidArgument},
 		{fmt.Errorf("%w: stopped", ErrClosed), connect.CodeFailedPrecondition},
+		{fmt.Errorf("%w: self-approval", ErrForbidden), connect.CodePermissionDenied},
 	} {
 		answerer.fail = tc.fail
 		_, err := client.Answer(context.Background(), answerRequest("r1", "q1", &mandatumv1.Answer{Choice: "a"}))
@@ -135,5 +137,21 @@ func TestGetRunReportsAParkedRunAndItsQuestion(t *testing.T) {
 	if got.Msg.GetStatus() != mandatumv1.RunStatus_RUN_STATUS_PARKED || q.GetId() != "q1" || q.GetTool().GetArgumentsJson() != `{"env":"prod"}` ||
 		q.GetDefaultAnswer().GetDecision() != payload.DecisionDeny || q.GetExpiresAt() == nil || q.GetAskedOf() != "oncall" {
 		t.Fatalf("run = %v", got.Msg)
+	}
+}
+
+// A run's lifecycle is the run's to report: a client cannot publish a
+// lifecycle event (a forged question a host might answer, a fake ending) or a
+// control event on a run's topic.
+func TestPublishRefusesLifecycleAndControlEvents(t *testing.T) {
+	h := newHarness(t, nil)
+	for _, kind := range []envelope.Kind{envelope.KindParked, envelope.KindResumed, envelope.KindCompleted, envelope.KindChildParked, envelope.KindAgentCreated} {
+		_, err := h.busClient(tokenAcme).Publish(context.Background(), connect.NewRequest(&mandatumv1.PublishRequest{
+			Event: &mandatumv1.Event{Topic: "agent:docs-bot:run_1", Kind: string(kind),
+				Payload: []byte(`{"question":{"id":"q1","kind":"approval","prompt":"Approve?"}}`)},
+		}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("publishing %s: %v, want invalid argument", kind, err)
+		}
 	}
 }

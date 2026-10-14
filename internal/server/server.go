@@ -106,6 +106,10 @@ var (
 	// ErrClosed reports a request about something that has ended and no
 	// longer takes it: a question whose run was stopped or ended.
 	ErrClosed = errors.New("server: closed")
+
+	// ErrForbidden reports a caller of the right tenant who may still not do
+	// this: answer a question the spec keeps for other people.
+	ErrForbidden = errors.New("server: forbidden")
 )
 
 // Defaults for Config. Each is the value a deployment can leave alone.
@@ -472,6 +476,8 @@ func codeOf(err error) connect.Code {
 		return connect.CodeUnimplemented
 	case errors.Is(err, ErrClosed):
 		return connect.CodeFailedPrecondition
+	case errors.Is(err, ErrForbidden):
+		return connect.CodePermissionDenied
 	case errors.Is(err, bus.ErrSlowConsumer):
 		return connect.CodeResourceExhausted
 	case errors.Is(err, ErrInvalid),

@@ -274,11 +274,7 @@ func newCore(cfg coreConfig) (*core, error) {
 		return nil, err
 	}
 
-	rt, err := runtime.New(
-		duraturo.New(c.ledger, c.queue),
-		registry.NewSpecs(c.store),
-		broker,
-		exec,
+	rtOpts := []runtime.Option{
 		runtime.WithLogger(log),
 		runtime.WithThreads(threads),
 		// Before a run's history is pinned, its thread catches up with
@@ -292,7 +288,13 @@ func newCore(cfg coreConfig) (*core, error) {
 		// An answered or stopped question wakes its run at once rather
 		// than at the worker's next janitor sweep.
 		runtime.WithWaker(c.queue),
-	)
+	}
+	if pool != nil {
+		// Polls that want one record of a run (a stop, an answer) read that
+		// record, not the run's transcripts.
+		rtOpts = append(rtOpts, runtime.WithRecordReader(durable.NewRecords(pool)))
+	}
+	rt, err := runtime.New(duraturo.New(c.ledger, c.queue), registry.NewSpecs(c.store), broker, exec, rtOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("cli: runtime: %w", err)
 	}
@@ -634,11 +636,13 @@ func (c *core) Stop(ctx context.Context, req server.StopRequest) error {
 // translating the runtime's errors into the edge's.
 func (c *core) Answer(ctx context.Context, req server.AnswerRequest) (payload.Answer, bool, error) {
 	got, first, err := c.rt.Answer(ctx, runtime.AnswerRequest{
-		Tenant: req.Tenant, RunID: req.RunID, QuestionID: req.QuestionID, Answer: req.Answer, By: req.By,
+		Tenant: req.Tenant, RunID: req.RunID, QuestionID: req.QuestionID, Answer: req.Answer, By: req.By, Via: req.Via,
 	})
 	switch {
 	case errors.Is(err, runtime.ErrNoQuestion):
 		return payload.Answer{}, false, fmt.Errorf("%w: %w", server.ErrNotFound, err)
+	case errors.Is(err, runtime.ErrNotAllowed):
+		return payload.Answer{}, false, fmt.Errorf("%w: %w", server.ErrForbidden, err)
 	case errors.Is(err, runtime.ErrQuestionClosed):
 		return payload.Answer{}, false, fmt.Errorf("%w: %w", server.ErrClosed, err)
 	case errors.Is(err, runtime.ErrInvalid):

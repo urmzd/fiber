@@ -144,7 +144,14 @@ jobs:
             ["runtime", "TestStoppingAParkedRunEndsItWithoutResumingItsTurn"],
             ["runtime", "TestUsageBeforeAParkIsCountedOnce"],
             ["runtime", "TestReplayingAParkedThenResumedRunIsDeterministic"],
-            ["runtime", "TestAChildRunParksAndItsParentShowsItsQuestion"]
+            ["runtime", "TestAChildRunParksAndItsParentShowsItsQuestion"],
+            ["runtime", "TestTheRequesterCannotApproveTheirOwnCallByDefault"],
+            ["runtime", "TestSelfApprovalIsAllowedWhenTheSpecOptsIn"],
+            ["runtime", "TestOnlyTheSpecsApproversAndAnswerersMayAnswer"],
+            ["runtime", "TestDelegatingParentsParkSoTheirChildrenRunAtAnyConcurrency"],
+            ["runtime", "TestStoppingAParentWaitingOnAChildStopsBoth"],
+            ["runtime", "TestRepeatedParksStoreTheTranscriptOnce"],
+            ["durable", "TestRecordsWithPrefixReadsOnlyTheRecordsAsked"]
           ] | all(. as $required | any($events[];
             .Action == "pass"
             and .Package == ("github.com/urmzd/mandatum/pkg/" + $required[0])

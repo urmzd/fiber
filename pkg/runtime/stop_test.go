@@ -134,11 +134,11 @@ var durableSchemas atomic.Uint64
 // newDurable returns an empty run ledger and queue: mandatum's Postgres schema
 // (pkg/durable) in a schema of its own when $MANDATUM_POSTGRES_TEST_URL is set,
 // duraturo's in-memory ones otherwise. It is the ledger a stop is recorded in.
-func newDurable(t *testing.T) (durableLedger, dqueue.Queue) {
+func newDurable(t *testing.T) (durableLedger, dqueue.Queue, runtime.RecordReader) {
 	t.Helper()
 	url := os.Getenv(threadsEnv)
 	if url == "" {
-		return ledger.NewMemory(), dqueue.NewMemory()
+		return ledger.NewMemory(), dqueue.NewMemory(), nil
 	}
 	ctx := context.Background()
 	schema := fmt.Sprintf("mandatumtest_stop_%d_%d", time.Now().UnixNano(), durableSchemas.Add(1))
@@ -165,7 +165,7 @@ func newDurable(t *testing.T) (durableLedger, dqueue.Queue) {
 	if err != nil {
 		t.Fatalf("durable.Open: %v", err)
 	}
-	return lgr, q
+	return lgr, q, durable.NewRecords(pool)
 }
 
 // world is the storage several runtimes share: one ledger, one queue, one bus,
@@ -174,8 +174,10 @@ func newDurable(t *testing.T) (durableLedger, dqueue.Queue) {
 // Runtimes record stop requests in the ledger, as a deployment's do, unless
 // busOnly is set, which is a host that never passed WithStopLedger.
 type world struct {
-	ledger  durableLedger
-	queue   dqueue.Queue
+	ledger durableLedger
+	queue  dqueue.Queue
+	// reader reads records by prefix: Postgres's, nil in memory.
+	reader  runtime.RecordReader
 	bus     *tap
 	specs   *specs
 	threads *spied
@@ -195,10 +197,11 @@ func newWorld(t *testing.T) *world {
 // newWorldOn is newWorld over a given bus, for a test about that bus's bounds.
 func newWorldOn(t *testing.T, b bus.Bus) *world {
 	t.Helper()
-	lgr, q := newDurable(t)
+	lgr, q, reader := newDurable(t)
 	w := &world{
 		ledger:  lgr,
 		queue:   q,
+		reader:  reader,
 		bus:     &tap{Bus: b},
 		specs:   newSpecs(),
 		threads: &spied{Store: newThreads(t)},
@@ -223,6 +226,9 @@ func (w *world) runtime(t *testing.T, exec runtime.Executor, opts ...runtime.Opt
 	}
 	if !w.busOnly {
 		base = append(base, runtime.WithStopLedger(w.ledger))
+		if w.reader != nil {
+			base = append(base, runtime.WithRecordReader(w.reader))
+		}
 	}
 	opts = append(base, opts...)
 	rt, err := runtime.New(duraturo.New(w.ledger, w.queue), w.specs, w.bus, exec, opts...)

@@ -36,3 +36,14 @@ func TestAParkedRunReadsAsWaitingOnAPersonAndNotAsWorking(t *testing.T) {
 		t.Errorf("after the answer:\n%s", got)
 	}
 }
+
+// A run waiting on a run it delegated to reads as waiting on that agent, not
+// on a person.
+func TestARunWaitingOnAChildReadsAsWaitingOnThatAgent(t *testing.T) {
+	d := render.New()
+	d.Apply(ev(9, envelope.KindParked, `{"question":{"id":"q1","kind":"delegation","prompt":"deploy","tool":{"name":"tag_ops"},"child_run_id":"r-child"}}`))
+	got := layout(d.View())
+	if !strings.Contains(got, "docs-bot (waiting on ops)") || !strings.Contains(got, "waiting on ops: deploy (run r-child)") || strings.Contains(got, "a person") {
+		t.Errorf("layout:\n%s", got)
+	}
+}

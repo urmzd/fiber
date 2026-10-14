@@ -147,6 +147,8 @@ type Question struct {
 	// is waiting on through a delegation. Empty for the run's own question.
 	RunID string
 	Agent string
+	// Child is the run a delegation waits on, for Kind "delegation".
+	Child string
 }
 
 // Answered is how the question a run waited on was resolved.
@@ -671,7 +673,7 @@ func assemble(settled *strings.Builder, pending []piece, str stream) string {
 }
 
 func questionOf(q payload.Question) *Question {
-	out := &Question{Kind: q.Kind, Prompt: q.Prompt, Options: append([]string(nil), q.Options...), AskedOf: q.AskedOf, Expires: q.ExpiresAt}
+	out := &Question{Kind: q.Kind, Prompt: q.Prompt, Options: append([]string(nil), q.Options...), AskedOf: q.AskedOf, Expires: q.ExpiresAt, Child: q.ChildRunID}
 	if q.Tool != nil {
 		out.Tool, out.Args = q.Tool.Name, string(q.Tool.Arguments)
 	}

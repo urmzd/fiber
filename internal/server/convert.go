@@ -262,6 +262,9 @@ func specFromProto(p *mandatumv1.AgentSpec) (Spec, error) {
 		SystemPrompt: p.GetSystemPrompt(),
 		Tools:        p.GetTools(),
 		Approvals:    p.GetApprovals(),
+		Approvers:    p.GetApprovers(),
+		SelfApproval: p.GetSelfApproval(),
+		Answerers:    p.GetAnswerers(),
 	}
 	for _, src := range p.GetSources() {
 		s.Sources = append(s.Sources, Source{
@@ -285,6 +288,9 @@ func specToProto(s Spec) *mandatumv1.AgentSpec {
 		SystemPrompt: s.SystemPrompt,
 		Tools:        s.Tools,
 		Approvals:    s.Approvals,
+		Approvers:    s.Approvers,
+		SelfApproval: s.SelfApproval,
+		Answerers:    s.Answerers,
 		Access:       &mandatumv1.Access{Spawn: s.Access.Spawn, WorkspaceAreas: s.Access.WorkspaceAreas},
 	}
 	for _, src := range s.Sources {

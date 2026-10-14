@@ -55,6 +55,9 @@ type specFile struct {
 	SystemPrompt string            `json:"system_prompt"`
 	Tools        []string          `json:"tools,omitempty"`
 	Approvals    []string          `json:"approvals,omitempty"`
+	Approvers    []string          `json:"approvers,omitempty"`
+	SelfApproval bool              `json:"self_approval,omitempty"`
+	Answerers    []string          `json:"answerers,omitempty"`
 	Sources      []specFileSource  `json:"sources,omitempty"`
 	Access       specFileAccess    `json:"access,omitempty"`
 	Meta         map[string]string `json:"meta,omitempty"`
@@ -94,6 +97,9 @@ func loadSpec(path string) (*mandatumv1.AgentSpec, error) {
 		SystemPrompt: f.SystemPrompt,
 		Tools:        f.Tools,
 		Approvals:    f.Approvals,
+		Approvers:    f.Approvers,
+		SelfApproval: f.SelfApproval,
+		Answerers:    f.Answerers,
 		Access: &mandatumv1.Access{
 			Spawn:          f.Access.Spawn,
 			WorkspaceAreas: f.Access.WorkspaceAreas,
@@ -383,6 +389,15 @@ func printRevisionFull(u *ui, r *mandatumv1.Revision) error {
 	if len(s.GetApprovals()) > 0 {
 		u.printf("  approvals    %v\n", s.GetApprovals())
 	}
+	if len(s.GetApprovers()) > 0 {
+		u.printf("  approvers    %v\n", s.GetApprovers())
+	}
+	if s.GetSelfApproval() {
+		u.printf("  self-approval allowed\n")
+	}
+	if len(s.GetAnswerers()) > 0 {
+		u.printf("  answerers    %v\n", s.GetAnswerers())
+	}
 	for _, src := range s.GetSources() {
 		u.printf("  source       %s\n", src.GetUri())
 	}
@@ -417,6 +432,9 @@ func revisionMap(r *mandatumv1.Revision) map[string]any {
 		"system_prompt": s.GetSystemPrompt(),
 		"tools":         s.GetTools(),
 		"approvals":     s.GetApprovals(),
+		"approvers":     s.GetApprovers(),
+		"self_approval": s.GetSelfApproval(),
+		"answerers":     s.GetAnswerers(),
 		"sources":       sources,
 		"created_by":    r.GetCreatedBy(),
 	}

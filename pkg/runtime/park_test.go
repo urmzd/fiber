@@ -69,11 +69,20 @@ type parking struct {
 
 func newParking(t *testing.T, w *world, script ...[]saigetypes.Delta) *parking {
 	t.Helper()
+	return newParkingWith(t, w, nil, script...)
+}
+
+// newParkingWith is newParking with the spec adjusted by mod.
+func newParkingWith(t *testing.T, w *world, mod func(*agentrt.Spec), script ...[]saigetypes.Delta) *parking {
+	t.Helper()
 	p := &parking{world: w, deploy: newDeployTool(), model: &agenttest.ScriptedProvider{Responses: script}}
 	rev := agentrt.Revision{Rev: 1, Hash: "sha256:ops@1", Spec: agentrt.Spec{
 		Name: "ops", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "You run deploys.",
 		Tools: []string{"deploy", agentrt.AskPersonToolName}, Approvals: []string{"deploy"},
 	}}
+	if mod != nil {
+		mod(&rev.Spec)
+	}
 	w.specs.mu.Lock()
 	w.specs.revs["ops"] = []agentrt.Revision{rev}
 	w.specs.mu.Unlock()
@@ -736,4 +745,321 @@ func TestAChildRunParksAndItsParentShowsItsQuestion(t *testing.T) {
 func renderMessages(msgs []saigetypes.Message) string {
 	b, _ := json.Marshal(msgs)
 	return string(b)
+}
+
+// requested is a tag raised by ana through GitHub.
+func requested(id string) envelope.Tag {
+	tg := tag("ops", id, "ship")
+	tg.Actor = envelope.Actor{ID: "ana"}
+	return tg
+}
+
+func (p *parking) answerAs(rt *runtime.Runtime, runID, qid, by, via string, a payload.Answer) error {
+	_, _, err := rt.Answer(context.Background(), runtime.AnswerRequest{Tenant: "acme", RunID: runID, QuestionID: qid, Answer: a, By: by, Via: via})
+	return err
+}
+
+// An approval is a second pair of eyes. The person whose request raised the
+// call cannot approve it under any name they go by, and neither can the
+// credential that raised the run, whoever it names; a surface trusted to act
+// for others may name someone else, who is checked like anyone.
+func TestTheRequesterCannotApproveTheirOwnCallByDefault(t *testing.T) {
+	p := newParking(t, newWorld(t), call("c1", "deploy", map[string]any{"env": "prod"}), agenttest.TextResponse("Done."))
+	rt := p.rt(t)
+	p.workers(t, rt, 2, 0)
+	runID := p.accept(t, rt, requested("evt-1"))
+	q := p.parkedOn(t, rt, runID)
+	approve := payload.Answer{Decision: payload.DecisionApprove}
+
+	for _, tc := range []struct{ name, by, via string }{
+		{"the requester", "ana", "ana"},
+		{"the requester by their qualified name", "github:ana", "slack-surface"},
+		{"the requester's own credential naming someone else", "bob", "ana"},
+	} {
+		if err := p.answerAs(rt, runID, q.ID, tc.by, tc.via, approve); !errors.Is(err, runtime.ErrNotAllowed) {
+			t.Errorf("%s: err = %v, want ErrNotAllowed", tc.name, err)
+		}
+	}
+	if _, ok, _ := rt.PendingQuestion(context.Background(), "acme", runID); !ok {
+		t.Fatal("a refused approval resolved the question")
+	}
+	if err := p.answerAs(rt, runID, q.ID, "bob", "slack-surface", approve); err != nil {
+		t.Fatalf("another person through a trusted surface: %v", err)
+	}
+	p.result(t, rt, runID)
+	if n := len(p.deploy.calls()); n != 1 {
+		t.Errorf("deploy ran %d times", n)
+	}
+}
+
+// A spec that opts into self-approval lets the requester approve, and keeps
+// letting anyone else.
+func TestSelfApprovalIsAllowedWhenTheSpecOptsIn(t *testing.T) {
+	p := newParkingWith(t, newWorld(t), func(s *agentrt.Spec) { s.SelfApproval = true },
+		call("c1", "deploy", map[string]any{"env": "prod"}), agenttest.TextResponse("Done."))
+	rt := p.rt(t)
+	p.workers(t, rt, 2, 0)
+	runID := p.accept(t, rt, requested("evt-1"))
+	q := p.parkedOn(t, rt, runID)
+	if err := p.answerAs(rt, runID, q.ID, "ana", "ana", payload.Answer{Decision: payload.DecisionApprove}); err != nil {
+		t.Fatalf("self-approval with the opt-out: %v", err)
+	}
+	p.result(t, rt, runID)
+}
+
+// Approvers and answerers, when a spec names them, are the only people who
+// may answer: by name, or by a role the host resolves. Without a resolver a
+// role admits nobody.
+func TestOnlyTheSpecsApproversAndAnswerersMayAnswer(t *testing.T) {
+	roles := runtime.WithRoles(func(_ context.Context, tenant, who string) ([]string, error) {
+		if tenant == "acme" && who == "dave" {
+			return []string{"oncall"}, nil
+		}
+		return nil, nil
+	})
+	for _, tc := range []struct {
+		name    string
+		by      string
+		roles   bool
+		allowed bool
+	}{
+		{"someone not named", "bob", true, false},
+		{"a named approver", "carol", true, true},
+		{"a holder of a named role", "dave", true, true},
+		{"a role with no resolver", "dave", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newParkingWith(t, newWorld(t), func(s *agentrt.Spec) { s.Approvers = []string{"carol", "role:oncall"} },
+				call("c1", "deploy", map[string]any{"env": "prod"}), agenttest.TextResponse("Done."))
+			var opts []runtime.Option
+			if tc.roles {
+				opts = append(opts, roles)
+			}
+			rt := p.rt(t, opts...)
+			p.workers(t, rt, 2, 0)
+			runID := p.accept(t, rt, requested("evt-1"))
+			q := p.parkedOn(t, rt, runID)
+			err := p.answerAs(rt, runID, q.ID, tc.by, "surface", payload.Answer{Decision: payload.DecisionApprove})
+			if tc.allowed != (err == nil) || (err != nil && !errors.Is(err, runtime.ErrNotAllowed)) {
+				t.Fatalf("err = %v, want allowed=%v", err, tc.allowed)
+			}
+		})
+	}
+
+	t.Run("choices keep tenant-wide answering unless restricted", func(t *testing.T) {
+		ask := call("c1", agentrt.AskPersonToolName, map[string]any{"question": "Which env?", "options": []any{"prod", "staging"}})
+		open := newParking(t, newWorld(t), ask, agenttest.TextResponse("Done."))
+		rt := open.rt(t)
+		open.workers(t, rt, 2, 0)
+		runID := open.accept(t, rt, requested("evt-1"))
+		q := open.parkedOn(t, rt, runID)
+		if err := open.answerAs(rt, runID, q.ID, "ana", "ana", payload.Answer{Choice: "prod"}); err != nil {
+			t.Fatalf("the requester answering their agent's question: %v", err)
+		}
+
+		closed := newParkingWith(t, newWorld(t), func(s *agentrt.Spec) { s.Answerers = []string{"carol"} }, ask, agenttest.TextResponse("Done."))
+		rt2 := closed.rt(t)
+		closed.workers(t, rt2, 2, 0)
+		runID = closed.accept(t, rt2, requested("evt-1"))
+		q = closed.parkedOn(t, rt2, runID)
+		if err := closed.answerAs(rt2, runID, q.ID, "bob", "bob", payload.Answer{Choice: "prod"}); !errors.Is(err, runtime.ErrNotAllowed) {
+			t.Fatalf("bob answering a question kept for carol: %v", err)
+		}
+		if err := closed.answerAs(rt2, runID, q.ID, "carol", "carol", payload.Answer{Choice: "prod"}); err != nil {
+			t.Fatalf("carol: %v", err)
+		}
+	})
+}
+
+// routed is a model that answers from the conversation it is sent, so any
+// number of runs can share it in any order: the first call of a turn calls
+// the tool, and a call that sees a tool result answers with it.
+type routed struct {
+	tool string
+	args map[string]any
+	done string
+}
+
+func (m routed) Stream(_ context.Context, req saigetypes.Request) (<-chan saigetypes.Delta, error) {
+	var deltas []saigetypes.Delta
+	result, answered := "", false
+	for _, msg := range req.Messages {
+		for _, p := range saigetypes.PartsOf(msg) {
+			if tr, ok := p.(saigetypes.ToolResultPart); ok {
+				result, answered = tr.Text(), true
+			}
+		}
+	}
+	if !answered {
+		deltas = call("c1", m.tool, m.args)
+	} else {
+		deltas = agenttest.TextResponse(m.done + " " + result)
+	}
+	ch := make(chan saigetypes.Delta, len(deltas))
+	for _, d := range deltas {
+		ch <- d
+	}
+	close(ch)
+	return ch, nil
+}
+
+// delegating is a world where "lead" delegates to "ops", which asks a person
+// which env, with delegations as child runs.
+func childRunWorld(t *testing.T, w *world) (*runtime.Runtime, *parking) {
+	t.Helper()
+	p := newParking(t, w)
+	lead := agentrt.Revision{Rev: 1, Hash: "sha256:lead@1", Spec: agentrt.Spec{
+		Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
+		Access: agentrt.Access{Spawn: []string{"ops"}},
+	}}
+	w.specs.mu.Lock()
+	w.specs.revs["lead"] = []agentrt.Revision{lead}
+	w.specs.mu.Unlock()
+	p.exec = sandboxOf(t, w.specs, map[string]saigetypes.Provider{
+		"lead": routed{tool: runtime.DelegateToolName("ops"), args: map[string]any{"text": "deploy"}, done: "Lead got:"},
+		"ops":  routed{tool: agentrt.AskPersonToolName, args: map[string]any{"question": "Which env?", "options": []any{"prod", "staging"}}, done: "Child chose"},
+	}, runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
+		return agentrt.StaticTools(p.deploy), nil
+	}))
+	return p.rt(t, runtime.WithChildRuns()), p
+}
+
+// pendingOf waits for a run to be parked on a question of a kind.
+func pendingOf(t *testing.T, rt *runtime.Runtime, runID, kind string) payload.Question {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if q, ok, err := rt.PendingQuestion(context.Background(), "acme", runID); err == nil && ok && q.Kind == kind {
+			return q
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("run %s never parked on a %s", runID, kind)
+	return payload.Question{}
+}
+
+// A parent waiting on a delegated child parks instead of holding its worker,
+// so as many parents as there are workers each delegating to a child that
+// waits on a person all finish: the children run, are answered, and wake
+// their parents. With parents that held their workers, no child could start.
+func TestDelegatingParentsParkSoTheirChildrenRunAtAnyConcurrency(t *testing.T) {
+	for _, workers := range []int{1, 2} {
+		t.Run(fmt.Sprint(workers, " workers"), func(t *testing.T) {
+			w := newWorld(t)
+			rt, p := childRunWorld(t, w)
+			p.workers(t, rt, workers, 0)
+
+			var parents []string
+			for i := range workers {
+				tg := tag("lead", fmt.Sprint("evt-", i), "ship")
+				tg.Actor = envelope.Actor{ID: "ana"}
+				parents = append(parents, p.accept(t, rt, tg))
+			}
+			for _, parent := range parents {
+				wait := pendingOf(t, rt, parent, payload.QuestionDelegation)
+				if wait.ChildRunID == "" || wait.Tool == nil || wait.Tool.Name != "tag_ops" {
+					t.Fatalf("the parent waits on %+v, want a child run of ops", wait)
+				}
+				if _, _, err := rt.Answer(context.Background(), runtime.AnswerRequest{Tenant: "acme", RunID: parent, QuestionID: wait.ID,
+					Answer: payload.Answer{Text: "done"}, By: "bob"}); !errors.Is(err, runtime.ErrInvalid) {
+					t.Errorf("a person answered a delegation: %v", err)
+				}
+				q := pendingOf(t, rt, wait.ChildRunID, payload.QuestionChoice)
+				p.answer(t, rt, wait.ChildRunID, q.ID, payload.Answer{Choice: "staging"})
+			}
+			for _, parent := range parents {
+				out := p.result(t, rt, parent)
+				if !strings.Contains(out.Text, "Child chose staging") {
+					t.Errorf("parent answered %q, want the child's answer", out.Text)
+				}
+				if out.Usage == nil || len(lifecycleOf(t, p.bus.of(parent), envelope.KindResumed)) == 0 {
+					t.Errorf("parent %s: usage %v, resumed events %d", parent, out.Usage, len(lifecycleOf(t, p.bus.of(parent), envelope.KindResumed)))
+				}
+				var children int
+				for _, e := range p.bus.of(parent) {
+					if e.Kind == envelope.KindUsageChild {
+						children++
+					}
+				}
+				if children != 1 {
+					t.Errorf("parent %s rolled up %d child runs, want 1", parent, children)
+				}
+			}
+		})
+	}
+}
+
+// Stopping a parent that waits on its child stops the child too, with the
+// same words, and neither resumes.
+func TestStoppingAParentWaitingOnAChildStopsBoth(t *testing.T) {
+	w := newWorld(t)
+	rt, p := childRunWorld(t, w)
+	p.workers(t, rt, 2, 0)
+	parent := p.accept(t, rt, tag("lead", "evt-1", "ship"))
+	wait := pendingOf(t, rt, parent, payload.QuestionDelegation)
+	pendingOf(t, rt, wait.ChildRunID, payload.QuestionChoice)
+
+	p.stop(t, rt, "acme", parent, "Not today", "U1")
+	if out := p.result(t, rt, parent); out.Stopped == nil || out.Stopped.Reason != "Not today" {
+		t.Fatalf("parent Output = %+v", out)
+	}
+	if out := p.result(t, rt, wait.ChildRunID); out.Stopped == nil || out.Stopped.Reason != "Not today" {
+		t.Fatalf("child Output = %+v", out)
+	}
+}
+
+// A run that parks again and again stores its conversation once: each park
+// records what the turn added since the last one, and the continuation is
+// still given the whole of it.
+func TestRepeatedParksStoreTheTranscriptOnce(t *testing.T) {
+	w := newWorld(t)
+	p := newParking(t, w,
+		call("c1", agentrt.AskPersonToolName, map[string]any{"question": "First?"}),
+		call("c2", agentrt.AskPersonToolName, map[string]any{"question": "Second?"}),
+		call("c3", agentrt.AskPersonToolName, map[string]any{"question": "Third?"}),
+		agenttest.TextResponse("Done."))
+	rt := p.rt(t)
+	p.workers(t, rt, 2, 0)
+	runID := p.accept(t, rt, tag("ops", "evt-1", "ship"))
+	for _, reply := range []string{"one", "two", "three"} {
+		q := pendingOf(t, rt, runID, payload.QuestionReply)
+		p.answer(t, rt, runID, q.ID, payload.Answer{Text: reply})
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if next, ok, _ := rt.PendingQuestion(context.Background(), "acme", runID); !ok || next.ID != q.ID {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	p.result(t, rt, runID)
+	last := renderMessages(p.model.Requests()[3].Messages)
+	for _, want := range []string{"one", "two", "three", "ship"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("the last call is missing %q: %s", want, last)
+		}
+	}
+	_, records, err := w.ledger.Load(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := 0
+	for _, rec := range records {
+		if rec.Name != runtime.ActivityAgent && rec.Name != runtime.ActivityResume {
+			continue
+		}
+		var out runtime.Outcome
+		if err := json.Unmarshal(rec.Output, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Parked != nil {
+			stored += len(out.Parked.Transcript)
+		}
+	}
+	// Three parks; the conversation they share is stored once: the first
+	// park holds nothing before its message, and each later one holds only
+	// the previous call and its result.
+	if stored != 4 {
+		t.Errorf("the parks store %d transcript messages, want 4", stored)
+	}
 }

@@ -35,6 +35,11 @@ type Spec struct {
 	// Approvals names the tools whose calls wait for a person: see
 	// agentspec.AgentSpec.Approvals.
 	Approvals []string `json:"approvals,omitempty"`
+	// Approvers, SelfApproval and Answerers say who may answer the questions
+	// the agent asks: see agentspec.AgentSpec.
+	Approvers    []string `json:"approvers,omitempty"`
+	SelfApproval bool     `json:"self_approval,omitempty"`
+	Answerers    []string `json:"answerers,omitempty"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in.

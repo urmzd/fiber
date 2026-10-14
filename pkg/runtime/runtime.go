@@ -217,6 +217,16 @@ type Input struct {
 	// It is a sequence number in the journal, not in the run's event stream,
 	// and it is fixed at accept: it does not contradict the rule above.
 	HistorySeq uint64 `json:"history_seq,omitempty"`
+	// Parent is the run that started this one for a delegation and waits on
+	// it (WithChildRuns). This run's ending answers the parent's wait. Absent
+	// for every other run, so their input hashes as it always did.
+	Parent *ParentRef `json:"parent,omitempty"`
+}
+
+// ParentRef names the run, and the wait in it, that a child run answers.
+type ParentRef struct {
+	RunID      string `json:"run_id"`
+	QuestionID string `json:"question_id"`
 }
 
 // Output is a run's durable result.
@@ -302,6 +312,10 @@ type Request struct {
 	// calls have. Like Revision and History it is a resolved value, read
 	// from the run's records.
 	Resume *agentrt.Parked `json:"resume,omitempty"`
+	// ChildRuns makes a delegation a child run the turn parks on, rather
+	// than work it waits for (WithChildRuns). Only a durable run that can
+	// park has it.
+	ChildRuns bool `json:"child_runs,omitempty"`
 }
 
 // Agent returns the agent name.
@@ -440,6 +454,9 @@ type Runtime struct {
 	// stopped. Nil leaves it to the worker's janitor.
 	waker       Waker
 	questionTTL time.Duration
+	roles       Roles
+	reader      RecordReader
+	childRuns   bool
 
 	registry *run.Registry
 	turn     *duraturo.ActivityFn[Input, Output]
@@ -597,6 +614,11 @@ func (r *Runtime) Registry() *run.Registry { return r.registry }
 // report the pinned revision, which is the one that matters.) The same holds for
 // the history pin: a redelivery reads a newer head and duraturo discards it.
 func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
+	return r.accept(ctx, tag, nil)
+}
+
+// accept is Accept for a run that may be another run's child.
+func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRef) (Acceptance, error) {
 	if err := tag.Validate(); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept: %w", err)
 	}
@@ -623,7 +645,7 @@ func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, err
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
 	}
 
-	in := Input{Tag: tag, Rev: rev.Rev, Hash: rev.Hash, HistorySeq: seq}
+	in := Input{Tag: tag, Rev: rev.Rev, Hash: rev.Hash, HistorySeq: seq, Parent: parent}
 	acc := Acceptance{RunID: runID, Rev: rev.Rev, Topic: tp, AcceptedAt: r.now().UTC()}
 
 	e := r.event(in, SeqAccepted, envelope.KindAccepted)
@@ -636,7 +658,11 @@ func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, err
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", tag.ID, err)
 	}
 
-	if _, err := duraturo.Start(ctx, r.client, r.turn, in, duraturo.WithRunID(runID)); err != nil {
+	startOpts := []duraturo.StartOption{duraturo.WithRunID(runID)}
+	if parent != nil {
+		startOpts = append(startOpts, duraturo.WithParent(parent.RunID))
+	}
+	if _, err := duraturo.Start(ctx, r.client, r.turn, in, startOpts...); err != nil {
 		// Start returns a handle alongside an enqueue failure: the run is
 		// durable and the janitor will drive it anyway. Report the error —
 		// the caller asked for an acknowledgement it did not fully get — but
@@ -674,7 +700,12 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	claimed := map[int]bool{}
 	var said strings.Builder
 	parks := 0
+	var transcript []json.RawMessage
 	for err == nil && out.Parked != nil {
+		if transcript, err = wholeTranscript(transcript, out.Parked); err != nil {
+			break
+		}
+		out.Parked.Transcript, out.Parked.Since = transcript, 0
 		r.claimUsage(ctx, in, out.UsageAttempts, claimed)
 		said.WriteString(out.Text)
 		res, werr := r.awaitAnswer(ctx, at, out)
@@ -710,10 +741,13 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// error will not be attempted again, anything else may be. A run that
 		// later exhausts its budget has its last failure on the bus marked
 		// non-terminal; the ledger stays the authority on run status.
+		terminal := run.IsNonRetryable(err) || errors.Is(err, run.ErrNonDeterministic)
 		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
-			Attempt: attempt, Rev: in.Rev, Error: err.Error(),
-			Terminal: run.IsNonRetryable(err) || errors.Is(err, run.ErrNonDeterministic),
+			Attempt: attempt, Rev: in.Rev, Error: err.Error(), Terminal: terminal,
 		})
+		if terminal {
+			r.answerParent(ctx, in, "", nil, err)
+		}
 		return Output{}, err
 	}
 	// The run's answer is everything it said, across every park.
@@ -750,6 +784,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		}); err != nil {
 			return Output{}, err
 		}
+		r.answerParent(ctx, in, out.Text, out.Stopped, nil)
 		return Output{
 			Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
 			Events: events, Stopped: out.Stopped, Usage: out.Usage,
@@ -761,6 +796,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	}); err != nil {
 		return Output{}, err
 	}
+	r.answerParent(ctx, in, out.Text, nil, nil)
 	return Output{
 		Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
 		Events: events, Stored: out.Stored, Usage: out.Usage,
@@ -902,6 +938,7 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 		Park:        r.stops != nil,
 		QuestionTTL: r.questionTTL,
 		Resume:      resume,
+		ChildRuns:   r.childRuns && r.stops != nil,
 	}
 
 	// What earlier attempts spent and failed is read here, inside the
@@ -929,6 +966,7 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	if resume != nil {
 		// The request is the parked turn's, whatever path this turn took.
 		out.Prompt = resume.Prompt
+		trimTranscript(out.Parked, resume)
 	}
 	mine := meter.snapshot()
 	// The attempt spent what it spent. Its calls go on the run before the

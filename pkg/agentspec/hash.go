@@ -87,6 +87,17 @@ func (s AgentSpec) Hash() string {
 		writeString(h, "approvals")
 		writeStrings(h, c.Approvals)
 	}
+	if len(c.Approvers) > 0 {
+		writeString(h, "approvers")
+		writeStrings(h, c.Approvers)
+	}
+	if c.SelfApproval {
+		writeString(h, "self_approval")
+	}
+	if len(c.Answerers) > 0 {
+		writeString(h, "answerers")
+		writeStrings(h, c.Answerers)
+	}
 	return HashAlgorithm + ":" + hex.EncodeToString(h.Sum(nil))
 }
 

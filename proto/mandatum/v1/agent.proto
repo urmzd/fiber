@@ -87,8 +87,22 @@ message AgentSpec {
   // with the decision (InvokeService.Answer).
   repeated string approvals = 9;
 
+  // Approvers, when set, are the only people who may answer an approval:
+  // principals as the host names them, or "role:<name>" for a role the host
+  // resolves. Empty lets anyone in the tenant approve except the requester.
+  repeated string approvers = 10;
+
+  // SelfApproval lets the person whose request raised a call approve it.
+  // Off by default: an approval is a second pair of eyes.
+  bool self_approval = 11;
+
+  // Answerers, when set, are the only people who may answer a choice or a
+  // reply the agent asks, named as approvers are. Empty lets anyone in the
+  // tenant answer.
+  repeated string answerers = 12;
+
   // Reserved for growth. Carve new fields from the front of this range.
-  reserved 10 to 24;
+  reserved 13 to 24;
 }
 
 // Source names one corpus an agent retrieves from.

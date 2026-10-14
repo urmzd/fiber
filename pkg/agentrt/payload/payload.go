@@ -191,6 +191,10 @@ const (
 	QuestionChoice = "choice"
 	// QuestionReply asks for free text.
 	QuestionReply = "reply"
+	// QuestionDelegation is not put to a person: the run is waiting on a
+	// child run it delegated to, and the child's ending answers it. It
+	// cannot be answered through the runtime's Answer.
+	QuestionDelegation = "delegation"
 )
 
 // Decisions on an approval.
@@ -233,6 +237,8 @@ type Question struct {
 	Default *Answer `json:"default,omitempty"`
 	// At is when the run asked.
 	At time.Time `json:"at,omitzero"`
+	// ChildRunID is the run a delegation waits on, for QuestionDelegation.
+	ChildRunID string `json:"child_run_id,omitempty"`
 }
 
 // QuestionTool is the tool call an approval asks about.
@@ -275,6 +281,10 @@ type Answer struct {
 	// Expired is set when nobody answered in time and this is the
 	// question's default.
 	Expired bool `json:"expired,omitempty"`
+	// RunID is the child run whose ending answered a delegation. Its Text
+	// is then the child's answer, and Note says why there is none when the
+	// child failed or was stopped.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // ChildQuestion is the body of envelope.KindChildParked: a child run the

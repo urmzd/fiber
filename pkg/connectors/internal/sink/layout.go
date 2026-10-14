@@ -139,7 +139,14 @@ func Layout(m Markup, v render.View) string {
 	if v.Error != "" {
 		sections = append(sections, m.Bold("failed")+": "+v.Error)
 	}
-	if q := v.Question; q != nil {
+	if q := v.Question; q != nil && q.Kind == "delegation" {
+		// Not a person: the run waits on a run it delegated to.
+		line := m.Bold("waiting on "+strings.TrimPrefix(q.Tool, "tag_")) + ": " + truncate(collapse(q.Prompt), 400)
+		if q.Child != "" {
+			line += " " + m.Italic("(run "+q.Child+")")
+		}
+		sections = append(sections, line)
+	} else if q != nil {
 		sections = append(sections, layoutQuestion(m, "waiting on a person", q))
 	} else if q := v.Waiting; q != nil {
 		who := "a delegated run"
@@ -199,6 +206,9 @@ func layoutHeader(m Markup, v render.View) string {
 		return ""
 	}
 	head := m.Bold(v.Agent)
+	if q := v.Question; q != nil && q.Kind == "delegation" && v.Status == render.StatusParked {
+		return head + " " + m.Italic("(waiting on "+strings.TrimPrefix(q.Tool, "tag_")+")")
+	}
 	if label := StatusLabel(v.Status); label != "" {
 		head += " " + m.Italic("("+label+")")
 	}

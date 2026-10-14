@@ -128,6 +128,19 @@ type AgentSpec struct {
 	// parks on the call and resumes with the person's decision; see the
 	// runtime's "Parking a run on a person".
 	Approvals []string `json:"approvals,omitempty"`
+	// Approvers, when set, are the only people who may answer an approval:
+	// principals as the host names them ("ana", "slack:U1"), or roles as
+	// "role:<name>", which the host resolves (the runtime's WithRoles).
+	// Empty lets anyone in the tenant approve, except the person whose
+	// request raised the call.
+	Approvers []string `json:"approvers,omitempty"`
+	// SelfApproval lets the person whose request raised a call approve it.
+	// Off by default: an approval is a second pair of eyes.
+	SelfApproval bool `json:"self_approval,omitempty"`
+	// Answerers, when set, are the only people who may answer a choice or
+	// a reply the agent asks with ask_person, named as Approvers are. Empty
+	// lets anyone in the tenant answer, the requester included.
+	Answerers []string `json:"answerers,omitempty"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in. Options are
@@ -223,6 +236,8 @@ func (r Revision) Clone() Revision {
 func (s AgentSpec) Clone() AgentSpec {
 	s.Tools = slices.Clone(s.Tools)
 	s.Approvals = slices.Clone(s.Approvals)
+	s.Approvers = slices.Clone(s.Approvers)
+	s.Answerers = slices.Clone(s.Answerers)
 	s.Access.Spawn = slices.Clone(s.Access.Spawn)
 	s.Access.WorkspaceAreas = slices.Clone(s.Access.WorkspaceAreas)
 	if s.Sources != nil {
@@ -262,6 +277,9 @@ func (s AgentSpec) Normalize() AgentSpec {
 		SystemPrompt: strings.TrimSpace(s.SystemPrompt),
 		Tools:        normalizeSet(s.Tools, false),
 		Approvals:    normalizeSet(s.Approvals, false),
+		Approvers:    normalizeSet(s.Approvers, false),
+		SelfApproval: s.SelfApproval,
+		Answerers:    normalizeSet(s.Answerers, false),
 		Access: Access{
 			Spawn:          normalizeSet(s.Access.Spawn, true),
 			WorkspaceAreas: normalizeSet(s.Access.WorkspaceAreas, false),
@@ -341,6 +359,15 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	}
 	if err := uniqueNonEmpty("approval", c.Name, c.Approvals); err != nil {
 		return err
+	}
+	if err := uniqueNonEmpty("approver", c.Name, c.Approvers); err != nil {
+		return err
+	}
+	if err := uniqueNonEmpty("answerer", c.Name, c.Answerers); err != nil {
+		return err
+	}
+	if len(c.Approvals) == 0 && (len(c.Approvers) > 0 || c.SelfApproval) {
+		return fmt.Errorf("%w: agent %q names who may approve but requires no approvals", ErrInvalid, c.Name)
 	}
 	for _, name := range c.Approvals {
 		// An approval for a tool the agent cannot call would never be asked,
