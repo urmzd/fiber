@@ -144,6 +144,32 @@ func renderEventText(u *ui, e *mandatumv1.Event, answerOnly bool) {
 		}
 		u.printf("%s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), paint(line))
 
+	case payload.Stopped:
+		line := string(kind)
+		if v.Attempt > 0 {
+			line += fmt.Sprintf(" attempt=%d", v.Attempt)
+		}
+		if v.Rev > 0 {
+			line += fmt.Sprintf(" rev=%d", v.Rev)
+		}
+		if v.By != "" {
+			line += " by=" + oneLine(v.By)
+		}
+		if v.Reason != "" {
+			line += " reason=" + fmt.Sprintf("%q", oneLine(v.Reason))
+		}
+		if answerOnly {
+			u.logf("%s\n", u.yellow(line))
+			return
+		}
+		u.printf("%s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), u.yellow(line))
+
+	case payload.StopRequest:
+		if answerOnly {
+			return
+		}
+		u.printf("%s %s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), u.yellow(string(kind)), oneLine(v.RunID))
+
 	case payload.Action:
 		u.logf("%s %s\n", u.green("action"), oneLine(v.Summary))
 
@@ -172,7 +198,7 @@ func oneLine(s string) string {
 // ignores it, because a topic outlives the runs on it.
 func terminal(e *mandatumv1.Event) bool {
 	switch envelope.Kind(e.GetKind()) {
-	case envelope.KindCompleted, envelope.KindFailed:
+	case envelope.KindCompleted, envelope.KindFailed, envelope.KindStopped:
 		return true
 	default:
 		return false

@@ -564,9 +564,31 @@ func (c *core) Run(ctx context.Context, tenant, runID string) (server.Run, error
 		var result runtime.Output
 		if err := json.Unmarshal(rec.Output, &result); err == nil {
 			out.LastSeq = result.LastSeq
+			// The ledger knows two endings. A stopped run is the third, and
+			// it is told apart by what the run returned.
+			if result.Stopped != nil {
+				out.Status = server.StatusStopped
+			}
 		}
 	}
 	return out, nil
+}
+
+// Stop asks a run to stop. It satisfies server.Stopper.
+//
+// It is one line because the request is not this process's to carry out: the
+// runtime publishes it on the bus, and whichever worker is executing the run,
+// here or elsewhere, hears it. See runtime.Runtime.Stop for what the absence of
+// an error does and does not mean.
+func (c *core) Stop(ctx context.Context, req server.StopRequest) error {
+	err := c.rt.Stop(ctx, runtime.StopRequest{Tenant: req.Tenant, RunID: req.RunID, Reason: req.Reason, By: req.By})
+	switch {
+	case errors.Is(err, runtime.ErrInvalid):
+		return fmt.Errorf("%w: %w", server.ErrInvalid, err)
+	case errors.Is(err, runtime.ErrStopUnavailable):
+		return fmt.Errorf("%w: %w", server.ErrUnimplemented, err)
+	}
+	return err
 }
 
 // statusOf maps a ledger status onto the edge's. duraturo has no "running"

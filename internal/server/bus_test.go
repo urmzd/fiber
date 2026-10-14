@@ -177,6 +177,10 @@ func TestUnpublishableEventsAreRefusedAsBadRequests(t *testing.T) {
 		"topic is not a run":   {Topic: "agent:docs-bot", Kind: string(envelope.KindText)},
 		"no kind":              {Topic: "agent:docs-bot:run_1"},
 		"topic is not a topic": {Topic: "not-an-agent-topic:x", Kind: string(envelope.KindText)},
+		"a control topic": {
+			Topic: "agent:_control:stop-run_1",
+			Kind:  string(envelope.KindStop),
+		},
 		"run id disagrees": {
 			Topic: "agent:docs-bot:run_1",
 			RunId: "run_2",

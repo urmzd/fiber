@@ -336,7 +336,9 @@ func statusToProto(s Status) mandatumv1.RunStatus {
 		return mandatumv1.RunStatus_RUN_STATUS_RUNNING
 	case StatusParked:
 		return mandatumv1.RunStatus_RUN_STATUS_PARKED
-	case StatusCompleted:
+	case StatusCompleted, StatusStopped:
+		// See StatusStopped: there is no wire member for it yet, and a
+		// poller must be told the run is over.
 		return mandatumv1.RunStatus_RUN_STATUS_COMPLETED
 	case StatusFailed:
 		return mandatumv1.RunStatus_RUN_STATUS_FAILED
