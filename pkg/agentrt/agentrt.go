@@ -23,6 +23,49 @@
 // a model claims to have used. saige's CitationDelta, which reports what a
 // model or tool cited, is not translated.
 //
+// # Context layout
+//
+// A provider's prompt cache reuses a request only up to the first byte that
+// differs from an earlier one, so the request is laid out from what never
+// changes to what always does:
+//
+//	tool definitions, sorted by name      identical for every run of a revision
+//	system prompt, from the pinned spec   identical for every run of a revision
+//	the thread's history, oldest first    identical for every run of a thread,
+//	                                      and only ever appended to
+//	the request: trigger metadata,        fixed for the whole turn
+//	  retrieved passages, the text
+//	the tool loop's history               only ever appended to
+//
+// Everything that varies from one run to the next (metadata, retrieval
+// results) lives in the request message, never in the system prompt, so it
+// cannot sit ahead of content that would otherwise be shared. Inside a turn
+// each model call sends the previous call's request plus what was added since.
+// The single exception is a compaction, which is off unless a budget is set;
+// see WithCompaction for what it rewrites and why it is rare, and
+// WithPromptCache for where the cache breakpoints go.
+//
+// # History across runs
+//
+// A turn may carry the conversation so far in Turn.History. It is replayed
+// into the request in the order given, one message per entry, after the
+// system prompt and before the new request, and nothing is added to it: a
+// Message is a role and a text, so there is no timestamp or run id that could
+// reach the model and differ between two runs.
+//
+// That gives a thread the same property a tool loop has. If the caller keeps
+// history append-only and records each exchange as it happened (Result.Prompt
+// is the request message exactly as it was sent, Result.Text is the answer),
+// then the first request of run k is a byte prefix of the first request of
+// run k+1, and a prefix cache reads the whole earlier conversation. The
+// exception is the same one as inside a turn: a compaction rewrites the
+// middle of the history and keeps the tools, the system prompt, and the
+// oldest message.
+//
+// This package does not store history, and does not know what a thread is.
+// With no History a turn starts a fresh conversation, and the prefix two runs
+// of the same revision share is the tool definitions and the system prompt.
+//
 // # Revisions are pinned, not resolved
 //
 // New takes a Revision, never an agent name. Nothing in this package can look
@@ -42,6 +85,11 @@ import (
 
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
+
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+
+	"github.com/urmzd/mandatum/pkg/attachment"
+	"github.com/urmzd/mandatum/pkg/attachment/resolve"
 )
 
 // DefaultMaxIter bounds the agent loop's tool-calling iterations per turn. It
@@ -50,8 +98,39 @@ import (
 // it because a looping turn never fails.
 const DefaultMaxIter = 10
 
+// Role says who a history message is from.
+type Role string
+
+const (
+	// RoleUser is a message said to the agent.
+	RoleUser Role = "user"
+	// RoleAssistant is an answer the agent gave.
+	RoleAssistant Role = "assistant"
+)
+
+// Message is one earlier message of the conversation a turn continues.
+//
+// It is deliberately only a role and a text. Whatever is rendered for the
+// model has to be identical on every run that replays it, and the simplest
+// way to guarantee that a timestamp, a run id or a sequence number never
+// reaches the request is for the type to have nowhere to put one.
+type Message struct {
+	Role Role   `json:"role"`
+	Text string `json:"text"`
+}
+
 // Turn is one request to an agent.
 type Turn struct {
+	// Attachments are the files that arrived with the request. They need
+	// WithAttachments, and Tenant, which scopes every read of them.
+	Attachments []attachment.Attachment
+	// Tenant is the authorization scope the turn runs under. It is only read
+	// to resolve attachments.
+	Tenant string
+	// History is the conversation so far, oldest first. It is replayed
+	// verbatim ahead of the request. The caller owns its order and its
+	// stability: see "History across runs" in the package documentation.
+	History []Message
 	// Text is the request, with the agent mention already stripped.
 	Text string
 	// Meta is trigger-specific context (a pull request number, an issue
@@ -65,10 +144,24 @@ type Result struct {
 	// Text is the agent's final answer, the concatenation of its text
 	// deltas.
 	Text string
+	// Prompt is the request message exactly as it was sent to the model:
+	// trigger metadata, retrieved passages, and the turn's text. A caller
+	// that keeps history records this, not Turn.Text, as what the user said,
+	// because a later run only shares a request prefix with this one if it
+	// replays the same bytes.
+	Prompt string
 	// Chunks counts the event bodies the turn emitted, citations included.
 	Chunks int
 	// Citations counts the retrieved passages the turn was grounded in.
 	Citations int
+	// Usage is the tokens the turn spent across all its model calls, with
+	// the share read from and written to the prompt cache. It is reported
+	// for a failed turn too, since the tokens were spent either way.
+	Usage payload.Usage
+	// Compactions lists each time the turn's history was summarized, in
+	// order. It is empty unless WithCompaction set a budget and the turn
+	// crossed it.
+	Compactions []payload.Compaction
 }
 
 // Runner runs turns of one pinned revision.
@@ -83,8 +176,11 @@ type Runner struct {
 	provider  saigetypes.Provider
 	tools     *saigetypes.ToolRegistry
 	retriever Retriever
+	files     *resolve.Resolver
 	maxIter   int
 	logger    *slog.Logger
+	// compaction is the history budget; its zero value never compacts.
+	compaction Compaction
 }
 
 // Option configures a Runner.
@@ -97,6 +193,22 @@ type config struct {
 	retriever Retriever
 	maxIter   int
 	logger    *slog.Logger
+	// compaction and promptCache are the context policy; see context.go.
+	compaction  Compaction
+	promptCache string
+	files       *resolve.Resolver
+}
+
+// WithAttachments lets turns carry files. The resolver reads each attachment
+// from the blob store and turns it into what the pinned model can take: the
+// bytes themselves where the model has that modality, derived text where it
+// does not, and a note saying a file was attached where neither is possible.
+//
+// Without it a turn that carries attachments is refused. Running it anyway
+// would answer a question about a file as though no file had been sent, and a
+// confident answer to the wrong question is worse than an error.
+func WithAttachments(r *resolve.Resolver) Option {
+	return func(c *config) { c.files = r }
 }
 
 // WithProvider registers or replaces a provider factory under name. A
@@ -158,15 +270,26 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		providers: defaultProviders(),
 		maxIter:   DefaultMaxIter,
 		logger:    slog.Default(),
+		// Caching is on by default because it is free to be wrong about: a
+		// prefix nobody reads again costs a quarter more to write once, and
+		// a tool loop of three calls has already earned that back.
+		promptCache: PromptCacheShort,
 	}
 	for _, o := range opts {
 		o(&cfg)
 	}
-	// The offline provider is resolved last because it needs the script,
-	// which an option may have supplied. An explicit WithProvider for the
-	// same name wins: overriding a built-in is the documented escape hatch.
+	if err := validPromptCache(cfg.promptCache); err != nil {
+		return nil, err
+	}
+	// The offline and Anthropic providers are resolved last because they
+	// need what an option may have supplied: the script, the cache lifetime.
+	// An explicit WithProvider for the same name wins: overriding a built-in
+	// is the documented escape hatch.
 	if cfg.providers[ProviderOffline] == nil {
 		cfg.providers[ProviderOffline] = offlineProvider(cfg.script)
+	}
+	if cfg.providers[ProviderAnthropic] == nil {
+		cfg.providers[ProviderAnthropic] = anthropicProvider(cfg.promptCache)
 	}
 
 	newProvider, ok := cfg.providers[rev.Spec.Provider]
@@ -179,6 +302,11 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		return nil, err
 	}
 
+	// The registry hands tool definitions to the provider sorted by name, so
+	// the order a spec lists its tools in never reaches the request. That
+	// matters beyond tidiness: tool definitions are the first bytes of the
+	// cached prefix, and an order that followed the spec would invalidate
+	// the cache for an edit that only reordered a list.
 	tools := saigetypes.NewToolRegistry()
 	for _, name := range rev.Spec.Tools {
 		if cfg.tools == nil {
@@ -193,12 +321,14 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	}
 
 	return &Runner{
-		rev:       rev,
-		provider:  provider,
-		tools:     tools,
-		retriever: cfg.retriever,
-		maxIter:   cfg.maxIter,
-		logger:    cfg.logger,
+		rev:        rev,
+		provider:   provider,
+		tools:      tools,
+		retriever:  cfg.retriever,
+		files:      cfg.files,
+		maxIter:    cfg.maxIter,
+		logger:     cfg.logger,
+		compaction: cfg.compaction,
 	}, nil
 }
 
@@ -256,20 +386,41 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	if meta := renderMeta(t.Meta); meta != "" {
 		prompt = meta + "\n\n" + prompt
 	}
+	res.Prompt = prompt
 
-	agent, err := saige.New(saige.Config{
+	input, err := conversation(t.History, prompt)
+	if err != nil {
+		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
+	}
+	if len(t.Attachments) > 0 {
+		// Files ride on the message they arrived with, which is the last one.
+		// They are the most volatile thing a turn sends, so they go after
+		// everything a later turn could share a cached prefix with.
+		msg, err := r.withFiles(ctx, t, prompt)
+		if err != nil {
+			return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
+		}
+		input[len(input)-1] = msg
+	}
+
+	agentCfg := saige.Config{
 		Name:         r.rev.Spec.Name,
 		SystemPrompt: r.rev.Spec.SystemPrompt,
 		Provider:     r.provider,
 		Tools:        r.tools,
 		MaxIter:      r.maxIter,
 		Logger:       r.logger,
-	})
+	}
+	if cc := r.compaction.config(); cc != nil {
+		agentCfg.CompactCfg = cc
+		agentCfg.Hooks = []saige.Hooks{newCompactionGuard(r.compaction.keepTurns()).hooks()}
+	}
+	agent, err := saige.New(agentCfg)
 	if err != nil {
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
 	}
 
-	stream := agent.Invoke(ctx, []saigetypes.Message{saigetypes.UserMsg(saigetypes.Text(prompt))})
+	stream := agent.Invoke(ctx, input)
 	translator := NewTranslator()
 
 	var answer strings.Builder
@@ -285,6 +436,12 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			if streamErr == nil && v.Error != nil {
 				streamErr = v.Error
 			}
+		case saigetypes.UsageDelta:
+			// Telemetry, so it goes on the Result and not on the bus (see
+			// Translator.Delta).
+			res.Usage = addUsage(res.Usage, v)
+		case saigetypes.CompactionDelta:
+			res.Compactions = append(res.Compactions, compactionRecord(v))
 		case saigetypes.MarkerDelta:
 			// A tool asked for human approval mid-turn. Nothing in a durable
 			// turn can answer that question — the caller is a queue, not a
@@ -324,10 +481,61 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	return res, nil
 }
 
+// withFiles builds the turn's own message with its attachments resolved for the
+// model this revision pins. A provider that does not report what it accepts is
+// treated as text only: showing a model bytes it cannot read fails the call,
+// while derived text always works.
+func (r *Runner) withFiles(ctx context.Context, t Turn, prompt string) (saigetypes.Message, error) {
+	if r.files == nil {
+		return nil, fmt.Errorf("%w: the turn carries %d attachments and this deployment has no attachment resolver", ErrInvalid, len(t.Attachments))
+	}
+	var media saigetypes.ContentSupport
+	if caps, ok := saigetypes.ProviderCapabilities(r.provider); ok {
+		media = caps.Media
+	}
+	out, err := r.files.Resolve(ctx, resolve.Request{Tenant: t.Tenant, Attachments: t.Attachments, Model: media})
+	if err != nil {
+		return nil, fmt.Errorf("attachments: %w", err)
+	}
+	return out.Message(prompt), nil
+}
+
 // drain empties a cancelled stream so its producing goroutine can exit.
 func drain(s *saige.EventStream) {
 	for range s.Deltas() {
 	}
+}
+
+// conversation lays out what a turn sends after the system prompt: the
+// history, then the request.
+//
+// Each history entry becomes exactly one message, in the order given, and
+// entries are never merged, reordered or decorated. Merging two consecutive
+// messages of one role would look tidier and would break the property this
+// exists for: the message a run sent last would change shape once a later
+// message joined it, and the next run's request would stop being an extension
+// of this one.
+//
+// An entry this package cannot render is refused rather than skipped. A
+// history with a hole in it is a different conversation, and an agent that
+// answers a different conversation is worse than a turn that fails.
+func conversation(history []Message, prompt string) ([]saigetypes.Message, error) {
+	out := make([]saigetypes.Message, 0, len(history)+1)
+	for i, m := range history {
+		if strings.TrimSpace(m.Text) == "" {
+			return nil, fmt.Errorf("%w: history message %d of %d has no text", ErrInvalid, i+1, len(history))
+		}
+		switch m.Role {
+		case RoleUser:
+			out = append(out, saigetypes.UserMsg(saigetypes.Text(m.Text)))
+		case RoleAssistant:
+			out = append(out, saigetypes.AssistantMsg(saigetypes.Text(m.Text)))
+		default:
+			return nil, fmt.Errorf("%w: history message %d of %d has role %q, want %q or %q",
+				ErrInvalid, i+1, len(history), m.Role, RoleUser, RoleAssistant)
+		}
+	}
+	return append(out, saigetypes.UserMsg(saigetypes.Text(prompt))), nil
 }
 
 // renderMeta formats a tag's metadata as a context block, in sorted key order.

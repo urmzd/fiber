@@ -176,6 +176,72 @@ func parseAddr(s string) (address.Address, error) {
 	return address.Parse(s)
 }
 
+// Usage is what a turn cost in tokens, summed over every model call it made,
+// compaction summaries included.
+//
+// It has no envelope.Kind, on purpose. Token counts are telemetry: putting
+// them on a fan-out bus that connectors render would leak cost data into Slack
+// threads. A turn returns its Usage to the caller instead, which is where a
+// metrics exporter or a run ledger reads it.
+//
+// The cache fields are what make prompt-cache health measurable. A long run
+// whose requests keep a stable prefix reads most of its input from the cache,
+// so CachedPromptTokens tracks PromptTokens; a run that rewrites its prefix
+// every call shows CacheWriteTokens growing and CachedPromptTokens near zero.
+// Providers that do not report cache activity leave both at zero, which is
+// indistinguishable from a cold cache.
+type Usage struct {
+	// ModelCalls is the number of provider requests the turn made: every
+	// call of the tool loop, plus every compaction summary whose provider
+	// reported tokens for it.
+	ModelCalls int `json:"model_calls,omitempty"`
+	// PromptTokens is all input: uncached, read from cache, and written to it.
+	PromptTokens int `json:"prompt_tokens,omitempty"`
+	// CachedPromptTokens is the part of PromptTokens read from the prompt
+	// cache.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+	// CacheWriteTokens is the part of PromptTokens written to the prompt
+	// cache, billed at a premium.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// CompletionTokens is all output.
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+}
+
+// CacheReadRatio is the fraction of input tokens served from the prompt cache,
+// from 0 to 1. It is 0 when no input was reported.
+func (u Usage) CacheReadRatio() float64 {
+	if u.PromptTokens <= 0 {
+		return 0
+	}
+	return float64(u.CachedPromptTokens) / float64(u.PromptTokens)
+}
+
+// Compaction records one time a turn replaced the older part of its history
+// with a summary. Like Usage it has no envelope.Kind yet and is returned to
+// the caller of the turn.
+//
+// It exists because a compaction is the one point where a run's request prefix
+// is rewritten: the prompt cache misses once and the model continues from a
+// summary instead of the original messages. Both are worth being able to see
+// after the fact, and the summary is model output, so re-running the turn does
+// not reproduce it. A record is the only way to know it happened.
+type Compaction struct {
+	// Trigger is why it ran: "input_pressure" when the input crossed the
+	// budget, "context_length" when the provider rejected the request as too
+	// long.
+	Trigger string `json:"trigger,omitempty"`
+	// Strategy is the compaction strategy that ran.
+	Strategy string `json:"strategy,omitempty"`
+	// TokensBefore and TokensAfter are the estimated size of the
+	// model-visible history around the compaction.
+	TokensBefore int `json:"tokens_before,omitempty"`
+	TokensAfter  int `json:"tokens_after,omitempty"`
+	// Summarized is how many messages the summary replaced; Kept is how many
+	// were carried over verbatim.
+	Summarized int `json:"summarized,omitempty"`
+	Kept       int `json:"kept,omitempty"`
+}
+
 // Encode marshals a payload body for envelope.Event.Payload.
 func Encode(v any) ([]byte, error) {
 	b, err := json.Marshal(v)

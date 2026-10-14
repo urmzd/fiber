@@ -171,6 +171,14 @@ func TestJSONFieldNamesAreStable(t *testing.T) {
 		{payload.Lifecycle{Attempt: 1}, `{"attempt":1}`},
 		{payload.Citation{Label: "[1]", Text: "t"}, `{"label":"[1]","text":"t","source":{},"index":0}`},
 		{payload.Action{Name: "n"}, `{"name":"n"}`},
+		{
+			payload.Usage{ModelCalls: 2, PromptTokens: 10, CachedPromptTokens: 6, CacheWriteTokens: 3, CompletionTokens: 4},
+			`{"model_calls":2,"prompt_tokens":10,"cached_prompt_tokens":6,"cache_write_tokens":3,"completion_tokens":4}`,
+		},
+		{
+			payload.Compaction{Trigger: "input_pressure", Strategy: "summary", TokensBefore: 9, TokensAfter: 4, Summarized: 6, Kept: 5},
+			`{"trigger":"input_pressure","strategy":"summary","tokens_before":9,"tokens_after":4,"summarized":6,"kept":5}`,
+		},
 	}
 	for _, tc := range tests {
 		raw, err := payload.Encode(tc.body)
@@ -179,6 +187,27 @@ func TestJSONFieldNamesAreStable(t *testing.T) {
 		}
 		if string(raw) != tc.want {
 			t.Errorf("%T encodes as %s, want %s", tc.body, raw, tc.want)
+		}
+	}
+}
+
+// Cache health is read as one number, and it must not divide by zero for a
+// provider that reports no usage at all.
+func TestCacheReadRatioIsTheCachedShareOfInput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		u    payload.Usage
+		want float64
+	}{
+		{"no usage reported", payload.Usage{}, 0},
+		{"cold cache", payload.Usage{PromptTokens: 100, CacheWriteTokens: 100}, 0},
+		{"warm cache", payload.Usage{PromptTokens: 200, CachedPromptTokens: 150}, 0.75},
+	}
+	for _, tc := range tests {
+		if got := tc.u.CacheReadRatio(); got != tc.want {
+			t.Errorf("%s: CacheReadRatio = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
