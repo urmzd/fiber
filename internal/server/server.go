@@ -68,6 +68,7 @@ import (
 	"github.com/urmzd/legatus/pkg/metrics"
 	"github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect"
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/blob"
 	"github.com/urmzd/mandatum/pkg/bus"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/topic"
@@ -158,6 +159,11 @@ type Config struct {
 	// ingress.
 	Invoker Invoker
 
+	// Blobs is where uploaded files are stored and where a tag's attachments
+	// are checked. Nil disables uploads, and a tag that carries attachments
+	// is then refused.
+	Blobs blob.Store
+
 	// Runs reads durable run records. Nil disables GetRun.
 	Runs RunReader
 
@@ -197,6 +203,7 @@ type Config struct {
 type Server struct {
 	auth    Authenticator
 	bus     bus.Bus
+	blobs   blob.Store
 	ingress map[string]Ingress
 	mux     *http.ServeMux
 
@@ -233,6 +240,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		auth:      cfg.Auth,
 		bus:       cfg.Bus,
+		blobs:     cfg.Blobs,
 		ingress:   make(map[string]Ingress, len(cfg.Ingress)),
 		mux:       http.NewServeMux(),
 		heartbeat: orDuration(cfg.Heartbeat, DefaultHeartbeat),
@@ -280,6 +288,7 @@ func New(cfg Config) (*Server, error) {
 		&invokeService{invoker: cfg.Invoker, runs: cfg.Runs, bus: cfg.Bus, srv: s, log: s.log}, opts))
 
 	s.mux.HandleFunc("GET /v1/sse", s.handleSSE)
+	s.mux.HandleFunc("POST /v1/blobs", s.handleBlobPut)
 	s.mux.HandleFunc("POST /v1/webhooks/{connector}", s.handleWebhook(cfg.Invoker))
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)

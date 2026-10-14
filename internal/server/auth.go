@@ -33,9 +33,17 @@ const HeaderTenant = "X-Mandatum-Tenant"
 // body. Subject is the caller, recorded as a revision's author so that
 // authorship is a property of the credential rather than a field the caller
 // fills in.
+//
+// ActAs marks a credential that may name the actor it raises a tag for. It is
+// what a surface holds: a Slack or web front end that has authenticated a
+// person itself and forwards who that was. Without it the actor on a tag is the
+// credential's own subject, whatever the request body says, because an actor
+// is an authorization fact (approvals and authorship are decided on it) and a
+// caller who could fill it in could act as anyone.
 type Identity struct {
 	Tenant  string
 	Subject string
+	ActAs   bool
 }
 
 // Authenticator derives an identity from a request's headers.

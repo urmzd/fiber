@@ -117,7 +117,7 @@ func (s *invokeService) Invoke(ctx context.Context, req *connect.Request[mandatu
 		return nil, connect.NewError(connect.CodeUnimplemented,
 			fmt.Errorf("invoke: %w: no runtime is configured", ErrUnimplemented))
 	}
-	tag, err := s.tag(req.Msg, id)
+	tag, err := s.tag(ctx, req.Msg, id)
 	if err != nil {
 		return nil, fail(s.log, "invoke", err)
 	}
@@ -150,7 +150,7 @@ func (s *invokeService) InvokeStream(ctx context.Context, req *connect.Request[m
 		return connect.NewError(connect.CodeUnimplemented,
 			fmt.Errorf("invoke stream: %w: it needs both a runtime and a bus", ErrUnimplemented))
 	}
-	tag, err := s.tag(req.Msg, id)
+	tag, err := s.tag(ctx, req.Msg, id)
 	if err != nil {
 		return fail(s.log, "invoke stream", err)
 	}
@@ -199,16 +199,25 @@ func (s *invokeService) GetRun(ctx context.Context, req *connect.Request[mandatu
 // so there is nothing to merge on the protobuf path, but a hand-rolled JSON body
 // can still carry one — Connect's JSON codec discards unknown fields — and an
 // assignment makes the outcome the same either way.
-func (s *invokeService) tag(p *mandatumv1.Tag, id Identity) (envelope.Tag, error) {
+func (s *invokeService) tag(ctx context.Context, p *mandatumv1.Tag, id Identity) (envelope.Tag, error) {
 	tag, err := tagFromProto(p)
 	if err != nil {
 		return envelope.Tag{}, err
 	}
 	tag.Tenant = id.Tenant
+	// The actor is assigned for the same reason the tenant is. Only a
+	// credential trusted to act for others keeps the actor it named, and one
+	// that named nobody is still accountable as itself.
+	if !id.ActAs || tag.Actor.ID == "" {
+		tag.Actor = envelope.Actor{ID: id.Subject}
+	}
 	if tag.At.IsZero() {
 		tag.At = s.srv.now()
 	}
 	if err := tag.Validate(); err != nil {
+		return envelope.Tag{}, err
+	}
+	if err := s.srv.checkAttachments(ctx, id.Tenant, tag.Attachments); err != nil {
 		return envelope.Tag{}, err
 	}
 	return tag, nil

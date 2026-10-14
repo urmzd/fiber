@@ -9,6 +9,7 @@ import (
 
 	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/topic"
 )
@@ -126,6 +127,23 @@ func tagFromProto(p *mandatumv1.Tag) (envelope.Tag, error) {
 		}
 		t.Deliver = append(t.Deliver, route)
 	}
+	for i, a := range p.GetAttachments() {
+		att := attachment.Attachment{
+			Digest:    a.GetDigest(),
+			MediaType: a.GetMediaType(),
+			Name:      a.GetName(),
+			Size:      a.GetSize(),
+			Alt:       a.GetAlt(),
+		}
+		if o := a.GetOrigin(); o != nil {
+			origin, err := addressFromProto(o)
+			if err != nil {
+				return envelope.Tag{}, fmt.Errorf("tag attachment %d origin: %w", i, err)
+			}
+			att.Origin = origin
+		}
+		t.Attachments = append(t.Attachments, att)
+	}
 	return t, nil
 }
 
@@ -145,6 +163,19 @@ func tagToProto(t envelope.Tag) *mandatumv1.Tag {
 	}
 	for _, r := range t.Deliver {
 		p.Deliver = append(p.Deliver, &mandatumv1.Route{Target: addressToProto(r.Target), Kinds: r.Kinds})
+	}
+	for _, a := range t.Attachments {
+		att := &mandatumv1.Attachment{
+			Digest:    a.Digest,
+			MediaType: a.MediaType,
+			Name:      a.Name,
+			Size:      a.Size,
+			Alt:       a.Alt,
+		}
+		if !a.Origin.IsZero() {
+			att.Origin = addressToProto(a.Origin)
+		}
+		p.Attachments = append(p.Attachments, att)
 	}
 	return p
 }
