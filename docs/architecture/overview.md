@@ -224,8 +224,10 @@ record (`pkg/durable`), so there is no new schema. It records only for a run
 that exists in that ledger, is the caller's tenant's and has not ended, so the
 ledger holds at most one stop record per run, and it lives exactly as long as
 the run's other records. A request for anything else writes nothing and
-publishes nothing. The workflow body claims the record when the run ends
-stopped, so the ledger is left with no record that no call read.
+publishes nothing. When a request was recorded before an attempt began, that
+attempt's workflow body claims it, so duraturo does not report it as a record
+no call read; one recorded during an attempt is not in that attempt's replay
+set and needs no claim.
 
 **The bus is the fast path.** After recording, `Stop` publishes `control.stop`
 to `agent:_control:stop-<key>`, where the key is a hash of the caller's tenant
@@ -244,7 +246,7 @@ reads, so they cannot push that tenant's own request out of it.
 | While the turn runs | It is delivered over the bus at once, or read from the ledger at the next poll. |
 | Between two attempts | The next attempt reads it from the ledger before its turn. |
 | After the process restarts | The ledger survived, and the next attempt stops. |
-| After the run ended | Nothing is recorded or published. |
+| After the run ended | Nothing is published. Nothing is recorded either, unless the run ends between `Stop`'s check and its write, in which case the request is recorded on the finished run, where no attempt reads it and `StopRequested` reports it. |
 | While the run is parked | Recorded; it takes effect when the run resumes. mandatum itself never parks a run today. |
 | A second time | The first recorded request is the one the run honours. |
 
@@ -255,7 +257,15 @@ secret. Isolation comes from the checks: `Stop` records and publishes only for
 the caller's own run, the stop stream is keyed by the caller's tenant, and an
 attempt ignores any request not made under its run's tenant. `Stop` answers
 the same nil (and the route the same 202) for an unknown run, a finished run
-and another tenant's run.
+and another tenant's run, so its answer never says whether a run exists.
+
+Its timing can. For an id the ledger holds, `Stop` reads the run and checks
+its tenant before deciding to do nothing; for an unknown id it returns after
+one missed read. Someone who can time the call closely can tell whether a run
+with that id exists in some tenant, though not whose it is or what it holds.
+Because run ids are computable, that can reveal whether a known tag (a
+schedule's occurrence, say) started a run in another tenant. Closing it needs
+a ledger lookup keyed by tenant, which duraturo's ledger does not have.
 
 **The decision is a recorded result.** duraturo replays the workflow body, and
 whether somebody has asked for a stop changes between attempts, so the body
