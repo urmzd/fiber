@@ -120,10 +120,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 
-		case e, ok := <-events:
-			if !ok {
-				return
-			}
+		case e := <-events:
 			// The bus addresses; it does not authorize. This is the check that
 			// keeps one tenant's stream out of another's browser.
 			if e.Tenant != id.Tenant {
@@ -152,7 +149,9 @@ func recvPump(ctx context.Context, stream bus.Stream) (<-chan envelope.Event, <-
 	events := make(chan envelope.Event)
 	failures := make(chan error, 1)
 	go func() {
-		defer close(events)
+		// Completion is signalled only by failures or ctx.Done. Closing
+		// events too would let the handler miss a queued failure and its
+		// reconnect hint when select chooses the closed channel first.
 		for {
 			e, err := stream.Recv(ctx)
 			if err != nil {
