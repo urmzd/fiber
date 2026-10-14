@@ -6,7 +6,9 @@ for session status and command registration. Ordinary messaging clients need
 only implement `API`; agent-session features are a separate capability.
 
 `Config.Prepare` lets an application validate a verified tag before handoff.
-The configured team boundary applies to events and commands alike.
+The configured team boundary applies to mentions, direct messages, stop events,
+and slash commands after signature verification. A delivery from another team
+is acknowledged without invoking application policy or raising a tag.
 
 Session lifecycle policy, command discovery, refusal logging, app manifests,
 and installation configuration live in
