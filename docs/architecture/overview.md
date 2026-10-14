@@ -334,6 +334,112 @@ memory they are evicted with every other stream. On Redis they never expire,
 which is the same as every run's own stream today (the bus sets no TTL on run
 keys); a deployment that needs Redis bounded sets an eviction policy.
 
+## Usage
+
+Every run reports what it spent: tokens, the prompt cache's share, cost where
+it can be known, and how full the context was. The figures are saige's;
+mandatum forwards them, keys them, and adds them up without counting anything
+twice.
+
+### What is reported, and where
+
+| Where | What |
+|---|---|
+| `usage.call` | One model call, published the moment saige reports it: `accounting_id`, the `agent` whose model made it, its delegation `depth`, `model`, `requests`, `prompt_tokens` (all input), `cached_prompt_tokens`, `cache_write_tokens`, `completion_tokens`, `cost`, `context_window` |
+| `usage.child` | A child run a host carried out for a delegation, reported once it ended: its run id and its whole total |
+| `lifecycle.completed`, `lifecycle.stopped` | The run's total as `usage` |
+| `runtime.Output.Usage` | The same total, in the ledger with the rest of the output, so it survives a restart |
+| `GetRun` | `Run.usage` (`RunUsage`): `own`, `children`, `total`, `context` |
+| `runtime.RecordedUsage` | A failed run's total, from its ledger records |
+
+The total is a `payload.RunUsage`. `Own` is the run's own agent, `Children` is
+everything it delegated at every depth, and `Total` is the two added: the
+figure to hold against a limit. `Context` is the run's own agent at its latest
+model call: the model, its context window, and how many tokens that call's
+prompt was.
+
+Usage is its own kind family, `usage`, so a route that selected `delta` or
+`lifecycle` never receives it. Sinks that render a chat surface (Slack, GitHub,
+Jira) deliberately ignore it: token counts and cost are for whoever pays, not
+for everyone in a channel or on an issue, and ignoring the kind also spares the
+sink an edit per model call. A webhook route that selects `usage`, or every
+kind, receives it. `mandatum listen` prints one line per call, and `mandatum
+tag` prints the run's total on stderr once the run ends. `BusService.Publish`
+refuses the family: only the attempt that spent the tokens writes them.
+
+### Cost and money
+
+Cost comes from saige's price catalog and nowhere else. saige's adapters
+resolve a model's rate card from the catalog (`ModelCapabilities.Pricing`,
+with its `AsOf` date and currency), and mandatum prices each call with
+`Pricing.Cost` over saige's billing tiers (`UsageFromDelta`). A model with no
+rate card, a modality the card does not price, or a call whose provider
+reported no tokens gets no cost: its tokens are counted, the call is counted in
+`unpriced_calls`, and nothing is guessed. A call saige answered from its
+response cache sent nothing to a provider and is reported with no tokens and
+no cost.
+
+Money is `payload.Cost{Micros, Currency, AsOf}`: integer millionths of an ISO
+currency, saige's `types.Cost`. One US dollar is 1,000,000 micros with currency
+`USD`, the int64 micro-USD convention a host enforcing spend limits uses. Each
+call's cost is rounded to the micro once, by saige, and a total is the integer
+sum of its calls, so a total always equals the sum of the call events exactly.
+Costs in different currencies are never added: a call in a second currency is
+counted in `unpriced_calls` instead. A total's `as_of` is the oldest date among
+its calls, and empty when any was priced from a card with no date.
+
+### Counted once, across retries and replays
+
+duraturo retries a failed attempt and replays the workflow body from the top,
+and a delivery can repeat any event. The rule:
+
+- **Every model call any attempt made is counted, once.** An attempt that
+  fails after spending tokens did spend them. Before its failure goes up, the
+  agent activity writes the calls it relayed to the run's ledger as a
+  write-once event record, `event:mandatum.usage.a<attempt>#0`. The attempt
+  that finally produces an outcome reads those records inside the agent
+  activity, adds its own calls, and the total is memoized with the outcome.
+  The workflow body claims the records the outcome counted, which it learns
+  from the outcome, so a replay claims the same ones.
+- **A replay counts nothing.** The agent activity is memoized, so a replay
+  reads the recorded total and calls no model. A replay that follows a failure
+  after the agent finished (a journal append that failed, say) reports exactly
+  what the first attempt did.
+- **A stopped turn is counted.** saige settles the call a stop cut short and
+  reports its usage when the provider had reported any, and the stopped
+  outcome carries the total like a completed one.
+- **Each report has a key.** `accounting_id` is saige's
+  `UsageDelta.AccountingID` when saige reports one (it does when a budget is
+  attached), and otherwise `<run>/a<attempt>[/<agent>.<sub>]/<n>`, which no
+  other call of any attempt or any delegation can share. A child run is keyed
+  `run:<child run id>`. `payload.Tally` counts each key once, so a consumer
+  summing the stream at least once gets the same total the run records.
+
+The total is counted from the usage events an attempt relayed, never from a
+figure an executor returns, so a total and its call events cannot disagree.
+
+### Roll-up
+
+What a run delegated is the run's spending too, and each call is counted in
+exactly one run's `Own`.
+
+- **In-turn sub-tasks** (the `tag_<agent>` tool without a host Delegator) are
+  not runs. Their calls are relayed onto the parent run's stream as
+  `usage.call` one level deeper (`depth` 1), as they happen, and counted in the
+  parent's `Children`, whether the sub-task answers, fails or is aborted. The
+  relay carries any depth, but the sandbox gives a sub-task no spawn grant of
+  its own, so in practice a sub-task's own delegation is refused by policy and
+  in-turn delegation is one level deep.
+- **Delegated runs** (a host's `runtime.WithDelegator`) are runs of their own
+  with their own totals. The host rolls one up by calling
+  `runtime.ReportChildUsage` with the context its Delegator was given and the
+  child's `Output.Usage.Total`; the parent's stream carries a `usage.child` and
+  the parent counts it in `Children`, once per child run however many times it
+  is reported or however many parent attempts delegated to it. A child's total
+  already includes what it delegated, so three levels of runs roll up with each
+  call counted once at the origin.
+- **A tag raised at another agent** is an unrelated run and does not roll up.
+
 ## Package DAG
 
 Dependencies run one way. Leaves are stdlib-only and know nothing about
@@ -354,7 +460,7 @@ seams
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations
-  pkg/runtime      the durable duraturo turn, legatus sandbox, stop
+  pkg/runtime      the durable duraturo turn, legatus sandbox, stop, usage
   pkg/router       delivery fan-out to sinks
   pkg/connectors   slack, github, jira, cron, webhook
   internal/server  Connect handlers, SSE, webhook ingress
@@ -379,6 +485,7 @@ set, so gRPC clients and browsers share one contract and one codegen path.
 | `AgentService.*` | Agent spec control plane |
 | `GET /v1/sse` | The same stream, browser-native, resumable via `Last-Event-ID` |
 | `POST /v1/runs/{id}/stop` | Ask a run to stop; answers 202 for every run id. `GetRun` reports `RUN_STATUS_STOPPED` |
+| `InvokeService.GetRun` | A run's record, its usage included (`Run.usage`) |
 | `POST /v1/webhooks/{connector}` | HMAC-verified ingress |
 
 `InvokeStream` exists because doing invoke and subscribe separately races: events
@@ -461,6 +568,27 @@ Verified against the code, and honest.
   cancelled this way ends stopped with the text it had published.
 - **A route that selects only `lifecycle.completed` is not told about a stop.**
   Select `lifecycle`, or add `lifecycle.stopped`, to hear every ending.
+- **A failed attempt's usage needs the ledger.** Its calls are recorded on the
+  run through `runtime.WithStopLedger`. Without it, the total counts the
+  attempt that produced the outcome, and the `usage.call` events still report
+  every call. If the ledger write fails, the failed attempt's calls are logged
+  and left out of the total.
+- **A call a turn never finishes may not be counted.** saige reports a call's
+  usage when the call completes, or when a stop wraps it up. A call cancelled
+  outright (a worker shutting down, a stop whose grace period ran out, a
+  sub-task aborted with its parent) reports what its provider had sent, which
+  may be nothing.
+- **Cost is only as good as saige's catalog.** Rates are recorded on a date
+  (`as_of`) and do not know about contract pricing, regions or batch calls, so
+  a cost is an estimate of the list price, not an invoice. There is no
+  conversion between currencies.
+- **The context window is saige's declaration.** It is the model's input
+  limit from the catalog, 0 when the catalog does not declare one, and the
+  prompt size is the provider's count for the latest call. Nothing estimates a
+  prompt before it is sent.
+- **Roll-up of delegated runs is the host's call.** mandatum cannot see a run
+  a Delegator started until the host reports it with
+  `runtime.ReportChildUsage`.
 - **A stop cannot be made for a run before it is accepted.** Nothing is
   recorded or published for a run the ledger does not hold yet; ask again once
   `Accept` has returned the run id.
