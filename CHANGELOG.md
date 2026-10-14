@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 (2026-10-14)
+
+### Features
+
+- **runtime**: stop a run mid-turn and keep its partial answer (#13) ([662e2d3](https://github.com/urmzd/mandatum/commit/662e2d3253488972bf56c96f2dbfb83b32f6eb61))
+
+[Full Changelog](https://github.com/urmzd/mandatum/compare/v0.7.0...v0.8.0)
+
+
 ## 0.7.0 (2026-10-14)
 
 ### Breaking
