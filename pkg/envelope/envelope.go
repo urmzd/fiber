@@ -57,6 +57,11 @@ const (
 	KindResumed   Kind = "lifecycle.resumed"
 	KindCompleted Kind = "lifecycle.completed"
 	KindFailed    Kind = "lifecycle.failed"
+	// KindStopped ends a run that was asked to stop before it finished. It
+	// is terminal, like completed and failed, and it is neither: the run did
+	// not finish its work and nothing went wrong. No completed or failed
+	// event follows it.
+	KindStopped Kind = "lifecycle.stopped"
 
 	// Actions the agent took on a connector's surface: a comment posted, a
 	// ticket transitioned. This is the "work got done" signal, distinct from
@@ -68,6 +73,12 @@ const (
 	KindAgentCreated Kind = "control.created"
 	KindAgentRevised Kind = "control.revised"
 	KindAgentDeleted Kind = "control.deleted"
+
+	// KindStop asks a run to stop. It is a request, not an outcome: it is
+	// published to the run's control topic (see topic.Control), never to the
+	// run's own, and the run answers it with lifecycle.stopped only if it was
+	// still working when the request reached it.
+	KindStop Kind = "control.stop"
 )
 
 // Family returns the leading component of a kind: "delta", "lifecycle",

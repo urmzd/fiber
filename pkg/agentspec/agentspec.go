@@ -317,6 +317,11 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	if _, err := topic.Agent(c.Name); err != nil {
 		return fmt.Errorf("%w: agent name %q is not addressable: %w", ErrInvalid, c.Name, err)
 	}
+	// One name is the bus's own. Requests addressed to a run travel under it,
+	// and an agent by that name would publish its events into them.
+	if c.Name == topic.ControlName {
+		return fmt.Errorf("%w: agent name %q is reserved for control topics", ErrInvalid, c.Name)
+	}
 	if !slices.ContainsFunc(providers, func(p string) bool { return strings.EqualFold(p, c.Provider) }) {
 		return fmt.Errorf("%w: agent %q names provider %q; this deployment knows %s", ErrInvalid, c.Name, c.Provider, list(providers))
 	}

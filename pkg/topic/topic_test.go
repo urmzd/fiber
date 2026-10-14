@@ -136,3 +136,35 @@ func TestListeningToAnAgentReceivesEveryRun(t *testing.T) {
 		}
 	}
 }
+
+// A run's control topic is a stream of its own: under the one name no agent
+// may take, and with a last segment that is not the run's id, so nothing that
+// keys on a run id confuses a request addressed to a run with the run's
+// events. A subscriber to an agent never receives it.
+func TestControlTopicsAreApartFromEveryAgentsTopics(t *testing.T) {
+	c, err := topic.Control("stop", "run_01J")
+	if err != nil {
+		t.Fatalf("Control: %v", err)
+	}
+	if got, want := c.String(), "agent:_control:stop-run_01J"; got != want {
+		t.Fatalf("Control = %q, want %q", got, want)
+	}
+	if !c.IsControl() || c.RunID() == "run_01J" {
+		t.Fatalf("IsControl = %v, RunID = %q", c.IsControl(), c.RunID())
+	}
+	run := topic.MustParse("agent:docs-bot:run_01J")
+	if run.IsControl() || topic.All().IsControl() {
+		t.Fatal("an ordinary topic reports itself as a control topic")
+	}
+	if topic.MustParse("agent:docs-bot").Covers(c) || run.Covers(c) || c.Covers(run) {
+		t.Fatal("a control topic and an agent's topic cover one another")
+	}
+	if !topic.All().Covers(c) {
+		t.Fatal("the root does not cover the control namespace; an audit consumer would miss stop requests")
+	}
+	for _, bad := range [][2]string{{"", "run"}, {"stop", ""}, {"st:op", "run"}, {"stop", "ru:n"}, {"stop", "ru n"}} {
+		if _, err := topic.Control(bad[0], bad[1]); err == nil {
+			t.Errorf("Control(%q, %q) = nil error", bad[0], bad[1])
+		}
+	}
+}

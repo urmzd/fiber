@@ -115,8 +115,9 @@ type Citation struct {
 	Index int `json:"index"`
 }
 
-// Lifecycle is the body of every envelope lifecycle kind: accepted, started,
-// parked, resumed, completed, failed.
+// Lifecycle is the body of the envelope lifecycle kinds accepted, started,
+// parked, resumed, completed and failed. A stopped run has a body of its own,
+// Stopped.
 //
 // Attempt and Terminal are what make a failure readable. Retry budget belongs
 // to the durable engine, not to this package, so a failed attempt is reported
@@ -140,6 +141,45 @@ type Lifecycle struct {
 	// subscribes to lifecycle.completed still gets the whole answer without
 	// having to reassemble deltas.
 	Text string `json:"text,omitempty"`
+}
+
+// Stopped is the body of envelope.KindStopped: a run that was asked to stop
+// and wrapped its turn up instead of finishing it.
+//
+// It is its own type rather than more fields on Lifecycle because who asked is
+// meaningful on this kind and no other. The fields it shares with Lifecycle
+// keep the same names, so a reader that decodes every lifecycle kind as a
+// Lifecycle still gets the attempt, the revision, the reason and the text.
+type Stopped struct {
+	// Attempt is the execution attempt that was stopped, from 1.
+	Attempt int `json:"attempt,omitempty"`
+	// Rev is the pinned agent revision the run executed under.
+	Rev int `json:"rev,omitempty"`
+	// Reason is why the run was stopped, in the words of whoever asked. It
+	// is for people: a sink may show it. It is not added to the thread the
+	// run belongs to.
+	Reason string `json:"reason,omitempty"`
+	// By is who asked. It is recorded and never shown to a model.
+	By string `json:"by,omitempty"`
+	// Text is what the agent had answered when it was stopped, which may be
+	// nothing. A sink that only subscribes to lifecycle.stopped still gets
+	// the partial answer without having to reassemble deltas.
+	Text string `json:"text,omitempty"`
+}
+
+// StopRequest is the body of envelope.KindStop: a request that one run stop.
+//
+// The run is named in the body as well as by the topic the request travels
+// on, so a reader holding only the event knows which run it is about. The
+// tenant is not here: it is the event's own Tenant field, which the transport
+// sets from the caller's credential.
+type StopRequest struct {
+	// RunID is the run to stop.
+	RunID string `json:"run_id"`
+	// Reason is why, in the asker's words. Optional.
+	Reason string `json:"reason,omitempty"`
+	// By is who asked. Optional.
+	By string `json:"by,omitempty"`
 }
 
 // Action is the body of envelope.KindActionTaken: a connector's native verb
@@ -294,6 +334,10 @@ func Of(e envelope.Event) (body any, known bool, err error) {
 	case envelope.KindAccepted, envelope.KindStarted, envelope.KindParked,
 		envelope.KindResumed, envelope.KindCompleted, envelope.KindFailed:
 		return decodeOr[Lifecycle](e)
+	case envelope.KindStopped:
+		return decodeOr[Stopped](e)
+	case envelope.KindStop:
+		return decodeOr[StopRequest](e)
 	default:
 		return json.RawMessage(e.Payload), false, nil
 	}
