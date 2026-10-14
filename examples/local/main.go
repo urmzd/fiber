@@ -339,7 +339,7 @@ func run() error {
 	// is published: an event that arrives for a run it has no routes for has
 	// nowhere to go. RunID is a pure function of the tag id, so the routes can
 	// be registered before the run exists.
-	meshRun := runtime.RunID(tag.ID)
+	meshRun := runtime.RunID(tag.Tenant, tag.ID)
 	if err := deliver.Register(meshRun, tag.Routes()); err != nil {
 		return fmt.Errorf("register routes: %w", err)
 	}
@@ -455,7 +455,7 @@ func run() error {
 		Text:   "summarise how a release gets out the door",
 		At:     fixedClock(),
 	}
-	cronRun := runtime.RunID(nightly.ID)
+	cronRun := runtime.RunID(nightly.Tenant, nightly.ID)
 
 	// Arm one failure: the first attempt's lifecycle.completed will not reach
 	// the bus. The runtime treats a failed publish as a failed turn — a run

@@ -505,7 +505,7 @@ func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, fil
 // pure function of the tag id, so the routes can be registered before the run
 // exists.
 func (c *core) Invoke(ctx context.Context, tag envelope.Tag) (server.Accepted, error) {
-	if err := c.deliver.Register(runtime.RunID(tag.ID), tag.Routes()); err != nil {
+	if err := c.deliver.Register(runtime.RunID(tag.Tenant, tag.ID), tag.Routes()); err != nil {
 		return server.Accepted{}, fmt.Errorf("cli: register routes: %w", err)
 	}
 	acc, err := c.rt.Accept(ctx, tag)

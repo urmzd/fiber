@@ -184,10 +184,10 @@ func TestARunIsShownTheConversationSoFarInItsThread(t *testing.T) {
 	if !reflect.DeepEqual(said(got), want) {
 		t.Fatalf("journal = %q, want %q", said(got), want)
 	}
-	if e := got[2]; e.RunID != "Ev-thread-2" || e.Seq != 3 || !e.At.Equal(tag("docs-bot", "x", "").At) {
+	if e := got[2]; e.RunID != runtime.RunID("acme", "Ev-thread-2") || e.Seq != 3 || !e.At.Equal(tag("docs-bot", "x", "").At) {
 		t.Errorf("the second question was journaled as %+v", e)
 	}
-	if e := got[3]; e.RunID != "Ev-thread-2" || !e.Actor.Bot || e.Actor.ID != "docs-bot" {
+	if e := got[3]; e.RunID != runtime.RunID("acme", "Ev-thread-2") || !e.Actor.Bot || e.Actor.ID != "docs-bot" {
 		t.Errorf("the second answer was journaled as %+v", e)
 	}
 }
@@ -522,7 +522,7 @@ func TestWithoutAThreadStoreARunIsWhatItAlwaysWas(t *testing.T) {
 		if req.History != nil {
 			t.Errorf("%s was shown a history with no thread store: %q", id, replayed(req.History))
 		}
-		body, _, err := h.ledger.Load(ctx, id)
+		body, _, err := h.ledger.Load(ctx, runtime.RunID("acme", id))
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}

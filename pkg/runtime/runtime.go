@@ -92,6 +92,7 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -491,7 +492,7 @@ func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, err
 	if err := tag.Validate(); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept: %w", err)
 	}
-	runID := RunID(tag.ID)
+	runID := RunID(tag.Tenant, tag.ID)
 	tp, err := topic.Run(tag.Agent, runID)
 	if err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
@@ -637,7 +638,7 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 	}
 
 	req := Request{
-		RunID:    RunID(in.Tag.ID),
+		RunID:    RunID(in.Tag.Tenant, in.Tag.ID),
 		Tenant:   in.Tag.Tenant,
 		Attempt:  attempt,
 		Origin:   in.Tag.Origin,
@@ -714,7 +715,7 @@ func (r *Runtime) pinHistory(ctx context.Context, tag envelope.Tag) (uint64, err
 		}
 		if err := thread.Reconcile(ctx, r.threads, r.lister, key, tag.Source, skip...); err != nil {
 			r.logger.Warn("mandatum/runtime: could not reconcile the thread with its surface; pinning what the journal holds",
-				"run_id", RunID(tag.ID), "thread", key.String(), "error", err)
+				"run_id", RunID(tag.Tenant, tag.ID), "thread", key.String(), "error", err)
 		}
 	}
 	seq, err := r.threads.Head(ctx, key)
@@ -786,7 +787,7 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	if r.threads == nil {
 		return nil
 	}
-	runID := RunID(in.Tag.ID)
+	runID := RunID(in.Tag.Tenant, in.Tag.ID)
 	entries := make([]thread.Entry, 0, 2)
 	if said := firstNonEmpty(out.Prompt, in.Tag.Text); strings.TrimSpace(said) != "" {
 		entries = append(entries, thread.Entry{
@@ -870,7 +871,7 @@ func (r *Runtime) publishRaw(ctx context.Context, in Input, seq uint64, kind env
 func (r *Runtime) report(ctx context.Context, in Input, seq uint64, kind envelope.Kind, body any) {
 	if err := r.publish(ctx, in, seq, kind, body); err != nil {
 		r.logger.Warn("mandatum/runtime: could not publish lifecycle event",
-			"run_id", RunID(in.Tag.ID), "kind", string(kind), "seq", seq, "error", err)
+			"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "kind", string(kind), "seq", seq, "error", err)
 	}
 }
 
@@ -878,7 +879,7 @@ func (r *Runtime) report(ctx context.Context, in Input, seq uint64, kind envelop
 // specific form, always: publishing to agent:<name>:<run> is what lets a
 // subscriber on any prefix of it receive the event.
 func (r *Runtime) event(in Input, seq uint64, kind envelope.Kind) envelope.Event {
-	runID := RunID(in.Tag.ID)
+	runID := RunID(in.Tag.Tenant, in.Tag.ID)
 	tp, err := topic.Run(in.Tag.Agent, runID)
 	if err != nil {
 		// Accept validated this topic before the run existed, so a failure
@@ -913,22 +914,34 @@ func attemptOf(ctx context.Context) int {
 	return info.Attempt
 }
 
-// RunID is the run identity a tag maps to.
+// RunID is the run identity a tag maps to within one tenant.
 //
-// A tag's id is the trigger's own event identity — a Slack event_id, a GitHub
-// delivery GUID, a schedule occurrence — and using it as the run id is what
-// makes a redelivery join the existing run instead of starting a second one.
+// A tag's id is the trigger's own event identity (a Slack event_id, a GitHub
+// delivery GUID, a schedule occurrence) and deriving the run id from it is
+// what makes a redelivery join the existing run instead of starting a second
+// one.
 //
-// It is also a topic segment, and topics are restricted to letters, digits, "-",
-// and "_" so that they stay safe to embed in stream keys and URLs unescaped. A
-// tag id that does not fit is hashed rather than rewritten: sanitizing by
-// dropping characters would map two distinct ids onto one run, which is the one
-// failure mode idempotency cannot tolerate. The hash is deterministic, so a
-// redelivery of an awkward id still lands on the same run.
-func RunID(tagID string) string {
-	if _, err := topic.Run("probe", tagID); err == nil {
-		return tagID
+// The tenant is part of the identity, not a property checked afterwards. A tag
+// id is chosen by whoever raises the tag, and two tenants are free to choose
+// the same one. Everything downstream is keyed by the run id alone: the
+// ledger's idempotent start, the router's delivery bindings, the run's topic,
+// the thread journal. If the id did not carry the tenant, a second tenant
+// reusing a first tenant's tag id would join that tenant's run and replace
+// where its events are delivered. Filtering on the way out cannot repair
+// that, because the collision has already happened by the time anything is
+// read. Scoping the id means there is nothing to collide on.
+//
+// The id is a hash rather than the two values joined. It is a topic segment,
+// restricted to letters, digits, "-" and "_", and no separator from that
+// alphabet could keep ("a_b", "c") and ("a", "b_c") apart. Each field is
+// length-prefixed before hashing for the same reason. The hash is
+// deterministic, so a redelivery lands on the same run.
+func RunID(tenant, tagID string) string {
+	h := sha256.New()
+	var n [binary.MaxVarintLen64]byte
+	for _, field := range []string{tenant, tagID} {
+		h.Write(n[:binary.PutUvarint(n[:], uint64(len(field)))])
+		h.Write([]byte(field))
 	}
-	sum := sha256.Sum256([]byte(tagID))
-	return "r" + hex.EncodeToString(sum[:12])
+	return "r" + hex.EncodeToString(h.Sum(nil)[:16])
 }
