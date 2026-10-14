@@ -117,10 +117,11 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   constant. The reason and the asker go on `lifecycle.stopped`.
 - **Usage is counted from what an attempt relayed, once.** A run's total is
   built from the `usage.call` and `usage.child` events its attempts published,
-  keyed by `accounting_id`, inside the memoized agent activity. A failed
-  attempt records its calls on the run before failing; the workflow body never
-  reads usage. Cost comes only from saige's price catalog, as integer
-  micro-units; never estimate one. Chat sinks do not render usage.
+  keyed by mandatum's attempt-unique `accounting_id`, inside the memoized agent
+  activity. Every attempt records its calls on the run before it returns,
+  success or failure; the workflow body never reads usage. Cost comes only
+  from saige's price catalog, as integer micro-units, never converted or
+  estimated. Usage is opt-in for routes and chat sinks do not render it.
 - **Sinks must be idempotent.** Delivery is at-least-once. Render one message
   per run and edit it; never post per delta.
 - **Tenant is never read from a request body.** The server sets it from the
