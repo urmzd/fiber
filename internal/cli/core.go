@@ -587,6 +587,16 @@ func (c *core) Run(ctx context.Context, tenant, runID string) (server.Run, error
 				out.StopReason = result.Stopped.Reason
 				out.StoppedBy = result.Stopped.By
 			}
+			out.Usage = result.Usage
+		}
+	}
+	// A failed run has no output. What its attempts spent is on its ledger
+	// records, which is the same figure an output would have carried.
+	if rec.Status == drun.StatusFailed {
+		if _, records, err := c.ledger.Load(ctx, runID); err == nil {
+			if u, ok := runtime.RecordedUsage(records); ok {
+				out.Usage = &u
+			}
 		}
 	}
 	return out, nil

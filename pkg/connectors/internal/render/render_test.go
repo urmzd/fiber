@@ -2,6 +2,7 @@ package render_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -434,5 +435,26 @@ func TestAStoppedRunIsTerminalAndCarriesItsPartialAnswerAndReason(t *testing.T) 
 	only.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer"}`))
 	if got := only.View(); got.Text != "Half an answer" || got.Status != render.StatusStopped || got.Reason != "" {
 		t.Errorf("lifecycle-only view = %+v", got)
+	}
+}
+
+// Token counts and cost are accounting for whoever pays, not something a
+// Slack channel or an issue thread should show, so usage events change
+// nothing on a chat surface and cost the sink no edit. The usage riding on the
+// completed event does not reach the document either.
+func TestUsageIsNeverRenderedOnAChatSurface(t *testing.T) {
+	d := render.New()
+	if d.Apply(ev(1, envelope.KindUsageCall, `{"accounting_id":"r/a1/1","prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}`)) {
+		t.Error("a usage.call event reported a change")
+	}
+	if d.Apply(ev(2, envelope.KindUsageChild, `{"accounting_id":"run:r9","usage":{"prompt_tokens":5}}`)) {
+		t.Error("a usage.child event reported a change")
+	}
+	if v := d.View(); !v.Empty() {
+		t.Errorf("usage contributed to the document: %+v", v)
+	}
+	d.Apply(ev(3, envelope.KindCompleted, `{"text":"Done.","usage":{"total":{"prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}}}`))
+	if v := d.View(); strings.Contains(fmt.Sprintf("%+v", v), "40500") || strings.Contains(fmt.Sprintf("%+v", v), "12000") {
+		t.Errorf("the run's usage reached the document: %+v", v)
 	}
 }

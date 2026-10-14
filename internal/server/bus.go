@@ -82,6 +82,12 @@ func (s *busService) Publish(ctx context.Context, req *connect.Request[mandatumv
 	if e.Topic.IsControl() {
 		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q is a control topic and is not published to directly", ErrInvalid, e.Topic))
 	}
+	// Usage is accounting a host enforces limits on, and only the attempt
+	// executing a run knows what it spent. A client writing usage events by
+	// hand would put figures on the run's stream that no model call made.
+	if e.Kind.Family() == "usage" {
+		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q events are published by the run that spent the tokens, not directly", ErrInvalid, e.Kind))
+	}
 	e.Tenant = id.Tenant
 	e.Seq = 0
 	e.At = s.srv.now()

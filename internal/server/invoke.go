@@ -10,6 +10,7 @@ import (
 	"github.com/urmzd/legatus/pkg/metrics"
 
 	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/bus"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/topic"
@@ -88,6 +89,9 @@ type Run struct {
 	// asked. Empty unless Status is StatusStopped.
 	StopReason string
 	StoppedBy  string
+	// Usage is what the run spent, nil when nothing is recorded yet: while
+	// it executes, or for a run recorded before usage was.
+	Usage *payload.RunUsage
 
 	CreatedAt time.Time
 	StartedAt time.Time

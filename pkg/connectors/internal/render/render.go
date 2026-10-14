@@ -332,6 +332,14 @@ func (d *Doc) effect(e envelope.Event) bool {
 			}
 		}
 		return changed
+	case envelope.KindUsageCall, envelope.KindUsageChild:
+		// Deliberately not rendered. A chat surface is the conversation, and
+		// often a shared one: token counts and cost are accounting for the
+		// host that pays, not something everyone in a Slack channel or on an
+		// issue should be shown. Reporting no change also spares a sink the
+		// edit a usage event would otherwise cost after every model call. A
+		// route that wants usage delivered selects "usage" on a webhook.
+		return false
 	default:
 		// An unknown kind is not an error: kinds are an open set precisely so
 		// that a connector released today can be sent an event kind invented

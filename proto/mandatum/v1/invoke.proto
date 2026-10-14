@@ -342,8 +342,107 @@ message Run {
   // surface trusted to act for others named.
   string stopped_by = 15;
 
+  // Usage is what the run spent: every model call of every attempt, and every
+  // sub-task and child run it delegated to, each counted once. Unset while
+  // the run is executing, and for a run recorded before usage was. For a
+  // failed run it is what its attempts spent before they failed.
+  RunUsage usage = 16;
+
   // Reserved for growth.
-  reserved 16 to 31;
+  reserved 17 to 31;
+}
+
+// RunUsage is what a run spent, split by who spent it. Each model call and
+// each child run is in exactly one of own and children.
+message RunUsage {
+  // Own is the run's own agent's model calls.
+  Usage own = 1;
+
+  // Children is everything the run delegated, at every depth: in-turn
+  // sub-tasks, and child runs a host carried out and reported.
+  Usage children = 2;
+
+  // Total is own and children added: the figure to hold against a limit.
+  Usage total = 3;
+
+  // Context is how full the run's own agent's context was at its latest
+  // model call. Unset when it made none.
+  ContextUsage context = 4;
+
+  // Reserved for growth.
+  reserved 5 to 15;
+}
+
+// Usage is what some model calls cost, summed.
+message Usage {
+  // ModelCalls is the number of model calls counted.
+  int64 model_calls = 1;
+
+  // Requests is the billable provider requests those calls made.
+  int64 requests = 2;
+
+  // PromptTokens is all input: uncached, read from the prompt cache, and
+  // written to it.
+  int64 prompt_tokens = 3;
+
+  // CachedPromptTokens is the part of prompt_tokens read from the prompt
+  // cache.
+  int64 cached_prompt_tokens = 4;
+
+  // CacheWriteTokens is the part of prompt_tokens written to the prompt
+  // cache.
+  int64 cache_write_tokens = 5;
+
+  // CompletionTokens is all output.
+  int64 completion_tokens = 6;
+
+  // Cost is what the priced calls cost, from saige's price catalog. Unset
+  // when no call could be priced. A lower bound whenever unpriced_calls is
+  // not zero.
+  Cost cost = 7;
+
+  // UnpricedCalls counts calls whose tokens are counted above and whose cost
+  // is not in cost: no rate card for the model, or a currency other than
+  // cost's. Nothing is estimated for them.
+  int64 unpriced_calls = 8;
+
+  // Reserved for growth.
+  reserved 9 to 15;
+}
+
+// Cost is an amount of money in integer micro-units of a currency: one US
+// dollar is micros 1000000 with currency "USD". Integers, because costs are
+// summed across many calls and compared against limits.
+message Cost {
+  // Micros is the amount in millionths of currency.
+  int64 micros = 1;
+
+  // Currency is an ISO 4217 code.
+  string currency = 2;
+
+  // AsOf is the date the rates were recorded, such as "2026-07-24": the
+  // oldest among the calls summed, and empty when any was priced from a card
+  // with no date.
+  string as_of = 3;
+
+  // Reserved for growth.
+  reserved 4 to 9;
+}
+
+// ContextUsage is how full a context was at one model call.
+message ContextUsage {
+  // Model is the model of that call.
+  string model = 1;
+
+  // Window is the model's input token limit from saige's model catalog, 0
+  // when the catalog does not declare one.
+  int64 window = 2;
+
+  // Tokens is the prompt that call sent, in tokens.
+  int64 tokens = 3;
+
+  // Reserved for growth.
+  reserved 4 to 9;
 }
 
 // GetRunRequest reads one run.
