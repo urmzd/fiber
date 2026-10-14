@@ -53,6 +53,16 @@
 // Message is a role and a text, so there is no timestamp or run id that could
 // reach the model and differ between two runs.
 //
+// A history message with attachments is rendered as its text followed by its
+// files, resolved the way the request's files are. Resolution is a function of
+// the references, the stored bytes and the pinned model, and one budget is
+// spent across the history's files in order and then the request's, so a
+// message renders the same bytes as history that it rendered as the request:
+// the files of run k's request are spent from the same remaining budget in
+// run k and in every later run that replays it. A long thread can therefore
+// use up the per-run file budget, after which further files are notes; that
+// is the price of a prefix that never changes.
+//
 // That gives a thread the same property a tool loop has. If the caller keeps
 // history append-only and records each exchange as it happened (Result.Prompt
 // is the request message exactly as it was sent, Result.Text is the answer),
@@ -120,13 +130,19 @@ const (
 
 // Message is one earlier message of the conversation a turn continues.
 //
-// It is deliberately only a role and a text. Whatever is rendered for the
-// model has to be identical on every run that replays it, and the simplest
-// way to guarantee that a timestamp, a run id or a sequence number never
-// reaches the request is for the type to have nowhere to put one.
+// It is deliberately only a role, a text and the files that came with it.
+// Whatever is rendered for the model has to be identical on every run that
+// replays it, and the simplest way to guarantee that a timestamp, a run id or
+// a sequence number never reaches the request is for the type to have nowhere
+// to put one. Attachments are content references, so they render the same
+// bytes every time: see "History across runs".
 type Message struct {
 	Role Role   `json:"role"`
 	Text string `json:"text"`
+	// Attachments are the files a user message arrived with. They are
+	// rendered after the message's text, exactly as they were when that
+	// message was the request. An assistant message carries none.
+	Attachments []attachment.Attachment `json:"attachments,omitempty"`
 }
 
 // DefaultStopReason is the reason a stop given none is reported with, on
@@ -447,19 +463,13 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	}
 	res.Prompt = prompt
 
-	input, err := conversation(t.History, prompt)
+	// Files ride on the message they arrived with: a history message's after
+	// its text, and the request's on the last message. They are the most
+	// volatile thing a turn sends, so they go after everything a later turn
+	// could share a cached prefix with.
+	input, err := r.conversation(ctx, t, prompt)
 	if err != nil {
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
-	}
-	if len(t.Attachments) > 0 {
-		// Files ride on the message they arrived with, which is the last one.
-		// They are the most volatile thing a turn sends, so they go after
-		// everything a later turn could share a cached prefix with.
-		msg, err := r.withFiles(ctx, t, prompt)
-		if err != nil {
-			return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
-		}
-		input[len(input)-1] = msg
 	}
 
 	agentCfg := saige.Config{
@@ -588,23 +598,61 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	return res, nil
 }
 
-// withFiles builds the turn's own message with its attachments resolved for the
-// model this revision pins. A provider that does not report what it accepts is
-// treated as text only: showing a model bytes it cannot read fails the call,
-// while derived text always works.
-func (r *Runner) withFiles(ctx context.Context, t Turn, prompt string) (saigetypes.Message, error) {
+// conversation builds the turn's input: the history, then the request, with
+// every message's attachments resolved for the model this revision pins.
+//
+// One budget is spent across every file in the order the messages are sent,
+// history first. That is what makes a message render the same bytes in
+// every run that replays it (see "History across runs").
+func (r *Runner) conversation(ctx context.Context, t Turn, prompt string) ([]saigetypes.Message, error) {
+	input, err := conversation(t.History, prompt)
+	if err != nil {
+		return nil, err
+	}
+	var budget *resolve.Budget
+	for i, m := range t.History {
+		if len(m.Attachments) == 0 {
+			continue
+		}
+		if budget == nil {
+			budget = resolve.NewBudget()
+		}
+		msg, err := r.withFiles(ctx, t.Tenant, m.Attachments, m.Text, budget)
+		if err != nil {
+			return nil, fmt.Errorf("history message %d of %d: %w", i+1, len(t.History), err)
+		}
+		input[i] = msg
+	}
+	if len(t.Attachments) > 0 {
+		if budget == nil {
+			budget = resolve.NewBudget()
+		}
+		msg, err := r.withFiles(ctx, t.Tenant, t.Attachments, prompt, budget)
+		if err != nil {
+			return nil, err
+		}
+		input[len(input)-1] = msg
+	}
+	return input, nil
+}
+
+// withFiles builds a user message of text followed by its attachments,
+// resolved for the model this revision pins. A provider that does not report
+// what it accepts is treated as text only: showing a model bytes it cannot
+// read fails the call, while derived text always works.
+func (r *Runner) withFiles(ctx context.Context, tenant string, files []attachment.Attachment, text string, budget *resolve.Budget) (saigetypes.Message, error) {
 	if r.files == nil {
-		return nil, fmt.Errorf("%w: the turn carries %d attachments and this deployment has no attachment resolver", ErrInvalid, len(t.Attachments))
+		return nil, fmt.Errorf("%w: the turn carries %d attachments and this deployment has no attachment resolver", ErrInvalid, len(files))
 	}
 	var media saigetypes.ContentSupport
 	if caps, ok := saigetypes.ProviderCapabilities(r.provider); ok {
 		media = caps.Media
 	}
-	out, err := r.files.Resolve(ctx, resolve.Request{Tenant: t.Tenant, Attachments: t.Attachments, Model: media})
+	out, err := r.files.Resolve(ctx, resolve.Request{Tenant: tenant, Attachments: files, Model: media, Budget: budget})
 	if err != nil {
 		return nil, fmt.Errorf("attachments: %w", err)
 	}
-	return out.Message(prompt), nil
+	return out.Message(text), nil
 }
 
 // stopOf normalizes a stop the way saige does, so every path reports the same
@@ -688,13 +736,16 @@ func drain(s *saige.EventStream) {
 func conversation(history []Message, prompt string) ([]saigetypes.Message, error) {
 	out := make([]saigetypes.Message, 0, len(history)+1)
 	for i, m := range history {
-		if strings.TrimSpace(m.Text) == "" {
+		if strings.TrimSpace(m.Text) == "" && (m.Role != RoleUser || len(m.Attachments) == 0) {
 			return nil, fmt.Errorf("%w: history message %d of %d has no text", ErrInvalid, i+1, len(history))
 		}
 		switch m.Role {
 		case RoleUser:
 			out = append(out, saigetypes.UserMsg(saigetypes.Text(m.Text)))
 		case RoleAssistant:
+			if len(m.Attachments) > 0 {
+				return nil, fmt.Errorf("%w: history message %d of %d is the agent's answer and carries attachments", ErrInvalid, i+1, len(history))
+			}
 			out = append(out, saigetypes.AssistantMsg(saigetypes.Text(m.Text)))
 		default:
 			return nil, fmt.Errorf("%w: history message %d of %d has role %q, want %q or %q",
