@@ -41,6 +41,14 @@
 // how their run lifecycle maps to those capabilities. A person pressing stop on
 // a session arrives as StopEvent and is handed to Config.Stopped (see stop.go).
 //
+// # Files and threads
+//
+// With Config.Files set, the files on a triggering message become the tag's
+// attachments (see files.go): downloaded from FileHost with the bot token,
+// stored under the connector's tenant, and carried as references. The
+// connector also lists a thread for reconciliation (see thread.go), so a run
+// is shown what people said in the thread without tagging the agent.
+//
 // # Actor
 //
 // slack_post_message and slack_add_reaction. Both are ordinary Slack verbs, and
@@ -57,7 +65,10 @@ import (
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment/intake"
 	"github.com/urmzd/mandatum/pkg/connector"
+	"github.com/urmzd/mandatum/pkg/connectors"
+	"github.com/urmzd/mandatum/pkg/connectors/internal/files"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/inbound"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/sink"
@@ -140,6 +151,28 @@ type Config struct {
 
 	// MaxBody bounds an inbound request body. Zero means inbound.DefaultMaxBody.
 	MaxBody int64
+
+	// Tenant is the authorization scope this connector's tags belong to. It
+	// is stamped on every tag it raises, files are stored under it, and a
+	// thread listing (Messages) for any other tenant is refused, because the
+	// bot token answers for this tenant's workspace and no other.
+	Tenant string
+
+	// Files brings in the files on a triggering message (event.files[]) as
+	// the tag's attachments. Needs Tenant and FileToken.
+	Files connectors.Files
+
+	// FileToken is the bot token (xoxb-...) file downloads are made with. It
+	// is sent to FileHost only, over HTTPS, and to nothing a download
+	// redirects to. The app needs the files:read scope; without it Slack
+	// serves a sign-in page, which is detected and reported as unread.
+	FileToken string
+
+	// AppID is this deployment's Slack app id ("A0123..."). A message in a
+	// listed thread posted by this app is the deployment's own (see
+	// thread.Message.Own). A message from a bot user named in Bots is also
+	// its own.
+	AppID string
 }
 
 // Connector is the Slack peer. It implements pkg/connector's Trigger, Sink and
@@ -149,6 +182,8 @@ type Connector struct {
 	gate   inbound.Gate
 	pipe   inbound.Pipe
 	engine *sink.Engine
+	// fetcher downloads files; nil when file intake is off.
+	fetcher *intake.Fetcher
 }
 
 // Compile-time proof of the faces this connector claims. RolesOf derives them
@@ -180,6 +215,14 @@ func New(cfg Config) (*Connector, error) {
 	}
 
 	c := &Connector{cfg: cfg}
+	if cfg.Files.Enabled() {
+		if cfg.Tenant == "" || cfg.FileToken == "" {
+			return nil, fmt.Errorf("slack: file intake needs a tenant to store files under and a bot token to download them with")
+		}
+		c.fetcher = intake.NewFetcher(cfg.Files.Store, fileHosts(),
+			intake.WithHeaders(fileHeaders(cfg.FileToken)),
+			intake.WithMaxBytes(cfg.Files.Caps.MaxFileBytes))
+	}
 	c.gate = inbound.Gate{Verifier: cfg.Verifier, MaxBody: cfg.MaxBody}
 	c.engine = sink.New(surface{c: c}, c.body,
 		sink.WithInterval(intervalOr(cfg.Interval)),
@@ -253,13 +296,18 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if c.cfg.Tenant != "" {
+		tag.Tenant = c.cfg.Tenant
+	}
 	if c.cfg.Prepare != nil {
 		if err := c.cfg.Prepare(r.Context(), &tag); err != nil {
 			http.Error(w, "request refused", http.StatusForbidden)
 			return
 		}
 	}
-	if err := c.pipe.Send(r.Context(), tag); err != nil {
+	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, tag.Tenant, &tag, c.candidates(env.TeamID, env.Event.Files))
+	defer cancel()
+	if err := c.pipe.Send(ctx, tag); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
 		return
 	}

@@ -43,6 +43,9 @@ type innerEvent struct {
 	ThreadTS    string `json:"thread_ts"`
 	Channel     string `json:"channel"`
 	ChannelType string `json:"channel_type"`
+	// Files are the files posted with the message, in the order Slack lists
+	// them.
+	Files []File `json:"files"`
 }
 
 // tagFrom translates a Slack event into a Tag, or reports that this event raises
@@ -74,8 +77,9 @@ func (c *Connector) tagFrom(env eventEnvelope) (envelope.Tag, bool) {
 		if ev.ChannelType != "im" {
 			return envelope.Tag{}, false
 		}
-		if ev.Subtype != "" {
-			// Joins, leaves, edits, file shares and the rest are not requests.
+		if ev.Subtype != "" && ev.Subtype != "file_share" {
+			// Joins, leaves, edits and the rest are not requests. A file
+			// shared with a message is one: its files ride on the tag.
 			return envelope.Tag{}, false
 		}
 	default:
