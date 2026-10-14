@@ -203,3 +203,37 @@ func TestAChildRunInheritsEachFileOnceInAStableOrder(t *testing.T) {
 		t.Error("Inherit modified the parent's list")
 	}
 }
+
+func TestAFileThatWasNeverStoredIsAReferenceWithAReasonAndNoContent(t *testing.T) {
+	origin := address.MustParse("slack://T01/C02?thread=1699.001")
+	m := attachment.Missing("../../etc/clip.webm", origin, "standup\nnotes", "it is larger than the 25 MB limit\nfor one file")
+	if err := m.Validate(); err != nil {
+		t.Fatalf("Missing built a reference Validate refuses: %v", err)
+	}
+	if m.Name != "clip.webm" || m.Alt != "standup notes" || m.Unread != "it is larger than the 25 MB limit for one file" {
+		t.Errorf("Missing did not clean its fields: %+v", m)
+	}
+	if m.Digest != "" || m.Size != 0 {
+		t.Errorf("an unread reference names content: %+v", m)
+	}
+	if got := attachment.Missing("x", address.Address{}, "", "  "); got.Unread == "" {
+		t.Error("a blank reason produced a reference that would read as a stored file")
+	}
+	bad := map[string]attachment.Attachment{
+		"unread with a digest":    {Digest: digest, MediaType: "image/png", Unread: "refused"},
+		"unread with a size":      {Size: 10, Unread: "refused"},
+		"unread multi-line":       {Unread: "one\ntwo"},
+		"unread oversized":        {Unread: strings.Repeat("r", attachment.MaxUnread+1)},
+		"unread with a bad type":  {MediaType: "Image/PNG", Unread: "refused"},
+		"unread with a path name": {Name: "a/b.png", Unread: "refused"},
+	}
+	for name, a := range bad {
+		if err := a.Validate(); !errors.Is(err, attachment.ErrInvalid) {
+			t.Errorf("%s: Validate = %v, want ErrInvalid", name, err)
+		}
+	}
+	twice := attachment.Inherit([]attachment.Attachment{m}, []attachment.Attachment{m, attachment.Missing("other.png", origin, "", "refused")})
+	if len(twice) != 2 {
+		t.Errorf("Inherit = %+v, want the repeated unread file once and the other kept", twice)
+	}
+}

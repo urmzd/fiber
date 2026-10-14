@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urmzd/mandatum/pkg/address"
 	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/attachment/intake"
 	"github.com/urmzd/mandatum/pkg/attachment/resolve"
@@ -295,6 +296,28 @@ func TestEveryUnreadableFileBecomesANoteAndIsNeverSilentlyDropped(t *testing.T) 
 	}
 	if strings.Contains(got, "forged") {
 		t.Error("fields of a malformed reference were printed into the prompt")
+	}
+}
+
+func TestAFileThatCouldNotBeFetchedIsANoteWithTheReasonAndSpendsNothing(t *testing.T) {
+	s := blob.NewMemory()
+	missing := attachment.Missing("design.png", address.Address{}, "the new layout", "the surface refused access to it")
+	readable := add(t, s, "notes.txt", []byte("hello"))
+	res := run(t, resolve.New(s, resolve.WithLimits(resolve.Limits{Files: 1})), vision, missing, readable)
+	got := text(res.Parts)
+	want := `[Attachment name="design.png" alt="the new layout" was attached but could not be read: the surface refused access to it.]`
+	if !strings.Contains(got, want) {
+		t.Errorf("note for an unfetched file:\n got %q\nwant it to contain %q", got, want)
+	}
+	if res.Outcomes[0].Form != resolve.FormNote || res.Outcomes[0].Reason != "the surface refused access to it" {
+		t.Errorf("outcome = %+v, want a note carrying the intake reason", res.Outcomes[0])
+	}
+	if res.Outcomes[1].Form == resolve.FormNote {
+		t.Errorf("a file that was never stored used up the run's one-file budget: %+v", res.Outcomes[1])
+	}
+	again := run(t, resolve.New(s, resolve.WithLimits(resolve.Limits{Files: 1})), vision, missing, readable)
+	if !reflect.DeepEqual(res.Parts, again.Parts) {
+		t.Error("the note for an unfetched file is not byte-stable across resolutions")
 	}
 }
 

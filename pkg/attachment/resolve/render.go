@@ -17,8 +17,18 @@ import (
 // describe is the attribute list shared by every form: what the file was
 // called, what it is and how big it is. Name and alt text are the uploader's
 // words; they were cleaned to one line at intake and are quoted here.
+//
+// A file that was never stored has no size or sniffed type to report, so
+// both are left out rather than printed as zero.
 func describe(a attachment.Attachment, mediaType string) string {
 	var b strings.Builder
+	if a.Unread != "" {
+		fmt.Fprintf(&b, "name=%q", a.Label())
+		if a.Alt != "" {
+			fmt.Fprintf(&b, " alt=%q", a.Alt)
+		}
+		return b.String()
+	}
 	fmt.Fprintf(&b, "name=%q type=%q bytes=\"%d\"", a.Label(), mediaType, a.Size)
 	if a.Alt != "" {
 		fmt.Fprintf(&b, " alt=%q", a.Alt)
