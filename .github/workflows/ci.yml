@@ -57,3 +57,63 @@ jobs:
       # its own invariants rather than only printing.
       - name: Run the end-to-end example
         run: go run ./examples/local
+
+  integration:
+    name: Postgres and Redis integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: mandatum
+          POSTGRES_PASSWORD: mandatum
+          POSTGRES_DB: mandatum
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mandatum -d mandatum"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      MANDATUM_POSTGRES_TEST_URL: postgres://mandatum:mandatum@localhost:5432/mandatum?sslmode=disable
+      MANDATUM_REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run backend conformance and persistence tests
+        shell: bash
+        run: |
+          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/bus | tee integration-results.jsonl
+      - name: Reject skipped integration tests
+        run: |
+          # The Postgres queue does not implement the optional DeltaLog face.
+          # Every other test must execute, including all backend setup tests.
+          jq -s -e '[.[] | select(.Action == "skip")
+            | select(.Package != "github.com/urmzd/mandatum/pkg/durable"
+              or .Test != "TestQueueConformanceOnMandatumSchema/FencedAppend")]
+            | length == 0' integration-results.jsonl
+      - name: Require backend test coverage
+        run: |
+          jq -s -e '. as $events | [
+            ["registry", "TestPostgresMigrateIsIdempotentAndConcurrent"],
+            ["durable", "TestLedgerConformanceOnMandatumSchema"],
+            ["durable", "TestQueueConformanceOnMandatumSchema"],
+            ["knowledge", "TestPostgresMigrateIsIdempotentAndConcurrent"],
+            ["bus", "TestRedisConformance"]
+          ] | all(. as $required | any($events[];
+            .Action == "pass"
+            and .Package == ("github.com/urmzd/mandatum/pkg/" + $required[0])
+            and .Test == $required[1]))' integration-results.jsonl
