@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 (2026-10-14)
+
+### Features
+
+- **github**: add structured reviews and PR collaboration ([8703695](https://github.com/urmzd/mandatum/commit/8703695d17a61b405acccdc41b493319765836a5))
+
+[Full Changelog](https://github.com/urmzd/mandatum/compare/v0.4.0...v0.5.0)
+
+
 ## 0.4.0 (2026-10-10)
 
 ### Breaking
