@@ -189,6 +189,7 @@ See [the example index](examples/README.md) for more.
 | `mandatum agent` | Create, revise, get, list, history, delete |
 | `mandatum tag` | Tag an agent and stream its answer |
 | `mandatum listen` | Subscribe to a topic and print events |
+| `mandatum stop` | Ask a run to stop; it keeps what it had said and ends with `lifecycle.stopped` |
 | `mandatum index` | Index files into a named knowledge source in Postgres |
 | `mandatum version` | Version, commit, build date |
 | `mandatum update` | Self-update from GitHub releases |
@@ -261,6 +262,7 @@ connecting from a host CLI. Connector setup is covered in the
 - Citations are derived from RAG context blocks. saige's `CitationDelta`, which reports what a model or tool cited, is not translated into events yet.
 - The bus is at-least-once with no consumer groups. If durable competing consumers become a requirement, NATS JetStream behind the `Bus` interface is a better answer than growing a broker here.
 - Agent specs load from JSON, not YAML.
+- Stopping a run is the HTTP route `POST /v1/runs/{id}/stop`, not an RPC, and `GetRun` reports a stopped run as completed until the protobuf contract gains a member for it. A stop request is retained by the bus, not written to the ledger. A route that selects only `lifecycle.completed` is not told about a stop.
 
 ## Reproduce the Screenshot
 

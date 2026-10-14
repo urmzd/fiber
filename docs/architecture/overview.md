@@ -176,6 +176,86 @@ The journal is truth; the bus is flow.
 redelivers on timeout, so a Slack retry or a GitHub redelivery joins the run
 that already exists rather than starting a second one and answering twice.
 
+## Stopping a run
+
+A person who presses stop wants two things: the agent to stop working, and to
+be able to reply to what it had said so far. A run can be asked to stop at any
+point, and a stopped run is its own outcome rather than a failure or a
+completion.
+
+```
+POST /v1/runs/{id}/stop          a host calls runtime.Stop instead
+  -> control.stop                published to agent:_control:stop-<run>
+     -> the executing attempt    subscribed for the life of the turn
+        -> saige stream.Stop     the model call and running tools are cancelled
+           -> lifecycle.stopped  terminal, with the reason, who asked, the partial answer
+```
+
+**The request is an event, not a call.** The process asked to stop a run is
+usually not the one executing it, and the only thing every process shares is
+the bus. So the request is published, and the attempt executing the run
+subscribes to it while its turn lasts.
+
+**It travels on a control topic, not the run's own.** A run's topic has one
+writer. The attempt chooses its own sequence numbers and the bus keeps the
+first write of a sequence, so a second writer would land on numbers the attempt
+is about to use and displace its events. `agent:_control:stop-<run>` is a
+stream of its own, addressable from the run id alone. `_control` is the one
+name no agent may take, the router never delivers what is published under it,
+and `BusService.Publish` refuses it, so the only way to write a stop request is
+the route that stamps the tenant and the asker from the credential.
+
+**Retention settles the races.** A subscription starts with what the bus
+retains, so the order in which a request and an attempt arrive does not matter:
+
+| The request arrives | What happens |
+|---|---|
+| Before a worker has started the turn | It is waiting when the attempt subscribes. The run ends stopped, normally before any model call. |
+| While the turn runs | It is delivered live. |
+| Between two attempts | It is waiting for the next attempt, which stops. |
+| After the run ended | Nobody subscribes again. Nothing happens. |
+| A second time | The first request a run hears is the one it honours. |
+
+**Tenant is checked by the listener.** The bus addresses and does not
+authorize. A request carries the tenant it was made under, and an attempt
+ignores any request whose tenant is not its run's. `Stop` reports the same
+thing for an unknown run, a finished run and another tenant's run (the request
+was published), so it cannot be used to learn whether a run exists. Run ids are
+derived from the tenant and the tag id, so another tenant's run cannot be
+addressed by guessing its tag id either.
+
+**The decision is a recorded result.** duraturo replays the workflow body, and
+whether somebody has asked for a stop changes between attempts, so the body
+never asks. The memoized agent activity listens, and returns a stopped outcome
+instead of an error. The ledger records the run as ended, it is never retried,
+and a replay reads the record and announces the same stop.
+
+**The thread remembers it.** A stopped run journals its exchange like a
+completed one: the request, then an assistant entry holding the partial answer
+followed by a fixed marker line, or the marker alone when the turn was stopped
+before it said anything.
+
+```
+The deploy failed because
+
+[This turn was stopped before it finished.]
+```
+
+The marker is a constant and the reason is not written there, because the
+journal is replayed byte for byte to every later run in the thread. The reason
+and who asked travel on `lifecycle.stopped` and on the run's output, for people
+and sinks. Sinks render a stopped run as stopped: the shared layout says so in
+the header and under the partial answer, and a GitHub check concludes
+`cancelled`.
+
+**Delegated turns are cancelled.** Stopping a parent cancels the tool calls its
+turn has in flight. A delegated sub-task is one of them, and it is aborted
+rather than left to finish. It is not wrapped up the way the parent is: its
+partial answer is discarded with the tool call it was the result of. A host
+that carries out delegations itself (`runtime.WithDelegator`) sees the context
+it was called with cancelled, and decides what that means for the run it
+started.
+
 ## Package DAG
 
 Dependencies run one way. Leaves are stdlib-only and know nothing about
@@ -183,7 +263,7 @@ transports, storage, or agents.
 
 ```
 leaves (stdlib only)
-  pkg/topic        agent:name[:run], prefix containment
+  pkg/topic        agent:name[:run], prefix containment, the control namespace
   pkg/address      github://urmzd/mandatum/issues/42, slack://T01/C02?thread=...
   pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription
   pkg/signature    HMAC verification for inbound webhooks
@@ -196,7 +276,7 @@ seams
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations
-  pkg/runtime      the durable duraturo turn, legatus sandbox
+  pkg/runtime      the durable duraturo turn, legatus sandbox, stop
   pkg/router       delivery fan-out to sinks
   pkg/connectors   slack, github, jira, cron, webhook
   internal/server  Connect handlers, SSE, webhook ingress
@@ -220,6 +300,7 @@ set, so gRPC clients and browsers share one contract and one codegen path.
 | `BusService.Publish` | Append an event to a run's topic |
 | `AgentService.*` | Agent spec control plane |
 | `GET /v1/sse` | The same stream, browser-native, resumable via `Last-Event-ID` |
+| `POST /v1/runs/{id}/stop` | Ask a run to stop; answers 202 for every run id |
 | `POST /v1/webhooks/{connector}` | HMAC-verified ingress |
 
 `InvokeStream` exists because doing invoke and subscribe separately races: events
@@ -272,3 +353,21 @@ Verified against the code, and honest.
   behind the `Bus` interface rather than growing a broker here.
 - **Agent specs are loaded from JSON**, not YAML, so the CLI carries no parser
   dependency.
+- **A stop request is as durable as the bus.** It is retained like any event,
+  not written to the ledger. A request made for a run that has not started is
+  lost if the bus forgets the stream first: the in-memory bus evicts the least
+  recently written streams past `WithMaxRuns`, and a Redis server evicts by its
+  own policy. A lost request means the run finishes normally.
+- **Stop has no protobuf surface yet.** It is the HTTP route
+  `POST /v1/runs/{id}/stop`. `RunStatus` has no stopped member, so `GetRun`
+  reports a stopped run as completed; `lifecycle.stopped` on the run's stream is
+  what tells them apart.
+- **A stop wraps up the turn, not its side effects.** Tool calls already
+  finished stay done, and a tool that ignores its context delays the stop until
+  the grace period (ten seconds by default) cancels the turn. A turn that is
+  cancelled this way ends stopped with the text it had published.
+- **A route that selects only `lifecycle.completed` is not told about a stop.**
+  Select `lifecycle`, or add `lifecycle.stopped`, to hear every ending.
+- **A request published before a run exists stays on the bus.** Run ids are
+  hashes of the tenant and the tag id, so this needs the id of a run that will
+  exist; such a run stops when it starts.
