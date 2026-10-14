@@ -81,6 +81,13 @@
 // delta log), while a failed Publish fails the turn: a run whose events nobody
 // can see has not done its job.
 //
+// # A run can be stopped
+//
+// Stop asks a run to end before it has finished. The request travels on the
+// bus, the attempt executing the run hears it, and the run ends with
+// lifecycle.stopped: over, not failed, never retried, and remembered by its
+// thread with what it had said so far. See stop.go.
+//
 // # Single goroutine
 //
 // duraturo v1 workflow bodies are single-goroutine. Nothing in this package
@@ -205,6 +212,11 @@ type Output struct {
 	// Stored is the workspace key the answer artifact was written to, empty
 	// when the pinned revision granted no workspace area for it.
 	Stored string `json:"stored,omitempty"`
+	// Stopped is set when the run ended because it was asked to stop, and
+	// says why and by whom. Text is then the partial answer and LastSeq is
+	// the sequence of the stopped event. The ledger records such a run as
+	// succeeded: it ended, it did not fail, and it is never retried.
+	Stopped *agentrt.Stop `json:"stopped,omitempty"`
 }
 
 // Request is one turn handed to an Executor: the tag's content, plus the exact
@@ -245,6 +257,9 @@ type Request struct {
 	// Service is set by the Sandbox: the legatus deployment this turn runs
 	// in, so a delegated sub-task can be awaited in the right place.
 	Service string `json:"service,omitempty"`
+	// SubTask is set by the Sandbox on a delegated sub-task, which has no
+	// run id: the key the turn waiting on it can cancel it by.
+	SubTask string `json:"sub_task,omitempty"`
 }
 
 // Agent returns the agent name.
@@ -274,6 +289,11 @@ type Outcome struct {
 	// is not a turn failure: it means the pinned revision was not granted that
 	// workspace area, which is the sandbox working as defined.
 	StoreError string `json:"store_error,omitempty"`
+	// Stopped is set when the turn ended because it was asked to stop. Text
+	// is then what had been answered so far, which may be nothing. An
+	// executor sets it instead of returning an error: a stopped turn must not
+	// be retried.
+	Stopped *agentrt.Stop `json:"stopped,omitempty"`
 }
 
 // Acceptance is what a caller learns when a tag is accepted. It mirrors
@@ -349,6 +369,11 @@ type Runtime struct {
 	threads   thread.Store
 	lister    thread.Lister
 	messageID func(envelope.Tag) string
+
+	// control is the bus as something to subscribe to, which is how a turn
+	// hears a stop request. Nil when the bus can only be published to.
+	control   Subscriber
+	stopGrace time.Duration
 
 	registry *run.Registry
 	turn     *duraturo.ActivityFn[Input, Output]
@@ -451,7 +476,13 @@ func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Opt
 		logger:   slog.Default(),
 		now:      time.Now,
 		registry: run.NewRegistry(),
+
+		stopGrace: DefaultStopGrace,
 	}
+	// Stopping needs the reading half of the bus. It is discovered rather
+	// than configured, as a connector's roles are: every backend in pkg/bus
+	// has it, and a bus that does not cannot be made to by an option.
+	r.control, _ = b.(Subscriber)
 	for _, o := range opts {
 		o(r)
 	}
@@ -491,6 +522,9 @@ func (r *Runtime) Registry() *run.Registry { return r.registry }
 func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
 	if err := tag.Validate(); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept: %w", err)
+	}
+	if tag.Agent == topic.ControlName {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", tag.ID, ErrInvalid, tag.Agent)
 	}
 	runID := RunID(tag.Tenant, tag.ID)
 	tp, err := topic.Run(tag.Agent, runID)
@@ -591,12 +625,34 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	// The exchange joins the thread before the run is announced complete, so
 	// that a tag raised in reply to the answer always finds the answer in the
 	// history it pins. A replay appends nothing: the journal recognizes the
-	// run.
+	// run. A stopped run is remembered the same way, for the same reason: the
+	// reply to a stopped answer is the whole point of stopping gently.
 	if err := r.remember(ctx, in, out); err != nil {
 		r.report(ctx, in, b.close, envelope.KindFailed, payload.Lifecycle{
 			Attempt: attempt, Rev: in.Rev, Error: err.Error(),
 		})
 		return Output{}, err
+	}
+
+	if out.Stopped != nil {
+		// The run is over and nothing failed. Returning a result rather than
+		// an error is what tells the ledger so: it records the run as ended
+		// and never retries it. Everything here comes from the agent's
+		// recorded outcome, so a replay announces the same stop.
+		if err := r.publish(ctx, in, b.close, envelope.KindStopped, payload.Stopped{
+			Attempt: attempt, Rev: in.Rev, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
+		}); err != nil {
+			return Output{}, err
+		}
+		return Output{
+			Rev:     in.Rev,
+			Text:    out.Text,
+			LastSeq: b.close,
+			Attempt: attempt,
+			// accepted, opened, the agent's chunks, and stopped.
+			Events:  out.Chunks + 3,
+			Stopped: out.Stopped,
+		}, nil
 	}
 
 	if err := r.publish(ctx, in, b.close, envelope.KindCompleted, payload.Lifecycle{
@@ -651,7 +707,7 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		Attachments: in.Tag.Attachments,
 	}
 
-	out, err := r.exec.Execute(ctx, req, func(ctx context.Context, c agentrt.Chunk) error {
+	out, err := r.execute(ctx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
 		seq, err := b.delta()
 		if err != nil {
 			// The band is spent. Retrying would produce the same flood, so
@@ -783,6 +839,11 @@ func historyOf(entries []thread.Entry) []agentrt.Message {
 // It is called from the workflow body, so it runs again on every replay, and
 // the journal makes that safe: an entry is recognized by its run id and role,
 // and the first write is the one that stays.
+//
+// A stopped run's answer is what it had said, followed by StopMarker, and it
+// is always recorded, even when the turn said nothing: see stoppedText. It is
+// built from the agent's recorded outcome and a constant, so a replay offers
+// the journal the same bytes it already holds.
 func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	if r.threads == nil {
 		return nil
@@ -795,11 +856,15 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 			RunID: runID, SurfaceID: r.surfaceID(in.Tag), At: in.Tag.At,
 		})
 	}
+	answer := out.Text
+	if out.Stopped != nil {
+		answer = stoppedText(out.Text)
+	}
 	// A turn that only called tools has no answer to remember, and an empty
 	// assistant message is one a provider would refuse to be sent back.
-	if strings.TrimSpace(out.Text) != "" {
+	if strings.TrimSpace(answer) != "" {
 		entries = append(entries, thread.Entry{
-			Role: thread.RoleAssistant, Text: out.Text,
+			Role: thread.RoleAssistant, Text: answer,
 			Actor: envelope.Actor{ID: in.Tag.Agent, Bot: true},
 			RunID: runID, At: r.now(),
 		})
