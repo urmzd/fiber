@@ -22,6 +22,8 @@ import (
 	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/connector"
 	"github.com/urmzd/mandatum/pkg/envelope"
+
+	"github.com/urmzd/mandatum/pkg/attachment"
 )
 
 // Sandbox defaults.
@@ -119,6 +121,7 @@ type Sandbox struct {
 	delegator Delegator
 
 	agentOpts []agentrt.Option
+	knowledge func(tenant string, sources []string) agentrt.Retriever
 	replicas  int
 	buffer    int
 	poll      time.Duration
@@ -174,6 +177,17 @@ func WithDelegator(d Delegator) SandboxOption {
 // builds: the provider table, an offline script, a retriever, loop bounds.
 func WithAgentOptions(opts ...agentrt.Option) SandboxOption {
 	return func(s *Sandbox) { s.agentOpts = append(s.agentOpts, opts...) }
+}
+
+// WithKnowledge grounds turns in a knowledge store.
+//
+// It is a factory rather than a retriever because retrieval is scoped twice
+// over and neither scope is known until a run starts: to the tenant the run
+// belongs to, and to the sources its pinned revision declares. One retriever
+// shared by every run would have to pick a tenant, and there is no right one to
+// pick. The factory may return nil, which means this run retrieves nothing.
+func WithKnowledge(f func(tenant string, sources []string) agentrt.Retriever) SandboxOption {
+	return func(s *Sandbox) { s.knowledge = f }
 }
 
 // WithReplicas sets how many local execution nodes each deployment starts with.
@@ -492,19 +506,32 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	// copy: the pinned definition itself is never edited.
 	rev.Spec.Tools = granted
 
-	runner, err := agentrt.New(rev, append(append([]agentrt.Option{}, s.agentOpts...), agentrt.WithTools(tools))...)
+	opts := append(append([]agentrt.Option{}, s.agentOpts...), agentrt.WithTools(tools))
+	if s.knowledge != nil {
+		names := make([]string, 0, len(rev.Spec.Sources))
+		for _, src := range rev.Spec.Sources {
+			names = append(names, src.Name)
+		}
+		if r := s.knowledge(req.Tenant, names); r != nil {
+			opts = append(opts, agentrt.WithRetriever(r))
+		}
+	}
+	runner, err := agentrt.New(rev, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	res, err := runner.Run(ctx, agentrt.Turn{Text: req.Text, Meta: req.Meta}, func(_ context.Context, c agentrt.Chunk) error {
+	res, err := runner.Run(ctx, agentrt.Turn{
+		Text: req.Text, Meta: req.Meta, History: req.History,
+		Attachments: req.Attachments, Tenant: req.Tenant,
+	}, func(_ context.Context, c agentrt.Chunk) error {
 		return send(c)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	out := Outcome{Text: res.Text, Chunks: res.Chunks, Citations: res.Citations}
+	out := Outcome{Text: res.Text, Prompt: res.Prompt, Chunks: res.Chunks, Citations: res.Citations}
 	key := AnswerKey(rev.Spec.Name, req.RunID)
 	if werr := rt.Workspace().Write(ctx, key, strings.NewReader(res.Text)); werr != nil {
 		// The policy decided, and that is not a turn failure: an agent granted
@@ -586,6 +613,15 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 // replays a tool result, so there is nothing for an unpinned resolution to
 // diverge from.
 //
+// The child is not given the parent's thread history, and that is a decision
+// rather than an omission. A thread is one agent's conversation (see
+// thread.KeyOf), and the child is a different agent: handing it the parent's
+// journal would show it questions that were never put to it and answers it
+// never gave, under its own role. What the child needs to know is what the
+// parent chose to tell it, which is the text of the delegation. It has no run
+// id either, so nothing it says is appended to any thread; its answer reaches
+// the parent's journal only as part of whatever the parent finally answers.
+//
 // The other way to have an agent tag an agent is to raise a Tag at it, which
 // creates a durable run of its own with its own pinned revision and its own
 // topic. That is the right shape when the delegated work should outlive this
@@ -626,13 +662,18 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 				// output would be attributed to the wrong agent on the
 				// parent's topic. It reaches the transcript as this tool's
 				// result, which is where the model put it.
-				Tenant:   parent.Tenant,
-				Attempt:  parent.Attempt,
-				Origin:   parent.Origin,
-				Source:   parent.Source,
-				Text:     text,
+				Tenant:  parent.Tenant,
+				Attempt: parent.Attempt,
+				Origin:  parent.Origin,
+				Source:  parent.Source,
+				Text:    text,
+				// No History: see above.
 				Revision: rev,
 				Service:  parent.Service,
+				// The files the parent was asked about go with the work it
+				// hands off; a specialist asked to read a log it was never
+				// given can only guess.
+				Attachments: attachment.Inherit(parent.Attachments, nil),
 			}
 			input, err := json.Marshal(child)
 			if err != nil {

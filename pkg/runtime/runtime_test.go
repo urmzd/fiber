@@ -146,6 +146,11 @@ type executor struct {
 	err      error
 	failures int
 	answer   string
+	// hook, when set, runs at the start of every execution, before anything
+	// is emitted. A test uses it to change the world between two attempts.
+	hook func(runtime.Request)
+	// prompt, when set, is what the executor reports having sent the model.
+	prompt func(runtime.Request) string
 }
 
 func newExecutor(answer string, chunks ...agentrt.Chunk) *executor {
@@ -174,6 +179,7 @@ func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(c
 	e.runs++
 	e.requests = append(e.requests, req)
 	chunks, failure, answer := e.chunks, e.err, e.answer
+	hook, prompt := e.hook, e.prompt
 	// A budgeted failure is spent here, so the next attempt succeeds without
 	// anyone having to heal the executor from outside.
 	if e.failures > 0 {
@@ -184,6 +190,9 @@ func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(c
 	}
 	e.mu.Unlock()
 
+	if hook != nil {
+		hook(req)
+	}
 	for _, c := range chunks {
 		if err := emit(ctx, c); err != nil {
 			return runtime.Outcome{}, err
@@ -192,7 +201,11 @@ func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(c
 	if failure != nil {
 		return runtime.Outcome{}, failure
 	}
-	return runtime.Outcome{Text: answer, Chunks: len(chunks)}, nil
+	out := runtime.Outcome{Text: answer, Chunks: len(chunks)}
+	if prompt != nil {
+		out.Prompt = prompt(req)
+	}
+	return out, nil
 }
 
 func (e *executor) count() int {
