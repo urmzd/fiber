@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -176,7 +177,7 @@ func newCore(cfg coreConfig) (*core, error) {
 
 	// The broker. Runs publish here; the router, every subscriber, and every
 	// SSE client read from here. Nothing else connects them.
-	broker, closeBus, err := newBus(cfg.Redis)
+	broker, closeBus, err := newBus(cfg.Redis, cfg.Concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +281,9 @@ func newCore(cfg coreConfig) (*core, error) {
 		runtime.WithLogger(log),
 		runtime.WithThreads(threads),
 		runtime.WithMessageID(surfaceMessageID),
+		// A stop asked for before a run's turn starts is recorded on the
+		// run, so it does not depend on the bus still holding it.
+		runtime.WithStopLedger(c.ledger),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cli: runtime: %w", err)
@@ -301,7 +305,14 @@ func (c *core) close() error {
 // newBus selects a broker. The in-memory one is the default because a single
 // process needs nothing else and a default that requires infrastructure is a
 // default nobody can run.
-func newBus(redisURL string) (bus.Bus, func() error, error) {
+//
+// On Redis every live subscription holds a pooled connection for most of its
+// poll cycle, and a turn holds one for as long as it runs (it listens for a
+// stop). A pool smaller than the number of running turns makes their
+// publishes wait for a connection, and a publish that times out fails the
+// turn. So unless the URL sets pool_size, the pool is go-redis's default plus
+// one connection per run this process executes at once.
+func newBus(redisURL string, concurrency int) (bus.Bus, func() error, error) {
 	if strings.TrimSpace(redisURL) == "" {
 		return bus.NewMemory(), nil, nil
 	}
@@ -309,6 +320,7 @@ func newBus(redisURL string) (bus.Bus, func() error, error) {
 	if err != nil {
 		return nil, nil, usagef("$%s is not a redis URL: %v", EnvRedis, err)
 	}
+	opts.PoolSize = redisPoolSize(redisURL, opts.PoolSize, concurrency)
 	client := redis.NewClient(opts)
 	return bus.NewRedis(client), client.Close, nil
 }
@@ -568,6 +580,8 @@ func (c *core) Run(ctx context.Context, tenant, runID string) (server.Run, error
 			// it is told apart by what the run returned.
 			if result.Stopped != nil {
 				out.Status = server.StatusStopped
+				out.StopReason = result.Stopped.Reason
+				out.StoppedBy = result.Stopped.By
 			}
 		}
 	}
@@ -591,7 +605,9 @@ func (c *core) Stop(ctx context.Context, req server.StopRequest) error {
 	return err
 }
 
-// statusOf maps a ledger status onto the edge's. duraturo has no "running"
+// statusOf maps a ledger status onto the edge's. The ledger has no word for
+// stopped: it records such a run as succeeded, and Run tells the two apart by
+// the run's recorded output, which is as durable as the status itself. duraturo has no "running"
 // state — assignment is flow state and lives in the queue, never in the ledger
 // — so a pending run is reported as accepted, which is the only thing the
 // ledger actually knows about it.
@@ -734,4 +750,14 @@ func (g *group) wait(grace time.Duration) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.err
+}
+
+// redisPoolSize is the connection pool newBus asks for: what the URL says when
+// it says, otherwise go-redis's default of ten per CPU plus one per run this
+// process may execute at once.
+func redisPoolSize(redisURL string, fromURL, concurrency int) int {
+	if strings.Contains(redisURL, "pool_size=") && fromURL > 0 {
+		return fromURL
+	}
+	return 10*goruntime.GOMAXPROCS(0) + max(concurrency, 1)
 }

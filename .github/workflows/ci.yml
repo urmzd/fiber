@@ -96,7 +96,9 @@ jobs:
       - name: Run backend conformance and persistence tests
         shell: bash
         run: |
-          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/bus | tee integration-results.jsonl
+          # pkg/runtime runs its stop tests on the Postgres ledger, queue and
+          # journal and the Redis bus when both variables are set.
+          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/bus ./pkg/runtime | tee integration-results.jsonl
       - name: Reject skipped integration tests
         run: |
           # The Postgres queue does not implement the optional DeltaLog face.
@@ -112,7 +114,17 @@ jobs:
             ["durable", "TestLedgerConformanceOnMandatumSchema"],
             ["durable", "TestQueueConformanceOnMandatumSchema"],
             ["knowledge", "TestPostgresMigrateIsIdempotentAndConcurrent"],
-            ["bus", "TestRedisConformance"]
+            ["bus", "TestRedisConformance"],
+            ["runtime", "TestStopTestsRunOnPostgresAndRedis"],
+            ["runtime", "TestAStopReachesARunExecutingOnAnotherWorker"],
+            ["runtime", "TestAStopBeforeTheTurnStartsIsNotLost"],
+            ["runtime", "TestAnotherTenantsFloodCannotEvictAPendingStop"],
+            ["runtime", "TestReplayingAStoppedRunOffersTheJournalTheSameBytesAndRunsNothingTwice"],
+            ["runtime", "TestAStoppedRunIsRecordedAsEndedAndIsNeverRetried"],
+            ["runtime", "TestAStopSurvivesAWorkerRestart"],
+            ["runtime", "TestAStopTheBusEvictedIsStillHonouredFromTheLedger"],
+            ["runtime", "TestAStopRacingCompletionEndsExactlyOneWayEverywhere"],
+            ["runtime", "TestAStopIsRecordedOnlyForALiveRunTheAskerOwnsAndAtMostOnce"]
           ] | all(. as $required | any($events[];
             .Action == "pass"
             and .Package == ("github.com/urmzd/mandatum/pkg/" + $required[0])

@@ -2,6 +2,7 @@ package agentrt_test
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -179,5 +180,31 @@ func TestATurnNobodyStopsCompletes(t *testing.T) {
 	case <-stop:
 	case <-time.After(time.Second):
 		t.Fatal("a stop sent after the turn returned was consumed by something")
+	}
+}
+
+// A turn that panics (here, in the caller's emit) unwinds through Run, and the
+// goroutine that watches for a stop goes with it rather than waiting forever
+// on a channel nobody will close.
+func TestAPanickingTurnLeavesNoStopWatcherBehind(t *testing.T) {
+	r, err := agentrt.New(offlineRevision(1, "You document things."),
+		agentrt.WithScript(agenttest.TextResponse("the docs are updated")))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	baseline := runtime.NumGoroutine()
+	for range 5 {
+		func() {
+			defer func() { _ = recover() }()
+			_, _ = r.Run(context.Background(), agentrt.Turn{Text: "update the docs", Stop: make(chan agentrt.Stop)},
+				func(context.Context, agentrt.Chunk) error { panic("emit bug") })
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines after five panicking turns, baseline %d", runtime.NumGoroutine(), baseline)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

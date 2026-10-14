@@ -27,6 +27,7 @@ package payload
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
 	"github.com/urmzd/mandatum/pkg/envelope"
@@ -180,6 +181,8 @@ type StopRequest struct {
 	Reason string `json:"reason,omitempty"`
 	// By is who asked. Optional.
 	By string `json:"by,omitempty"`
+	// At is when the request was made.
+	At time.Time `json:"at,omitzero"`
 }
 
 // Action is the body of envelope.KindActionTaken: a connector's native verb

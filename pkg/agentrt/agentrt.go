@@ -129,6 +129,22 @@ type Message struct {
 	Text string `json:"text"`
 }
 
+// DefaultStopReason is the reason a stop given none is reported with, on
+// every path: saige's own default, so a turn that saige wraps up and a turn
+// stopped before it began say the same thing.
+const DefaultStopReason = saige.DefaultStopReason
+
+// RequestText is the request message a turn of text and meta sends before any
+// retrieved passages are added: the trigger metadata, in sorted key order,
+// then the text. It is what a turn that was stopped before it began records as
+// its request, and what a caller can record when it never learned the prompt.
+func RequestText(text string, meta map[string]string) string {
+	if m := renderMeta(meta); m != "" {
+		return m + "\n\n" + text
+	}
+	return text
+}
+
 // Stop asks a turn to wrap up before it has finished.
 type Stop struct {
 	// Reason is why, in the words of whoever asked. Empty takes saige's
@@ -392,11 +408,8 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	// it would have been sent, without retrieved passages, since none were
 	// fetched.
 	if stop, ok := pendingStop(t.Stop); ok {
-		res.Prompt = t.Text
-		if meta := renderMeta(t.Meta); meta != "" {
-			res.Prompt = meta + "\n\n" + t.Text
-		}
-		res.Stopped = &stop
+		res.Prompt = RequestText(t.Text, t.Meta)
+		res.Stopped = stopOf(stop)
 		return res, nil
 	}
 
@@ -485,10 +498,16 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		case <-finished:
 		}
 	}()
+	// settle is deferred as well as called: a panic anywhere below (an emit
+	// that panics, say) must not leave the watcher waiting forever.
+	var settled sync.Once
 	settle := func() {
-		close(finished)
-		<-watched
+		settled.Do(func() {
+			close(finished)
+			<-watched
+		})
 	}
+	defer settle()
 
 	var answer strings.Builder
 	var streamErr error
@@ -557,7 +576,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		// What the caller asked for still happened, with whatever text had
 		// arrived, so it is reported as a stop and not as the cancellation
 		// it was implemented with.
-		res.Stopped = &stop
+		res.Stopped = stopOf(stop)
 		return res, nil
 	}
 	if waitErr != nil {
@@ -586,6 +605,16 @@ func (r *Runner) withFiles(ctx context.Context, t Turn, prompt string) (saigetyp
 		return nil, fmt.Errorf("attachments: %w", err)
 	}
 	return out.Message(prompt), nil
+}
+
+// stopOf normalizes a stop the way saige does, so every path reports the same
+// reason for a request that gave none.
+func stopOf(s Stop) *Stop {
+	s.Reason = strings.TrimSpace(s.Reason)
+	if s.Reason == "" {
+		s.Reason = DefaultStopReason
+	}
+	return &s
 }
 
 // pendingStop reports a stop request that is already waiting, without

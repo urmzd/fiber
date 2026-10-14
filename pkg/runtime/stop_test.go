@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/urmzd/duraturo"
 	"github.com/urmzd/duraturo/pkg/ledger"
@@ -29,6 +31,7 @@ import (
 	"github.com/urmzd/mandatum/pkg/agentrt"
 	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/bus"
+	"github.com/urmzd/mandatum/pkg/durable"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/runtime"
 	"github.com/urmzd/mandatum/pkg/thread"
@@ -45,11 +48,11 @@ var stopBuses atomic.Uint64
 
 // newBroker returns an empty bus: Redis under a key prefix of its own when
 // $MANDATUM_REDIS_ADDR is set, Memory otherwise.
-func newBroker(t *testing.T) bus.Bus {
+func newBroker(t *testing.T, opts ...bus.Option) bus.Bus {
 	t.Helper()
 	addr := os.Getenv(stopBusEnv)
 	if addr == "" {
-		return bus.NewMemory()
+		return bus.NewMemory(opts...)
 	}
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	prefix := fmt.Sprintf("mandatumtest-stop-%d-%d", time.Now().UnixNano(), stopBuses.Add(1))
@@ -61,7 +64,8 @@ func newBroker(t *testing.T) bus.Bus {
 		}
 		_ = client.Close()
 	})
-	return bus.NewRedis(client, bus.WithKeyPrefix(prefix), bus.WithPollInterval(20*time.Millisecond))
+	opts = append([]bus.Option{bus.WithKeyPrefix(prefix), bus.WithPollInterval(20 * time.Millisecond)}, opts...)
+	return bus.NewRedis(client, opts...)
 }
 
 // tap is a real broker with a record of everything published to it. The stop
@@ -117,22 +121,79 @@ func (s *spied) offered() [][]string {
 	return out
 }
 
+// durableLedger is the run ledger as a deployment builds it: the ledger plus
+// the point read a result poll uses.
+type durableLedger interface {
+	ledger.Ledger
+	ledger.RunGetter
+}
+
+var durableSchemas atomic.Uint64
+
+// newDurable returns an empty run ledger and queue: mandatum's Postgres schema
+// (pkg/durable) in a schema of its own when $MANDATUM_POSTGRES_TEST_URL is set,
+// duraturo's in-memory ones otherwise. It is the ledger a stop is recorded in.
+func newDurable(t *testing.T) (durableLedger, dqueue.Queue) {
+	t.Helper()
+	url := os.Getenv(threadsEnv)
+	if url == "" {
+		return ledger.NewMemory(), dqueue.NewMemory()
+	}
+	ctx := context.Background()
+	schema := fmt.Sprintf("mandatumtest_stop_%d_%d", time.Now().UnixNano(), durableSchemas.Add(1))
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse $%s: %v", threadsEnv, err)
+	}
+	cfg.MaxConns = 8
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	ident := pgx.Identifier{schema}.Sanitize()
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA "+ident); err != nil {
+		pool.Close()
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DROP SCHEMA "+ident+" CASCADE")
+		pool.Close()
+	})
+	lgr, q, err := durable.Open(ctx, pool)
+	if err != nil {
+		t.Fatalf("durable.Open: %v", err)
+	}
+	return lgr, q
+}
+
 // world is the storage several runtimes share: one ledger, one queue, one bus,
 // one journal. Two runtimes over one world are two workers of one deployment.
+//
+// Runtimes record stop requests in the ledger, as a deployment's do, unless
+// busOnly is set, which is a host that never passed WithStopLedger.
 type world struct {
-	ledger  *ledger.Memory
-	queue   *dqueue.Memory
+	ledger  durableLedger
+	queue   dqueue.Queue
 	bus     *tap
 	specs   *specs
 	threads *spied
+	busOnly bool
 }
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
+	return newWorldOn(t, newBroker(t))
+}
+
+// newWorldOn is newWorld over a given bus, for a test about that bus's bounds.
+func newWorldOn(t *testing.T, b bus.Bus) *world {
+	t.Helper()
+	lgr, q := newDurable(t)
 	w := &world{
-		ledger:  ledger.NewMemory(),
-		queue:   dqueue.NewMemory(),
-		bus:     &tap{Bus: newBroker(t)},
+		ledger:  lgr,
+		queue:   q,
+		bus:     &tap{Bus: b},
 		specs:   newSpecs(),
 		threads: &spied{Store: newThreads(t)},
 	}
@@ -140,9 +201,21 @@ func newWorld(t *testing.T) *world {
 	return w
 }
 
+// restarted is the same durable state behind a new process: the ledger, the
+// queue and the journal survive, and the in-memory bus does not.
+func (w *world) restarted() *world {
+	again := *w
+	again.bus = &tap{Bus: bus.NewMemory()}
+	return &again
+}
+
 func (w *world) runtime(t *testing.T, exec runtime.Executor, opts ...runtime.Option) *runtime.Runtime {
 	t.Helper()
-	opts = append([]runtime.Option{runtime.WithThreads(w.threads)}, opts...)
+	base := []runtime.Option{runtime.WithThreads(w.threads)}
+	if !w.busOnly {
+		base = append(base, runtime.WithStopLedger(w.ledger))
+	}
+	opts = append(base, opts...)
 	rt, err := runtime.New(duraturo.New(w.ledger, w.queue), w.specs, w.bus, exec, opts...)
 	if err != nil {
 		t.Fatalf("runtime.New: %v", err)
@@ -213,6 +286,10 @@ type patient struct {
 	// deaf makes the turn ignore the stop signal, as an executor written
 	// before stopping existed would.
 	deaf bool
+	// patience, when set, is how long a turn waits for a stop before it
+	// finishes on its own: long enough for a request the bus holds to
+	// arrive, short enough that a lost one shows as a completed run.
+	patience time.Duration
 
 	mu       sync.Mutex
 	runs     int
@@ -254,7 +331,13 @@ func (p *patient) Execute(ctx context.Context, req runtime.Request, emit func(co
 		signal = runtime.StopSignal(ctx)
 	}
 	partial := strings.Join(p.says, "")
+	var timeout <-chan time.Time
+	if p.patience > 0 {
+		timeout = time.After(p.patience)
+	}
 	select {
+	case <-timeout:
+		return runtime.Outcome{Text: partial + " and the rest.", Prompt: req.Text, Chunks: len(p.says)}, nil
 	case stop := <-signal:
 		return runtime.Outcome{Text: partial, Prompt: req.Text, Chunks: len(p.says), Stopped: &stop}, nil
 	case <-p.finish:
@@ -364,8 +447,10 @@ func stoppedBody(t *testing.T, e envelope.Event) payload.Stopped {
 	return body
 }
 
-// ended asserts that a run's stream ends with exactly one stopped event and
-// carries no completed or failed event anywhere, and returns that event.
+// ended asserts that a run's stream ends with exactly one stopped event, that
+// it carries no completed event and no terminal failure anywhere, and returns
+// the stopped event. A failure that was retried may precede the stop: a stop
+// between two attempts follows exactly that.
 func ended(t *testing.T, events []envelope.Event) envelope.Event {
 	t.Helper()
 	kinds := kindsOf(events)
@@ -379,6 +464,11 @@ func ended(t *testing.T, events []envelope.Event) envelope.Event {
 			stopped++
 		case envelope.KindCompleted:
 			t.Fatalf("a stopped run published lifecycle.completed: %v", kinds)
+		case envelope.KindFailed:
+			body, err := payload.Decode[payload.Lifecycle](e)
+			if err != nil || body.Terminal {
+				t.Fatalf("a stopped run published a terminal lifecycle.failed: %v", kinds)
+			}
 		}
 	}
 	if stopped != 1 {
@@ -605,8 +695,8 @@ func TestAStopBeforeTheTurnStartsStopsARealTurn(t *testing.T) {
 	if out.Stopped == nil {
 		t.Fatalf("Output = %+v: the early request was lost", out)
 	}
-	if n := len(model.asked()); n > 1 {
-		t.Errorf("the model was called %d times", n)
+	if n := len(model.asked()); n != 0 {
+		t.Errorf("the model was called %d times; a recorded stop ends the turn before it starts", n)
 	}
 	want := []string{"user: explain the outage", "assistant: [This turn was stopped before it finished.]"}
 	if got := said(journal(t, w.threads, thread.KeyOf(tg))); !reflect.DeepEqual(got, want) {
@@ -922,6 +1012,7 @@ func TestStopRefusesWhatItCannotCarry(t *testing.T) {
 // text is bounded.
 func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testing.T) {
 	w := newWorld(t)
+	w.busOnly = true // with a ledger, a request for a run it does not hold is not published
 	rt := w.runtime(t, newPatient())
 	long := strings.Repeat("é", runtime.MaxStopText)
 	w.stop(t, rt, "acme", "r0123", "  spread\nover   lines ", long)
@@ -931,8 +1022,15 @@ func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testin
 		t.Fatalf("published %d events, want the request alone", len(events))
 	}
 	e := events[0]
-	if got, want := e.Topic.String(), "agent:_control:stop-r0123"; got != want {
-		t.Errorf("topic = %q, want %q", got, want)
+	want, err := runtime.StopTopic("acme", "r0123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Topic.String() != want.String() || !strings.HasPrefix(e.Topic.String(), "agent:_control:stop-") {
+		t.Errorf("topic = %q, want %q", e.Topic, want)
+	}
+	if other, _ := runtime.StopTopic("globex", "r0123"); other.String() == want.String() {
+		t.Error("two tenants' requests for one run id share a stream")
 	}
 	if !e.Topic.IsControl() || e.Kind != envelope.KindStop || e.Tenant != "acme" {
 		t.Errorf("event = topic %s kind %s tenant %q", e.Topic, e.Kind, e.Tenant)
@@ -944,7 +1042,7 @@ func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body.RunID != "r0123" || body.Reason != "spread over lines" {
+	if body.RunID != "r0123" || body.Reason != "spread over lines" || body.At.IsZero() {
 		t.Errorf("body = %+v", body)
 	}
 	if len(body.By) > runtime.MaxStopText || !strings.HasPrefix(long, body.By) || body.By == "" {

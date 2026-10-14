@@ -2,6 +2,10 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -26,28 +30,66 @@ import (
 //
 // The process that is asked to stop a run is usually not the one executing it:
 // a deployment has several workers, and the one that leased the run is known
-// only to the queue. So a stop is not a call into a worker. It is an event,
-// published on the bus every process already shares, and the attempt executing
-// the run subscribes to it for as long as the turn lasts.
+// only to the queue. So a stop is not a call into a worker. It is recorded on
+// the run in the ledger every worker reads (the truth), and then published on
+// the bus every process shares (the fast path), where the attempt executing
+// the run listens for as long as its turn lasts.
 //
 // The request does not travel on the run's own topic. That topic has one
 // writer, the attempt, which chooses its own sequence numbers (see seq.go),
 // and the bus keeps the first write of a sequence: a second writer would land
 // on numbers the attempt is about to use and displace its events. The request
-// goes to the run's control topic instead (StopTopic), a stream of its own
-// that is addressable from the run id alone.
+// goes to a stop stream of its own instead (StopTopic), keyed by the asker's
+// tenant and the run id, so that one tenant's requests never share a stream
+// with another's.
 //
-// The bus retains a stream, and a subscription starts with what is retained.
-// That one property is what settles every ordering of a request and an
-// attempt:
+// # A request that arrives before the turn
 //
-//	before the turn starts   the request is waiting when the attempt
-//	                         subscribes, and the turn stops before it calls
-//	                         a model
+// The bus is the fast path, and it only reaches a turn that is listening. A
+// request made before an attempt exists (the run is queued, or between two
+// attempts) has to wait for one, and it waits in two places:
+//
+//   - The run's ledger, when the runtime has one (WithStopLedger). Stop writes
+//     the request as an event record on the run, "event:mandatum.stop#0",
+//     after checking that the run exists, belongs to the asker's tenant and
+//     has not ended. Every attempt reads the ledger before its turn starts,
+//     and a recorded request ends the turn before the executor is called. The
+//     record is write-once, so the first request recorded is the one obeyed.
+//     This is the durable path: nothing evicts it.
+//   - The bus. A subscription starts with what the bus retains, so an attempt
+//     also finds a request published before it subscribed. This is what a
+//     deployment without WithStopLedger relies on, and it is bounded (see
+//     "How long the bus keeps a request" below).
+//
+// Together they settle every ordering of a request and an attempt:
+//
+//	before the turn starts   recorded, or retained: the attempt ends the turn
+//	                         before calling a model
 //	while the turn runs      the request is delivered live
-//	between two attempts     the request is waiting for the next attempt,
-//	                         which stops as the first would have
-//	after the run ended      nobody subscribes again, and nothing happens
+//	between two attempts     recorded, or retained: the next attempt stops
+//	after the run ended      not recorded (the run has ended), and nobody
+//	                         subscribes again: nothing happens
+//
+// # How long the bus keeps a request
+//
+// A request is retained under its own stream, the topic StopTopic returns. It
+// does not share the run's stream, so a chatty run cannot push it out. That
+// stream is bounded like any other:
+//
+//   - Depth: it keeps the newest bus.WithRetention requests (1024 by default).
+//     Only the run's own tenant writes to it, and the newest requests are the
+//     ones kept, so depth never loses a stop; it decides which reason is read.
+//   - Memory: the in-memory bus keeps the bus.WithMaxRuns streams (4096 by
+//     default) written to most recently, counting run streams and control
+//     streams alike. A pending request is lost once that many other streams
+//     have been written to since it was published, the run's own among them.
+//   - Redis: a run-scoped subscription reads the stream key directly, so the
+//     discovery index and its TTL do not apply. The key has no expiry; it
+//     lasts until Redis evicts or loses it.
+//
+// Without WithStopLedger a lost request means the run finishes as though
+// nobody had asked. With it, the bound only decides whether the request is
+// also delivered by the fast path.
 //
 // # Why it is the agent activity that listens
 //
@@ -57,6 +99,18 @@ import (
 // agent activity listens, and what it returns (a stopped Outcome, or an
 // ordinary one) is recorded like any other result. A replay reads the record
 // and makes the same decision, whatever has been requested since.
+//
+// # The commit point: stopped means cut short
+//
+// A turn that returned its whole answer completed, whether or not a request
+// was on its way: "stopped" means cut short, and the agent loop is the judge
+// of that (saige reports a turn it wrapped up, and does not report one that
+// finished first). So, with WithStopLedger, once Stop has returned nil for a
+// live run of the asker's: no attempt starts its turn, a running turn is asked
+// to wrap up (over the bus at once, or at the next ledger poll), and the run
+// ends stopped unless its turn finished its answer before the request took
+// effect, in which case it ends completed. Exactly one outcome is recorded,
+// and the journal, the terminal event and Result are all built from it.
 //
 // # What a stopped run is
 //
@@ -81,6 +135,21 @@ import (
 // particular stop (who, when, why) may reach it.
 const StopMarker = "[This turn was stopped before it finished.]"
 
+// DefaultStopPoll is how often a running turn reads the ledger for a stop
+// request, when the runtime has one (WithStopLedger). It bounds how long a
+// request the bus failed to deliver takes to reach the turn.
+const DefaultStopPoll = 2 * time.Second
+
+// WithStopPoll sets how often a running turn reads the ledger for a stop
+// request (default DefaultStopPoll). It has no effect without WithStopLedger.
+func WithStopPoll(d time.Duration) Option {
+	return func(r *Runtime) {
+		if d > 0 {
+			r.stopPoll = d
+		}
+	}
+}
+
 // DefaultStopGrace is how long a turn is given to wrap up after it has been
 // asked to stop, before it is cancelled.
 const DefaultStopGrace = 10 * time.Second
@@ -92,9 +161,59 @@ const MaxStopText = 512
 // stopVerb names the stop stream within a run's control topics.
 const stopVerb = "stop"
 
+// stopRecordKey is the ledger record a stop request is written to. It has the
+// shape of a duraturo event record, which is the kind of record the ledger
+// expects to be written from outside a run.
+const (
+	stopRecordName = "mandatum.stop"
+	stopRecordKey  = "event:" + stopRecordName + "#0"
+)
+
+// StopLedger is the part of a duraturo ledger a stop is recorded in: a point
+// load of a run with its records, and a write-once record. Every
+// ledger.Ledger implements it.
+type StopLedger interface {
+	Load(ctx context.Context, runID string) (run.Run, []run.Record, error)
+	Record(ctx context.Context, rec run.Record) (run.Record, error)
+}
+
+// WithStopLedger records stop requests in the run ledger as well as
+// publishing them, so a request made before a turn starts is honoured however
+// long the turn takes to start. Pass the ledger the runtime's duraturo client
+// uses. See "A request that arrives before the turn" in stop.go.
+//
+// Without it a request that waits for a turn is held only by the bus, and is
+// lost if the bus forgets it first.
+func WithStopLedger(l StopLedger) Option {
+	return func(r *Runtime) { r.stops = l }
+}
+
 // stopRetry is how long a turn waits before listening again after its
 // subscription to the control topic failed.
 const stopRetry = 250 * time.Millisecond
+
+// ErrStopped is the cause of a context cancelled because the run it belongs to
+// was stopped. A Delegator reads it with context.Cause and errors.Is, which is
+// how it tells a stop apart from a worker shutting down.
+var ErrStopped = errors.New("runtime: the run was stopped")
+
+// StoppedError is the cause a Delegator's context ends with when the parent's
+// turn was stopped: who asked and why, so the host can stop the run it started
+// for the delegation with the same words. It matches ErrStopped.
+type StoppedError struct {
+	Reason string
+	By     string
+}
+
+func (e *StoppedError) Error() string {
+	if e.Reason == "" {
+		return ErrStopped.Error()
+	}
+	return ErrStopped.Error() + ": " + e.Reason
+}
+
+// Unwrap makes a StoppedError match ErrStopped.
+func (e *StoppedError) Unwrap() error { return ErrStopped }
 
 // ErrStopUnavailable reports a runtime that cannot carry stop requests: its
 // bus can be published to and not subscribed to, so no turn it executes could
@@ -136,10 +255,28 @@ func WithStopGrace(d time.Duration) Option {
 	}
 }
 
-// StopTopic is where requests to stop a run are published and where the
-// attempt executing it listens: agent:_control:stop-<run>.
-func StopTopic(runID string) (topic.Topic, error) {
-	return topic.Control(stopVerb, runID)
+// StopTopic is where a tenant's requests to stop a run are published and where
+// the attempt executing that run, if it is the tenant's, listens:
+// agent:_control:stop-<key>, the key a hash of the tenant and the run id.
+//
+// The tenant is part of the address so that one tenant's requests can never
+// land in the stream another tenant's run listens on. A run id is a hash of a
+// tenant and a tag id anyone can compute; without the tenant here, a tenant
+// could publish enough requests for another tenant's run to push that tenant's
+// own request out of the stream before the run read it. The tenant a request
+// is published under is the caller's credential's, never something the caller
+// chooses, so the stream a request lands in is fixed by who asked.
+func StopTopic(tenant, runID string) (topic.Topic, error) {
+	if _, err := topic.Run("probe", runID); err != nil {
+		return topic.Topic{}, err
+	}
+	h := sha256.New()
+	var n [binary.MaxVarintLen64]byte
+	for _, field := range []string{tenant, runID} {
+		h.Write(n[:binary.PutUvarint(n[:], uint64(len(field)))])
+		h.Write([]byte(field))
+	}
+	return topic.Control(stopVerb, hex.EncodeToString(h.Sum(nil)[:16]))
 }
 
 // Stop asks a run to stop.
@@ -162,24 +299,62 @@ func StopTopic(runID string) (topic.Topic, error) {
 //
 // which is what makes it safe to call twice and impossible to probe with.
 //
+// With WithStopLedger (which a deployment should always pass) the ledger
+// decides. The request is recorded on the run and then published, but only if
+// the run is in that ledger, is the asker's tenant's, and has not ended.
+// Otherwise nothing is written anywhere and the call still returns nil. The
+// ledger must therefore be the one the runs execute from, as it is when it is
+// shared Postgres or when one process accepts and executes. A ledger that
+// cannot be read or written fails the call, so the caller retries; that is
+// the only error that can depend on the run, and it is only ever seen by the
+// run's own tenant.
+//
+// From the moment Stop returns nil for such a run, no attempt of it starts a
+// turn, a running turn is asked to wrap up (at once over the bus, or within
+// the stop poll interval if the bus lost the request), and the run ends
+// stopped, unless its turn finished its answer before the request took
+// effect, in which case it ends completed. See "The commit point" in stop.go.
+//
+// Without WithStopLedger the request is published unconditionally, to the
+// asker's own stream for the run, and is as durable as the bus (see "How long
+// the bus keeps a request").
+//
+// An empty reason becomes DefaultStopReason here, once, so every path a stop
+// can take reports the same words.
+//
 // It returns ErrInvalid for a request that names no run and
-// ErrStopUnavailable when this runtime's bus cannot be subscribed to.
+// ErrStopUnavailable when this runtime's bus cannot be subscribed to and it
+// has no ledger to record in.
 func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
-	if r.control == nil {
+	if r.control == nil && r.stops == nil {
 		return fmt.Errorf("%w: the bus this runtime was built with cannot be subscribed to", ErrStopUnavailable)
 	}
 	req.RunID = strings.TrimSpace(req.RunID)
-	tp, err := StopTopic(req.RunID)
+	tp, err := StopTopic(req.Tenant, req.RunID)
 	if err != nil {
 		return fmt.Errorf("%w: stop: %w", ErrInvalid, err)
 	}
+	reason := clip(req.Reason)
+	if reason == "" {
+		reason = agentrt.DefaultStopReason
+	}
+	at := r.now().UTC()
 	body, err := payload.Encode(payload.StopRequest{
 		RunID:  req.RunID,
-		Reason: clip(req.Reason),
+		Reason: reason,
 		By:     clip(req.By),
+		At:     at,
 	})
 	if err != nil {
 		return fmt.Errorf("runtime: stop %s: %w", req.RunID, err)
+	}
+	if r.stops != nil {
+		owned, err := r.recordStop(ctx, req.Tenant, req.RunID, body)
+		if err != nil || !owned {
+			// Not the asker's run to stop, or not one that is still going:
+			// nothing is published, and the answer is the same nil.
+			return err
+		}
 	}
 	// Seq is left for the bus to assign: this stream has many writers and
 	// none of them replays.
@@ -190,12 +365,128 @@ func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
 		Agent:   topic.ControlName,
 		Kind:    envelope.KindStop,
 		Payload: body,
-		At:      r.now().UTC(),
+		At:      at,
 	}
 	if err := r.bus.Publish(ctx, e); err != nil {
 		return fmt.Errorf("runtime: stop %s: %w", req.RunID, err)
 	}
 	return nil
+}
+
+// recordStop writes a stop request on its run in the ledger and reports
+// whether the run is one the request may reach: in the ledger, the asker's
+// tenant's, and not ended. Anything else writes nothing and is not an error.
+//
+// The record is write-once, so a run asked twice keeps the first request and
+// still reports true: the bus message for the second is harmless, since the
+// run honours the first request it hears. Records are only written for runs that exist, so the ledger
+// holds at most one per run and lives exactly as long as the run's own
+// records do.
+func (r *Runtime) recordStop(ctx context.Context, tenant, runID string, body []byte) (bool, error) {
+	rec, _, err := r.stops.Load(ctx, runID)
+	switch {
+	case errors.Is(err, run.ErrNotFound):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("runtime: stop %s: read the run: %w", runID, err)
+	}
+	if rec.Status.Terminal() {
+		return false, nil
+	}
+	var in Input
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+		// Not a run of this runtime's, or not the asker's.
+		return false, nil
+	}
+	_, err = r.stops.Record(ctx, run.Record{
+		RunID: runID, Key: stopRecordKey, Kind: run.KindEvent, Name: stopRecordName,
+		Codec: "application/json", Status: run.RecordOK, Output: body,
+	})
+	switch {
+	case err == nil, errors.Is(err, run.ErrAlreadyRecorded):
+		return true, nil
+	case errors.Is(err, run.ErrNotFound):
+		return false, nil
+	default:
+		return false, fmt.Errorf("runtime: stop %s: record the request: %w", runID, err)
+	}
+}
+
+// StopRecord is a stop request as the ledger holds it.
+type StopRecord struct {
+	Reason string
+	By     string
+	At     time.Time
+}
+
+// StopRequested reports the stop request recorded on a run of tenant's, for a
+// host that holds the runtime and wants to say whether it has been asked
+// without keeping that state itself. It is not for the public edge: unlike
+// Stop it does distinguish a run that was asked from one that was not.
+//
+// A run that does not exist and a run of another tenant both report false,
+// so a host can only ever learn about its own tenant's runs. It returns
+// ErrStopUnavailable without WithStopLedger.
+func (r *Runtime) StopRequested(ctx context.Context, tenant, runID string) (StopRecord, bool, error) {
+	if r.stops == nil {
+		return StopRecord{}, false, fmt.Errorf("%w: no stop ledger", ErrStopUnavailable)
+	}
+	rec, records, err := r.stops.Load(ctx, runID)
+	switch {
+	case errors.Is(err, run.ErrNotFound):
+		return StopRecord{}, false, nil
+	case err != nil:
+		return StopRecord{}, false, fmt.Errorf("runtime: stop state of %s: %w", runID, err)
+	}
+	var in Input
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+		return StopRecord{}, false, nil
+	}
+	for _, record := range records {
+		if record.Key != stopRecordKey || record.Status != run.RecordOK {
+			continue
+		}
+		var body payload.StopRequest
+		if err := json.Unmarshal(record.Output, &body); err != nil || body.RunID != runID {
+			continue
+		}
+		at := body.At
+		if at.IsZero() {
+			at = record.RecordedAt
+		}
+		return StopRecord{Reason: body.Reason, By: body.By, At: at}, true, nil
+	}
+	return StopRecord{}, false, nil
+}
+
+// recordedStop reports a stop request recorded on the run in the ledger.
+//
+// It is read at the start of the agent activity, whose result is memoized, so
+// the answer it gives is recorded with that result and a replay does not ask
+// again. A ledger that cannot be read is logged and treated as no request:
+// the bus is still listening, and refusing to run because a read failed
+// would turn a ledger hiccup into a failed run.
+func (r *Runtime) recordedStop(ctx context.Context, runID string) (agentrt.Stop, bool) {
+	if r.stops == nil {
+		return agentrt.Stop{}, false
+	}
+	_, records, err := r.stops.Load(ctx, runID)
+	if err != nil {
+		r.logger.Warn("mandatum/runtime: could not read recorded stop requests; relying on the bus",
+			"run_id", runID, "error", err)
+		return agentrt.Stop{}, false
+	}
+	for _, rec := range records {
+		if rec.Key != stopRecordKey || rec.Status != run.RecordOK {
+			continue
+		}
+		var body payload.StopRequest
+		if err := json.Unmarshal(rec.Output, &body); err != nil || body.RunID != runID {
+			continue
+		}
+		return agentrt.Stop{Reason: body.Reason, By: body.By}, true
+	}
+	return agentrt.Stop{}, false
 }
 
 // clip trims free text from a stop request and bounds it, on a rune boundary.
@@ -239,9 +530,26 @@ func StopSignal(ctx context.Context) <-chan agentrt.Stop {
 // rougher route, and is reported as stopped with the text it had published.
 // Retrying it would restart work a person asked to end.
 func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
-	if r.control == nil {
+	// A request recorded before this attempt began ends the turn before it
+	// starts: no executor, no model call.
+	if stop, ok := r.recordedStop(ctx, req.RunID); ok {
+		return Outcome{Prompt: agentrt.RequestText(req.Text, req.Meta), Stopped: &stop, StopRecorded: true}, nil
+	}
+	if r.control == nil && r.stops == nil {
 		return r.exec.Execute(ctx, req, emit)
 	}
+	out, err := r.executeListening(ctx, in, req, emit)
+	if err == nil && r.stops != nil {
+		// Whichever way the turn ended, a request recorded on the run is
+		// claimed by the workflow body, so the ledger keeps no record that
+		// no call read. Stopped or not, the outcome is already decided.
+		_, out.StopRecorded = r.recordedStop(ctx, req.RunID)
+	}
+	return out, err
+}
+
+// executeListening is execute for a runtime that can hear a stop request.
+func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
 
 	requests, release := r.listen(ctx, in, req.RunID)
 	defer release()
@@ -258,6 +566,17 @@ func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(
 	)
 	returned := make(chan struct{})
 	relayed := make(chan struct{})
+	// settle ends the relay and waits for it. It is deferred as well as
+	// called, so an executor that panics leaves no goroutine behind: the
+	// worker recovers the panic, and nothing else would ever close returned.
+	var settled sync.Once
+	settle := func() {
+		settled.Do(func() {
+			close(returned)
+			<-relayed
+		})
+	}
+	defer settle()
 	go func() {
 		defer close(relayed)
 		var stop agentrt.Stop
@@ -296,15 +615,15 @@ func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(
 		}
 		return nil
 	})
-	close(returned)
-	<-relayed
+	settle()
 
 	mu.Lock()
 	defer mu.Unlock()
 	switch {
 	case err == nil:
-		// Stopped or not, the executor's account stands. A turn that finished
-		// before the request took effect completed, and is reported so.
+		// The executor's account stands. A turn that returned its whole
+		// answer before the request took effect completed: "stopped" means
+		// cut short, and an answer that was finished was not.
 		return out, nil
 	case asked == nil:
 		return out, err
@@ -316,59 +635,94 @@ func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(
 	}
 	r.logger.Warn("mandatum/runtime: turn ended with an error after a stop request; the run ends stopped",
 		"run_id", req.RunID, "error", err)
-	return Outcome{Text: said.String(), Chunks: chunks, Stopped: asked}, nil
+	// The executor never said what it sent, so the request is recorded as the
+	// agent renders it before retrieval: the same words a turn stopped before
+	// it began records.
+	return Outcome{
+		Text: said.String(), Chunks: chunks, Stopped: asked,
+		Prompt: firstNonEmpty(out.Prompt, agentrt.RequestText(req.Text, req.Meta)),
+	}, nil
 }
 
-// listen subscribes to the run's control topic and returns a channel that
-// receives the first stop request the run should honour. release ends the
-// subscription and waits for it to be gone.
+// listen returns a channel that receives the first stop request the run
+// should honour, from whichever of two sources has it first, and a release
+// that ends both and waits for them.
 //
-// A request is honoured only if it was made under the run's own tenant. The
-// bus addresses and does not authorize, so this comparison is the whole of the
-// isolation: a request stamped with another tenant is skipped as though it had
-// never been published, and nothing is ever said back to whoever sent it.
+//   - The bus: the run's control topic, subscribed from the beginning of what
+//     the bus retains, every time. That delivers a request made before this
+//     attempt existed, and makes resubscribing after a failure free of
+//     bookkeeping: only the first matching request matters.
+//   - The ledger, when the runtime has one: polled every stop poll interval,
+//     so a request the bus lost still reaches a turn that is running.
 //
-// The subscription starts from the beginning of what the bus retains, every
-// time. That is what delivers a request made before this attempt existed, and
-// it makes resubscribing after a failure free of bookkeeping: only the first
-// matching request matters, and reading it twice is reading it once.
+// A bus request is honoured only if it was made under the run's own tenant.
+// The bus addresses and does not authorize, so this comparison is the whole of
+// the isolation: a request stamped with another tenant is skipped as though it
+// had never been published. A ledger request was checked against the run's
+// tenant before it was written.
 func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan agentrt.Stop, func()) {
 	out := make(chan agentrt.Stop, 1)
-	tp, err := StopTopic(runID)
-	if err != nil {
-		// Accept built this run's own topic from the same id, so this cannot
-		// happen; a run that cannot be stopped is better than one that cannot
-		// start.
-		r.logger.Error("mandatum/runtime: stop topic is invalid", "run_id", runID, "error", err)
-		return out, func() {}
+	var once sync.Once
+	deliver := func(stop agentrt.Stop) {
+		once.Do(func() { out <- stop }) // buffered, and only one send happens
 	}
-	sub := envelope.Subscription{Topic: tp, Filter: envelope.Filter{Kinds: []string{string(envelope.KindStop)}}}
 
 	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for ctx.Err() == nil {
-			stop, ok, err := r.firstStop(ctx, sub, in.Tag.Tenant, runID)
-			if ok {
-				out <- stop // buffered, and this is the only send
-				return
-			}
-			if ctx.Err() != nil {
-				return
-			}
-			r.logger.Warn("mandatum/runtime: lost the stop subscription; listening again",
-				"run_id", runID, "error", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(stopRetry):
-			}
+	var wg sync.WaitGroup
+	if r.control != nil {
+		tp, err := StopTopic(in.Tag.Tenant, runID)
+		if err != nil {
+			// Accept built this run's own topic from the same id, so this
+			// cannot happen; a run that cannot be stopped is better than one
+			// that cannot start.
+			r.logger.Error("mandatum/runtime: stop topic is invalid", "run_id", runID, "error", err)
+		} else {
+			sub := envelope.Subscription{Topic: tp, Filter: envelope.Filter{Kinds: []string{string(envelope.KindStop)}}}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for ctx.Err() == nil {
+					stop, ok, err := r.firstStop(ctx, sub, in.Tag.Tenant, runID)
+					if ok {
+						deliver(stop)
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					r.logger.Warn("mandatum/runtime: lost the stop subscription; listening again",
+						"run_id", runID, "error", err)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(stopRetry):
+					}
+				}
+			}()
 		}
-	}()
+	}
+	if r.stops != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tick := time.NewTicker(r.stopPoll)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+				}
+				if stop, ok := r.recordedStop(ctx, runID); ok {
+					deliver(stop)
+					return
+				}
+			}
+		}()
+	}
 	return out, func() {
 		cancel()
-		<-done
+		wg.Wait()
 	}
 }
 

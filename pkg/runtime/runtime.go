@@ -83,10 +83,11 @@
 //
 // # A run can be stopped
 //
-// Stop asks a run to end before it has finished. The request travels on the
-// bus, the attempt executing the run hears it, and the run ends with
-// lifecycle.stopped: over, not failed, never retried, and remembered by its
-// thread with what it had said so far. See stop.go.
+// Stop asks a run to end before it has finished. The request is recorded on
+// the run in the ledger and announced on the bus, the attempt executing the run
+// hears it, and the run ends with lifecycle.stopped: over, not failed, never
+// retried, and remembered by its thread with what it had said so far. See
+// stop.go.
 //
 // # Single goroutine
 //
@@ -257,9 +258,6 @@ type Request struct {
 	// Service is set by the Sandbox: the legatus deployment this turn runs
 	// in, so a delegated sub-task can be awaited in the right place.
 	Service string `json:"service,omitempty"`
-	// SubTask is set by the Sandbox on a delegated sub-task, which has no
-	// run id: the key the turn waiting on it can cancel it by.
-	SubTask string `json:"sub_task,omitempty"`
 }
 
 // Agent returns the agent name.
@@ -294,6 +292,11 @@ type Outcome struct {
 	// executor sets it instead of returning an error: a stopped turn must not
 	// be retried.
 	Stopped *agentrt.Stop `json:"stopped,omitempty"`
+	// StopRecorded is set by the runtime, never by an executor: a stop
+	// request is recorded on the run in the ledger (see WithStopLedger),
+	// whether or not the turn was stopped by it, so the workflow body claims
+	// that record and the ledger has no record left over that no call read.
+	StopRecorded bool `json:"stop_recorded,omitempty"`
 }
 
 // Acceptance is what a caller learns when a tag is accepted. It mirrors
@@ -373,7 +376,9 @@ type Runtime struct {
 	// control is the bus as something to subscribe to, which is how a turn
 	// hears a stop request. Nil when the bus can only be published to.
 	control   Subscriber
+	stops     StopLedger
 	stopGrace time.Duration
+	stopPoll  time.Duration
 
 	registry *run.Registry
 	turn     *duraturo.ActivityFn[Input, Output]
@@ -478,6 +483,7 @@ func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Opt
 		registry: run.NewRegistry(),
 
 		stopGrace: DefaultStopGrace,
+		stopPoll:  DefaultStopPoll,
 	}
 	// Stopping needs the reading half of the bus. It is discovered rather
 	// than configured, as a connector's roles are: every backend in pkg/bus
@@ -485,6 +491,12 @@ func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Opt
 	r.control, _ = b.(Subscriber)
 	for _, o := range opts {
 		o(r)
+	}
+	if r.control == nil {
+		// Said once, here, rather than discovered at the first stop: a bus
+		// wrapper that only forwards Publish quietly removes the fast path.
+		r.logger.Warn("mandatum/runtime: the bus cannot be subscribed to, so a running turn hears a stop only through the ledger poll",
+			"stop_ledger", r.stops != nil)
 	}
 	r.turn = duraturo.ActivityIn(r.registry, ActivityTurn, r.runTurn)
 	r.agent = duraturo.ActivityIn(r.registry, ActivityAgent, r.runAgent)
@@ -634,6 +646,16 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		return Output{}, err
 	}
 
+	if out.StopRecorded {
+		// Claim the request the ledger holds, so the run ends with no record
+		// that no call read. The outcome says it exists, and records are
+		// never removed, so this never waits; if it fails the outcome stands
+		// regardless, so it is only logged.
+		if _, err := duraturo.Event[json.RawMessage](ctx, stopRecordName); err != nil {
+			r.logger.Warn("mandatum/runtime: could not claim the recorded stop request",
+				"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
+		}
+	}
 	if out.Stopped != nil {
 		// The run is over and nothing failed. Returning a result rather than
 		// an error is what tells the ledger so: it records the run as ended

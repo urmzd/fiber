@@ -3,15 +3,24 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
+	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	"github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect"
 	"github.com/urmzd/mandatum/internal/server"
 	"github.com/urmzd/mandatum/pkg/address"
 	"github.com/urmzd/mandatum/pkg/agentspec"
 	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/mandatum/pkg/runtime"
 )
 
 // inbox is a sink that records what was delivered where.
@@ -218,10 +227,101 @@ func TestAStopThroughTheCoreEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read run: %v", err)
 	}
-	if run.Status != server.StatusStopped {
-		t.Errorf("run status = %q, want %q", run.Status, server.StatusStopped)
+	if run.Status != server.StatusStopped || run.StopReason != "Stopped by a user" || run.StoppedBy != "slack:U1" {
+		t.Errorf("run = status %q reason %q by %q, want stopped by slack:U1", run.Status, run.StopReason, run.StoppedBy)
 	}
 	if _, err := c.Run(ctx, "globex", acc.RunID); err == nil {
 		t.Error("another tenant could read the run")
+	}
+}
+
+// The edge in front of the real runtime: a stop for the caller's own run, for
+// another tenant's run, and for a run that does not exist are answered with
+// the same status and the same body, and only the first one does anything. The
+// stopped run is then read back through GetRun as stopped, with why and who.
+func TestTheStopRouteIsUniformAndGetRunReadsTheRunAsStopped(t *testing.T) {
+	c, err := newCore(coreConfig{Tenant: "acme", Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatalf("newCore: %v", err)
+	}
+	t.Cleanup(func() { _ = c.close() })
+	auth, err := server.NewTokens(map[string]server.Identity{
+		"tok-acme":   {Tenant: "acme", Subject: "ada"},
+		"tok-globex": {Tenant: "globex", Subject: "mallory"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := server.New(server.Config{Auth: auth, Bus: c.broker, Invoker: c, Runs: c, Stopper: c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpSrv := httptest.NewServer(srv.Handler())
+	t.Cleanup(httpSrv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var g group
+	t.Cleanup(func() {
+		cancel()
+		_ = g.wait(10 * time.Second)
+	})
+	spec := agentspec.AgentSpec{Name: "docs-bot", Model: "m", Provider: agentspec.ProviderOffline, SystemPrompt: "Answer."}
+	if _, err := c.store.Create(ctx, "acme", spec, "test"); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	acc, err := c.Invoke(ctx, envelope.Tag{ID: "Ev-1", Tenant: "acme", Agent: "docs-bot", Origin: "test", Text: "explain", At: time.Now()})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+
+	post := func(runID, token string) string {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, httpSrv.URL+"/v1/runs/"+runID+"/stop", strings.NewReader(`{"reason":"wrong repo","by":"someone-else"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(server.HeaderAuthorization, "Bearer "+token)
+		res, err := httpSrv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = res.Body.Close() }()
+		body, _ := io.ReadAll(res.Body)
+		return fmt.Sprintf("%d %s", res.StatusCode, strings.ReplaceAll(string(body), runID, "<id>"))
+	}
+	unknown := runtime.RunID("acme", "never")
+	foreign := post(acc.RunID, "tok-globex")
+	missing := post(unknown, "tok-acme")
+	own := post(acc.RunID, "tok-acme")
+	if own != foreign || own != missing || !strings.HasPrefix(own, "202 ") {
+		t.Fatalf("answers differ: own %q, another tenant %q, unknown %q", own, foreign, missing)
+	}
+
+	c.startExecution(ctx, &g)
+	runs := mandatumv1connect.NewInvokeServiceClient(httpSrv.Client(), httpSrv.URL)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		req := connect.NewRequest(&mandatumv1.GetRunRequest{RunId: acc.RunID})
+		req.Header().Set(server.HeaderAuthorization, "Bearer tok-acme")
+		got, err := runs.GetRun(ctx, req)
+		if err != nil {
+			t.Fatalf("GetRun: %v", err)
+		}
+		if got.Msg.GetStatus() == mandatumv1.RunStatus_RUN_STATUS_STOPPED {
+			// The body named someone else; an ordinary credential is itself.
+			if got.Msg.GetStopReason() != "wrong repo" || got.Msg.GetStoppedBy() != "ada" {
+				t.Fatalf("stop_reason %q stopped_by %q", got.Msg.GetStopReason(), got.Msg.GetStoppedBy())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the run never read as stopped: %v", got.Msg.GetStatus())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	req := connect.NewRequest(&mandatumv1.GetRunRequest{RunId: acc.RunID})
+	req.Header().Set(server.HeaderAuthorization, "Bearer tok-globex")
+	if _, err := runs.GetRun(ctx, req); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("another tenant reading the run = %v, want not found", err)
 	}
 }

@@ -150,6 +150,11 @@ func (s *slackSink) Deliver(_ context.Context, target address.Address, e envelop
 		th.edits++
 		s.out.record(e.Seq, "slack", "    slack   edit %d  %s", th.edits, quote(th.body.String()))
 
+	case envelope.KindStopped:
+		// A stopped run is over too: its partial answer is the last edit.
+		th.done = true
+		s.out.record(e.Seq, "slack", "    slack   edit %d  (stopped)", th.edits+1)
+
 	case envelope.KindCompleted:
 		th.done = true
 		s.out.record(e.Seq, "slack", "    slack   edit %d  (final, with %d footnote(s))", th.edits+1, len(th.notes))

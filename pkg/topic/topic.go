@@ -115,6 +115,16 @@ func Run(agent, runID string) (Topic, error) {
 // carrying a separator would be silently promoted to a deeper topic: Agent
 // ("docs:bot") would return the run topic agent:docs:bot, whose Name is "docs"
 // and which covers nothing the caller asked for.
+func oneSegment(what, s string) error {
+	if s == "" {
+		return fmt.Errorf("%w: empty %s", ErrInvalid, what)
+	}
+	if strings.Contains(s, Separator) {
+		return fmt.Errorf("%w: %s %q contains %q and is not one segment", ErrInvalid, what, s, Separator)
+	}
+	return nil
+}
+
 // ControlName is the one name segment no agent may take. Topics under it carry
 // requests addressed to a run rather than events a run produced.
 //
@@ -131,7 +141,8 @@ func Run(agent, runID string) (Topic, error) {
 const ControlName = "_control"
 
 // Control returns the topic that carries requests of one verb for one run,
-// agent:_control:<verb>-<run>. The verb is part of the last segment so that
+// agent:_control:<verb>-<id>, where id names the run or a key derived from
+// it. The verb is part of the last segment so that
 // the stream has an identity of its own: its events are numbered separately
 // from the run's, and a consumer that tracks sequences per run id must not
 // mistake one numbering for the other.
@@ -147,16 +158,6 @@ func Control(verb, runID string) (Topic, error) {
 
 // IsControl reports whether t is the control namespace or a topic inside it.
 func (t Topic) IsControl() bool { return t.Name() == ControlName }
-
-func oneSegment(what, s string) error {
-	if s == "" {
-		return fmt.Errorf("%w: empty %s", ErrInvalid, what)
-	}
-	if strings.Contains(s, Separator) {
-		return fmt.Errorf("%w: %s %q contains %q and is not one segment", ErrInvalid, what, s, Separator)
-	}
-	return nil
-}
 
 // String returns the colon-delimited form.
 func (t Topic) String() string { return strings.Join(t.segments, Separator) }
@@ -216,8 +217,17 @@ func (t *Topic) UnmarshalJSON(b []byte) error {
 //
 // Prefix matching is segment-wise rather than string-wise on purpose:
 // "agent:docs" must not cover "agent:docs-bot".
+//
+// The root does not cover the control namespace. Requests addressed to runs
+// are not agent output, and a consumer that listens to everything (a
+// dashboard, a host relaying every event) must not have to know to filter
+// them out. A control topic is covered only by a topic inside the namespace,
+// such as agent:_control, which is what an audit of requests subscribes to.
 func (t Topic) Covers(other Topic) bool {
 	if t.IsZero() || other.IsZero() {
+		return false
+	}
+	if other.IsControl() && !t.IsControl() {
 		return false
 	}
 	if len(t.segments) > len(other.segments) {

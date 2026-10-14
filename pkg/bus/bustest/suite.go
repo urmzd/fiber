@@ -140,6 +140,24 @@ func Run(t *testing.T, newBus Factory) {
 		recvIdle(t, s)
 	})
 
+	t.Run("TheRootDoesNotCoverTheControlNamespace", func(t *testing.T) {
+		b := newBus(t, Config{Retention: 64, Backlog: 64})
+		everything := subscribe(t, b, on("agent"))
+		requests := subscribe(t, b, on("agent:_control"))
+
+		publish(t, b, ev("_control", "stop-k1", 0, envelope.KindStop), text("docs-bot", "run_1", 1))
+
+		// A consumer of everything gets agent output and nothing addressed to
+		// a run; the control namespace is subscribed to by name.
+		if got := recvN(t, everything, 1); got[0].RunID != "run_1" {
+			t.Errorf("the root delivered %s on %s", got[0].Kind, got[0].Topic)
+		}
+		recvIdle(t, everything)
+		if got := recvN(t, requests, 1); got[0].Kind != envelope.KindStop {
+			t.Errorf("the control namespace delivered %s", got[0].Kind)
+		}
+	})
+
 	t.Run("FilterNarrowsWithoutChangingTopic", func(t *testing.T) {
 		// The corpus is published first, so every case reads it out of
 		// retention: the filter is the only variable.

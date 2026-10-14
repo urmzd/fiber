@@ -137,6 +137,18 @@ type Sandbox struct {
 	subs atomic.Uint64
 }
 
+// taskInput is what a legatus task carries: the turn's Request, plus the
+// sandbox's own bookkeeping, which is not part of a Request because nothing
+// outside this file should ever see it. The Request's fields are embedded, so
+// the task input of a durable run is the Request's JSON as it always was.
+type taskInput struct {
+	Request
+	// Sub is the key a delegated sub-task's turn is registered under, so the
+	// turn waiting on it can cancel it. Empty for a durable run, whose run id
+	// is its key.
+	Sub string `json:"sandbox_sub,omitempty"`
+}
+
 // turn is what the goroutine waiting on a legatus task shares with the tool
 // executing it. The two never share a context (see call), so everything that
 // has to cross between them crosses here.
@@ -152,6 +164,9 @@ type turn struct {
 	// its own context on it, which is the only cancellation that reaches a
 	// legatus task from outside.
 	abort chan struct{}
+	// stopped is the stop request the turn was handed, once it has been: how
+	// a delegation the stop cancels learns that it was a stop.
+	stopped atomic.Pointer[agentrt.Stop]
 }
 
 // SandboxOption configures a Sandbox.
@@ -323,7 +338,7 @@ func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Co
 	// return below that is not the task's own result.
 	defer s.detach(req.RunID)
 
-	input, err := json.Marshal(req)
+	input, err := json.Marshal(taskInput{Request: req})
 	if err != nil {
 		return Outcome{}, fmt.Errorf("runtime: run %s: marshal request: %w", req.RunID, err)
 	}
@@ -507,10 +522,11 @@ func (s *Sandbox) turn(key string) *turn {
 // replay frame nor the caller's cancellation, and with a workspace already scoped
 // to the policy. Everything it needs travels in the task input.
 func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]byte, error) {
-	var req Request
-	if err := json.Unmarshal(input, &req); err != nil {
+	var task taskInput
+	if err := json.Unmarshal(input, &task); err != nil {
 		return nil, fmt.Errorf("runtime: sandbox: decode request: %w", err)
 	}
+	req := task.Request
 	rev := req.Revision
 	if err := rev.Validate(); err != nil {
 		return nil, err
@@ -521,7 +537,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	// call on an answer nobody will read. A request with no key at all was
 	// submitted by something that does not wait this way, and runs unwatched.
 	var waited *turn
-	if key := firstNonEmpty(req.RunID, req.SubTask); key != "" {
+	if key := firstNonEmpty(req.RunID, task.Sub); key != "" {
 		if waited = s.turn(key); waited == nil {
 			return nil, fmt.Errorf("runtime: sandbox: turn %s is no longer awaited", key)
 		}
@@ -543,7 +559,21 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	var sink chan agentrt.Chunk
 	var stop <-chan agentrt.Stop
 	if waited != nil {
-		sink, stop = waited.sink, waited.stop
+		sink = waited.sink
+		if waited.stop != nil {
+			// The request passes through here on its way to the agent loop,
+			// so the turn remembers it before anything it cancels can ask.
+			forward := make(chan agentrt.Stop, 1)
+			go func(in <-chan agentrt.Stop, t *turn) {
+				select {
+				case req := <-in:
+					t.stopped.Store(&req)
+					forward <- req
+				case <-ctx.Done():
+				}
+			}(waited.stop, waited)
+			stop = forward
+		}
 	}
 	send := func(c agentrt.Chunk) error {
 		if sink == nil {
@@ -720,7 +750,9 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			// from here. A sub-task has no run id, so it cannot be a parent
 			// to one and falls through to delegating by sub-task.
 			if s.delegator != nil && parent.RunID != "" {
-				return s.delegator(ctx, parent, target, text, report)
+				dctx, done := s.delegationContext(ctx, parent.RunID)
+				defer done()
+				return s.delegator(dctx, parent, target, text, report)
 			}
 			if s.specs == nil {
 				return "", fmt.Errorf("%w: this deployment cannot resolve agent %q", ErrInvalid, target)
@@ -744,7 +776,6 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 				// output would be attributed to the wrong agent on the
 				// parent's topic. It reaches the transcript as this tool's
 				// result, which is where the model put it.
-				SubTask: sub,
 				Tenant:  parent.Tenant,
 				Attempt: parent.Attempt,
 				Origin:  parent.Origin,
@@ -758,7 +789,7 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 				// given can only guess.
 				Attachments: attachment.Inherit(parent.Attachments, nil),
 			}
-			input, err := json.Marshal(child)
+			input, err := json.Marshal(taskInput{Request: child, Sub: sub})
 			if err != nil {
 				return "", fmt.Errorf("runtime: delegate to %q: %w", target, err)
 			}
@@ -775,6 +806,28 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			return out.Text, nil
 		},
 	}
+}
+
+// delegationContext is ctx with a cause a Delegator can read: when the
+// parent's turn was stopped, the context ends with a *StoppedError, so a host
+// can stop the run it started for the delegation; any other ending (a worker
+// shutting down, a superseded attempt, a failed turn) keeps the cause it had.
+func (s *Sandbox) delegationContext(ctx context.Context, runID string) (context.Context, func()) {
+	dctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	go func() {
+		select {
+		case <-ctx.Done():
+			cause := context.Cause(ctx)
+			if t := s.turn(runID); t != nil {
+				if req := t.stopped.Load(); req != nil {
+					cause = &StoppedError{Reason: req.Reason, By: req.By}
+				}
+			}
+			cancel(cause)
+		case <-dctx.Done():
+		}
+	}()
+	return dctx, func() { cancel(nil) }
 }
 
 // await polls for a delegated sub-task's result.

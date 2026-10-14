@@ -159,8 +159,11 @@ func TestControlTopicsAreApartFromEveryAgentsTopics(t *testing.T) {
 	if topic.MustParse("agent:docs-bot").Covers(c) || run.Covers(c) || c.Covers(run) {
 		t.Fatal("a control topic and an agent's topic cover one another")
 	}
-	if !topic.All().Covers(c) {
-		t.Fatal("the root does not cover the control namespace; an audit consumer would miss stop requests")
+	if topic.All().Covers(c) {
+		t.Fatal("the root covers the control namespace; every consumer of everything would receive requests addressed to runs")
+	}
+	if !topic.MustParse("agent:_control").Covers(c) || !c.Covers(c) {
+		t.Fatal("the control namespace does not cover its own topics; an audit of requests could not subscribe to them")
 	}
 	for _, bad := range [][2]string{{"", "run"}, {"stop", ""}, {"st:op", "run"}, {"stop", "ru:n"}, {"stop", "ru n"}} {
 		if _, err := topic.Control(bad[0], bad[1]); err == nil {
