@@ -453,6 +453,12 @@ func (r *Router) consume(ctx context.Context, stream bus.Stream) error {
 // same lock that Release closes lanes with is what makes "deliver to a lane
 // that was just released" impossible rather than merely unlikely.
 func (r *Router) dispatch(ctx context.Context, e envelope.Event) {
+	if e.Topic.IsControl() {
+		// A request addressed to a run, not something a run produced. It is
+		// for the worker executing the run and is never delivered to a
+		// surface.
+		return
+	}
 	runID := e.RunID
 	if runID == "" {
 		runID = e.Topic.RunID() // the bus fills this in, but do not depend on it

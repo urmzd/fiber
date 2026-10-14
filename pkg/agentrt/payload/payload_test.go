@@ -31,6 +31,8 @@ func TestEveryKindSurvivesEncodeDecode(t *testing.T) {
 		}},
 		{"lifecycle", envelope.KindCompleted, payload.Lifecycle{Attempt: 2, Rev: 6, Text: "done"}},
 		{"failure", envelope.KindFailed, payload.Lifecycle{Attempt: 1, Rev: 6, Error: "boom", Terminal: true}},
+		{"stopped", envelope.KindStopped, payload.Stopped{Attempt: 1, Rev: 6, Reason: "Stopped by a user", By: "slack:U1", Text: "So far"}},
+		{"stop request", envelope.KindStop, payload.StopRequest{RunID: "r0123", Reason: "Stopped by a user", By: "slack:U1"}},
 		{"action", envelope.KindActionTaken, payload.Action{
 			Name: "jira_transition", Target: "jira://acme/PROJ-5", Summary: "moved to done",
 			Address: "jira://acme/PROJ-5", Data: json.RawMessage(`{"status":"done"}`),

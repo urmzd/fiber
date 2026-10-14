@@ -75,6 +75,13 @@ func (s *busService) Publish(ctx context.Context, req *connect.Request[mandatumv
 	if err != nil {
 		return nil, fail(s.log, "publish", err)
 	}
+	// The control namespace is not a run's topic, and what is published there
+	// is obeyed by a run. A stop has its own route, which stamps who asked
+	// from the credential; letting a client write the request by hand would
+	// let it name anyone.
+	if e.Topic.IsControl() {
+		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q is a control topic and is not published to directly", ErrInvalid, e.Topic))
+	}
 	e.Tenant = id.Tenant
 	e.Seq = 0
 	e.At = s.srv.now()
@@ -174,5 +181,5 @@ func (s *Server) streamEvents(
 // of a terminal RunStatus, and it is the only thing InvokeStream needs to know
 // about a run's lifecycle: the run's own record is the ledger's business.
 func terminalKind(e envelope.Event) bool {
-	return e.Kind == envelope.KindCompleted || e.Kind == envelope.KindFailed
+	return e.Kind == envelope.KindCompleted || e.Kind == envelope.KindFailed || e.Kind == envelope.KindStopped
 }

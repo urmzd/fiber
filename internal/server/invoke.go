@@ -66,6 +66,9 @@ const (
 	StatusParked    Status = "parked"
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
+	// StatusStopped is a run that ended because it was asked to. It is
+	// terminal, and it is neither completed nor failed.
+	StatusStopped Status = "stopped"
 )
 
 // Run is the durable record of one invocation, as the edge renders it. It is a
@@ -81,6 +84,10 @@ type Run struct {
 	Tag     envelope.Tag
 	LastSeq uint64
 	Error   string
+	// StopReason and StoppedBy say why a stopped run was stopped and who
+	// asked. Empty unless Status is StatusStopped.
+	StopReason string
+	StoppedBy  string
 
 	CreatedAt time.Time
 	StartedAt time.Time

@@ -17,3 +17,29 @@ Use `COLLEGIUM_SLACK_*` with `collegium serve` for that experience.
 The standalone mandatum CLI still supports the token, signing secret, team,
 bot mapping and default agent; it does not enable product session or command
 policy through `MANDATUM_SLACK_SESSIONS` or `MANDATUM_SLACK_COMMANDS`.
+
+## Stopping a session
+
+Slack sends `agent_session_stopped` when a person presses stop, and the
+connector hands it to `Config.Stopped` as a `slack.Stop`: the session's address
+and the user who pressed it. The connector knows sessions, not runs, so the
+application maps the session to the run it stands for and asks the runtime to
+stop that run:
+
+```go
+Stopped: func(ctx context.Context, stop slack.Stop) error {
+    runID := runFor(stop.Session) // the application's own bookkeeping
+    return rt.Stop(ctx, runtime.StopRequest{
+        Tenant: tenant, RunID: runID,
+        Reason: "Stopped in Slack", By: "slack:" + stop.User,
+    })
+},
+```
+
+The run id is the one `Acceptance.RunID` reported and every event of the run
+carries, `runtime.RunID(tenant, tagID)`. It is not the Slack event id the tag
+was raised with. The runtime must be built with `runtime.WithStopLedger` for
+the stop to be recorded before it is announced. The run then ends
+with `lifecycle.stopped`, and the sink edits the session's message to say so
+under what the agent had written. The standalone mandatum CLI does not set
+`Stopped`, because it keeps no session-to-run mapping.

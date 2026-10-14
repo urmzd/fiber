@@ -167,6 +167,10 @@ type Config struct {
 	// Runs reads durable run records. Nil disables GetRun.
 	Runs RunReader
 
+	// Stopper asks runs to stop, behind POST /v1/runs/{id}/stop. Nil disables
+	// the route.
+	Stopper Stopper
+
 	// Ingress registers one inbound webhook endpoint per connector, served at
 	// POST /v1/webhooks/{connector}.
 	Ingress []Ingress
@@ -289,6 +293,7 @@ func New(cfg Config) (*Server, error) {
 
 	s.mux.HandleFunc("GET /v1/sse", s.handleSSE)
 	s.mux.HandleFunc("POST /v1/blobs", s.handleBlobPut)
+	s.mux.HandleFunc("POST /v1/runs/{id}/stop", s.handleStop(cfg.Stopper))
 	s.mux.HandleFunc("POST /v1/webhooks/{connector}", s.handleWebhook(cfg.Invoker))
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)

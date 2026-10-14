@@ -22,7 +22,7 @@ sandboxing and access control.
 
 | Package | Role |
 |---------|------|
-| `pkg/topic` | Topic addressing: `agent`, `agent:<name>`, `agent:<name>:<run>`. Prefix containment, no wildcards. Leaf. |
+| `pkg/topic` | Topic addressing: `agent`, `agent:<name>`, `agent:<name>:<run>`. Prefix containment, no wildcards. The reserved control namespace `agent:_control:<verb>-<key>`. Leaf. |
 | `pkg/address` | Mesh endpoint URIs: `github://urmzd/mandatum/issues/42`, `slack://T01/C02?thread=...`. Leaf. |
 | `pkg/envelope` | Wire contract: `Tag`, `Event`, `Kind`, `Route`, `Filter`, `Subscription`. Leaf. |
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
@@ -38,7 +38,7 @@ sandboxing and access control.
 | `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. `payload/` holds typed event bodies. |
-| `pkg/runtime` | The durable duraturo turn: revision pinning, legatus sandbox, dual publish. |
+| `pkg/runtime` | The durable duraturo turn: revision pinning, legatus sandbox, dual publish, and stopping a run mid-turn. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
 | `internal/server` | Connect handlers, SSE, webhook ingress, tenant interceptor. |
 | `internal/cli` | Command tree. `core.go` is the composition root. |
@@ -102,6 +102,19 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   `pkg/runtime`; do not weaken them.
 - **Durability comes from duraturo, never from legatus.** legatus's queue is
   at-most-once in beta.
+- **A run's topic has one writer.** Only the attempt executing a run publishes
+  to `agent:<name>:<run>`, with sequence numbers it chose. Anything addressed
+  to a run, such as a stop request, goes to its control topic instead.
+- **A stop is recorded before it is announced.** `Runtime.Stop` writes the
+  request on the run in the ledger and only then publishes it; the bus is the
+  fast path, never the only copy. Hosts pass `runtime.WithStopLedger`.
+- **A stopped run is a result, not an error.** The agent activity returns a
+  stopped outcome and the workflow body decides from that record alone, so a
+  replay announces the same stop. Never read "has a stop been requested" in
+  the body.
+- **Nothing about a particular stop reaches the thread journal.** A stopped
+  turn is journaled as its partial answer plus `runtime.StopMarker`, a
+  constant. The reason and the asker go on `lifecycle.stopped`.
 - **Sinks must be idempotent.** Delivery is at-least-once. Render one message
   per run and edit it; never post per delta.
 - **Tenant is never read from a request body.** The server sets it from the
@@ -130,4 +143,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   the tests run with no API key.
 - **New event kind**: add it to `pkg/envelope`, give it a typed body in
   `pkg/agentrt/payload`, and teach the connector renderers about it. Kinds are
-  fields, never topics.
+  fields, never topics. A kind that ends a run must also be taught to
+  everything that waits for a run to end: `render.Status.Terminal`, the
+  server's `terminalKind`, the CLI's `terminal`, and the ledger status mapping
+  in `internal/cli/core.go`.

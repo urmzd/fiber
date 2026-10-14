@@ -54,6 +54,8 @@ func NewTranslator() *Translator { return &Translator{} }
 //     lifecycle fact and pkg/runtime publishes it with the attempt and
 //     terminality a subscriber needs; a bare error event mid-stream would say
 //     less and could contradict the lifecycle event that follows.
+//   - StoppedDelta becomes Result.Stopped for the same reason: a stopped run
+//     is announced by pkg/runtime as lifecycle.stopped, once, with the attempt.
 //   - UsageDelta is telemetry. It belongs on a metrics path, and putting token
 //     counts on a fan-out bus that connectors render would leak cost data into
 //     Slack threads.

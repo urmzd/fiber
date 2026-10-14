@@ -77,12 +77,19 @@ const (
 	StatusParked   Status = "parked"
 	StatusDone     Status = "completed"
 	StatusFailed   Status = "failed"
+	// StatusStopped is a run that was asked to stop before it finished. It
+	// is terminal and it is not a failure: the text it carries is a partial
+	// answer, and a surface should say so rather than present it as either
+	// the whole answer or an error.
+	StatusStopped Status = "stopped"
 )
 
 // Terminal reports whether no further events are expected. A sink uses it to
 // decide that this is the last edit it will make, which is when it must flush
 // regardless of any coalescing interval.
-func (s Status) Terminal() bool { return s == StatusDone || s == StatusFailed }
+func (s Status) Terminal() bool {
+	return s == StatusDone || s == StatusFailed || s == StatusStopped
+}
 
 // Tool is one tool call the agent made, joined from its call and done events.
 type Tool struct {
@@ -143,6 +150,9 @@ type View struct {
 	Status Status
 	// Error is the failure message from lifecycle.failed, empty otherwise.
 	Error string
+	// Reason is why the run was stopped, from lifecycle.stopped, in the words
+	// of whoever asked. Empty otherwise, and empty when no reason was given.
+	Reason string
 
 	// Text is the agent's answer so far, assembled in sequence order.
 	Text string
@@ -197,6 +207,7 @@ type Doc struct {
 	status    Status
 	statusSeq uint64
 	errText   string
+	reason    string
 	finalText string
 
 	text     strings.Builder
@@ -299,6 +310,28 @@ func (d *Doc) effect(e envelope.Event) bool {
 		return changed
 	case envelope.KindFailed:
 		return d.setStatus(e.Seq, StatusFailed, decodeError(e.Payload))
+	case envelope.KindStopped:
+		changed := d.setStatus(e.Seq, StatusStopped, "")
+		if e.Seq == 0 || e.Seq >= d.statusSeq {
+			// The partial answer travels on the event, as a completed
+			// run's answer does, so a route that selected only lifecycle
+			// kinds still shows what the agent had said.
+			var stopped struct {
+				Text   string `json:"text"`
+				Reason string `json:"reason"`
+			}
+			if json.Unmarshal(e.Payload, &stopped) == nil {
+				if stopped.Text != "" && stopped.Text != d.finalText {
+					d.finalText = stopped.Text
+					changed = true
+				}
+				if stopped.Reason != d.reason {
+					d.reason = stopped.Reason
+					changed = true
+				}
+			}
+		}
+		return changed
 	default:
 		// An unknown kind is not an error: kinds are an open set precisely so
 		// that a connector released today can be sent an event kind invented
@@ -503,6 +536,7 @@ func (d *Doc) View() View {
 		Tenant: d.tenant,
 		Status: d.status,
 		Error:  d.errText,
+		Reason: d.reason,
 		Seq:    d.seq,
 		At:     d.at,
 	}

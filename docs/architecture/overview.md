@@ -176,6 +176,164 @@ The journal is truth; the bus is flow.
 redelivers on timeout, so a Slack retry or a GitHub redelivery joins the run
 that already exists rather than starting a second one and answering twice.
 
+## Stopping a run
+
+A person who presses stop wants two things: the agent to stop working, and to
+be able to reply to what it had said so far. A run can be asked to stop at any
+point, and a stopped run is its own outcome: not a failure, not a completion.
+
+```
+POST /v1/runs/{id}/stop            a host calls runtime.Stop instead
+  -> the run ledger                the request is recorded on the run (truth)
+  -> control.stop                  then published to the asker's stop stream (fast path)
+     -> the executing attempt      reads the ledger before its turn, listens on the bus
+                                   during it, and polls the ledger as a backstop
+        -> saige stream.Stop       the model call and running tools are cancelled
+           -> lifecycle.stopped    terminal: the reason, who asked, the partial answer
+```
+
+### The guarantee
+
+From the moment `Stop` returns nil for a run that exists, belongs to the
+caller's tenant and has not ended:
+
+- no attempt of the run starts its turn, so no new turn calls a model;
+- a turn already running is asked to wrap up at once over the bus, or within
+  the stop poll interval (`runtime.WithStopPoll`, two seconds by default) if
+  the bus lost the request;
+- the run ends with `lifecycle.stopped` and is never retried, unless its turn
+  finished its answer before the request took effect, in which case it ends
+  completed.
+
+"Stopped" means cut short. A turn that returned its whole answer completed,
+even if a request was on its way, and the agent loop is the judge: saige
+reports a turn it wrapped up, and does not report one that finished first.
+Exactly one outcome is ever recorded, and the journal entry, the terminal
+event, the ledger and `Result` are all built from it, so they always agree. A
+host that wants to know whether it asked, independent of how the run ended,
+reads `Runtime.StopRequested`, which reports the recorded request for a run of
+its own tenant.
+
+### Where the request lives
+
+**The ledger is the truth.** `Stop` writes the request on the run as a
+write-once event record (`event:mandatum.stop#0`) in the duraturo ledger the
+run already lives in: per run, scoped by the run's tenant, read in one round
+trip when an attempt starts, and on Postgres the same tables as every other
+record (`pkg/durable`), so there is no new schema. It records only for a run
+that exists in that ledger, is the caller's tenant's and has not ended, so the
+ledger holds at most one stop record per run, and it lives exactly as long as
+the run's other records. A request for anything else writes nothing and
+publishes nothing. When a request was recorded before an attempt began, that
+attempt's workflow body claims it, so duraturo does not report it as a record
+no call read; one recorded during an attempt is not in that attempt's replay
+set and needs no claim.
+
+**The bus is the fast path.** After recording, `Stop` publishes `control.stop`
+to `agent:_control:stop-<key>`, where the key is a hash of the caller's tenant
+and the run id. It does not go on the run's own topic, because that topic has
+one writer: the attempt chooses its own sequence numbers and the bus keeps the
+first write of a sequence. `_control` is the one name no agent may take, the
+router never delivers what is published under it, and `BusService.Publish`
+refuses it, so the only way to write a request is the route that stamps the
+tenant and the asker from the credential. Because the tenant is part of the
+key, one tenant's requests can never land in the stream another tenant's run
+reads, so they cannot push that tenant's own request out of it.
+
+| The request arrives | What happens |
+|---|---|
+| Before a worker has started the turn | The attempt reads it from the ledger and ends the turn without calling the executor. |
+| While the turn runs | It is delivered over the bus at once, or read from the ledger at the next poll. |
+| Between two attempts | The next attempt reads it from the ledger before its turn. |
+| After the process restarts | The ledger survived, and the next attempt stops. |
+| After the run ended | Nothing is published. Nothing is recorded either, unless the run ends between `Stop`'s check and its write, in which case the request is recorded on the finished run, where no attempt reads it and `StopRequested` reports it. |
+| While the run is parked | Recorded; it takes effect when the run resumes. mandatum itself never parks a run today. |
+| A second time | The first recorded request is the one the run honours. |
+
+**Tenant isolation does not rest on secret ids.** Run ids are derived from the
+tenant and the tag id by an exported function, and tag ids are often
+predictable (a schedule's occurrence, a Slack event id), so a run id is not a
+secret. Isolation comes from the checks: `Stop` records and publishes only for
+the caller's own run, the stop stream is keyed by the caller's tenant, and an
+attempt ignores any request not made under its run's tenant. `Stop` answers
+the same nil (and the route the same 202) for an unknown run, a finished run
+and another tenant's run, so its answer never says whether a run exists.
+
+Its timing can. For an id the ledger holds, `Stop` reads the run and checks
+its tenant before deciding to do nothing; for an unknown id it returns after
+one missed read. Someone who can time the call closely can tell whether a run
+with that id exists in some tenant, though not whose it is or what it holds.
+Because run ids are computable, that can reveal whether a known tag (a
+schedule's occurrence, say) started a run in another tenant. Closing it needs
+a ledger lookup keyed by tenant, which duraturo's ledger does not have.
+
+**The decision is a recorded result.** duraturo replays the workflow body, and
+whether somebody has asked for a stop changes between attempts, so the body
+never asks. The memoized agent activity reads the ledger and listens, and
+returns a stopped outcome instead of an error. The ledger records the run as
+ended, and a replay reads the outcome and announces the same stop.
+
+### What the thread and the surfaces show
+
+A stopped run journals its exchange like a completed one: the request as the
+agent renders it, then an assistant entry holding the partial answer followed
+by a fixed marker line, or the marker alone when the turn was stopped before it
+said anything.
+
+```
+The deploy failed because
+
+[This turn was stopped before it finished.]
+```
+
+The marker is a constant and the reason is not written there, because the
+journal is replayed byte for byte to every later run in the thread. The reason
+and who asked travel on `lifecycle.stopped`, on the run's output, and on
+`GetRun` (`RUN_STATUS_STOPPED`, with `stop_reason` and `stopped_by`). A request
+with no reason is given saige's default, "Stopped on request", once, so every
+path reports the same words. Sinks render a stopped run as stopped: the shared
+layout says so in the header and under the partial answer, and a GitHub check
+concludes `cancelled`.
+
+**Delegated turns are cancelled.** Stopping a parent cancels the tool calls its
+turn has in flight. A delegated sub-task is one of them, and it is aborted
+rather than left to finish. It is not wrapped up the way the parent is: its
+partial answer is discarded with the tool call it was the result of. A host
+that carries out delegations itself (`runtime.WithDelegator`) sees the context
+it was called with end with a `*runtime.StoppedError` cause (matching
+`runtime.ErrStopped`, with the reason and asker) when the parent was stopped,
+and with the ordinary cause otherwise, so it can stop the run it started with
+the same words.
+
+**Stop requests are not agent output.** The root topic `agent` does not cover
+the control namespace, so a consumer of everything (a dashboard, a host
+relaying every event) never receives a `control.stop`. An audit of requests
+subscribes to `agent:_control` by name.
+
+### How long the bus keeps a request
+
+This only decides whether the fast path delivers a request; with the ledger it
+never decides whether a run stops. A host that builds a runtime without
+`runtime.WithStopLedger` has only the bus, and these are its exact bounds:
+
+- A run's stop stream keeps the newest `bus.WithRetention` requests (1024).
+  Only the run's own tenant writes there, so depth cannot lose a stop; it only
+  decides which request's reason survives.
+- The in-memory bus keeps the `bus.WithMaxRuns` streams written most recently
+  (4096), run streams and stop streams alike. A pending request is lost once
+  that many other streams have been written after it, the run's own stream
+  among them.
+- On Redis a run-scoped subscription reads the stream key directly, so the
+  discovery index TTL does not apply, and stop stream keys have no expiry. A
+  request lasts until Redis evicts or loses the key.
+
+The control state the bus holds is bounded by the runs that were asked: a
+stop stream exists only for a live run of the asker's tenant that was asked to
+stop, at most one per (tenant, run), each at most `WithRetention` entries. In
+memory they are evicted with every other stream. On Redis they never expire,
+which is the same as every run's own stream today (the bus sets no TTL on run
+keys); a deployment that needs Redis bounded sets an eviction policy.
+
 ## Package DAG
 
 Dependencies run one way. Leaves are stdlib-only and know nothing about
@@ -183,7 +341,7 @@ transports, storage, or agents.
 
 ```
 leaves (stdlib only)
-  pkg/topic        agent:name[:run], prefix containment
+  pkg/topic        agent:name[:run], prefix containment, the control namespace
   pkg/address      github://urmzd/mandatum/issues/42, slack://T01/C02?thread=...
   pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription
   pkg/signature    HMAC verification for inbound webhooks
@@ -196,7 +354,7 @@ seams
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations
-  pkg/runtime      the durable duraturo turn, legatus sandbox
+  pkg/runtime      the durable duraturo turn, legatus sandbox, stop
   pkg/router       delivery fan-out to sinks
   pkg/connectors   slack, github, jira, cron, webhook
   internal/server  Connect handlers, SSE, webhook ingress
@@ -220,6 +378,7 @@ set, so gRPC clients and browsers share one contract and one codegen path.
 | `BusService.Publish` | Append an event to a run's topic |
 | `AgentService.*` | Agent spec control plane |
 | `GET /v1/sse` | The same stream, browser-native, resumable via `Last-Event-ID` |
+| `POST /v1/runs/{id}/stop` | Ask a run to stop; answers 202 for every run id. `GetRun` reports `RUN_STATUS_STOPPED` |
 | `POST /v1/webhooks/{connector}` | HMAC-verified ingress |
 
 `InvokeStream` exists because doing invoke and subscribe separately races: events
@@ -272,3 +431,36 @@ Verified against the code, and honest.
   behind the `Bus` interface rather than growing a broker here.
 - **Agent specs are loaded from JSON**, not YAML, so the CLI carries no parser
   dependency.
+- **A stop is reliable only with the ledger.** `runtime.WithStopLedger` must
+  be given the ledger the runs execute from, as the CLI does. A host without it
+  falls back to the bus alone, with the bounds in "How long the bus keeps a
+  request". With an in-memory ledger, only the process that accepted a run can
+  stop it, which is also the only process that can read it with `GetRun`.
+- **A crash between the wrap-up and its record loses the partial text from the
+  thread.** If a worker dies after saige stopped the turn but before the
+  stopped outcome was recorded, the next attempt finds the request in the
+  ledger and stops before calling the model, with no text. The thread then
+  holds only the marker, while the surface already showed what the first
+  attempt streamed.
+- **A turn holds one bus subscription while it runs.** On Redis each one holds
+  a pooled connection for most of its poll cycle. The CLI sizes the pool at
+  go-redis's default plus one connection per run a process executes at once;
+  a host building its own client should do the same. One shared subscription
+  per process would remove this cost; it needs a way to subscribe to a prefix
+  starting from now, which the bus does not have.
+- **Stopping reaches a turn through the in-process sandbox.** The stop signal
+  and the abort of an abandoned task cross from the waiting goroutine to the
+  legatus tool in memory. A remote legatus node would need them carried over
+  its own transport; only the in-process plane is supported and tested.
+- **Stop is an HTTP route, not an RPC.** `POST /v1/runs/{id}/stop`. A run's
+  stopped status is on the wire (`RUN_STATUS_STOPPED`); asking for a stop is
+  not yet a Connect method.
+- **A stop wraps up the turn, not its side effects.** Tool calls already
+  finished stay done, and a tool that ignores its context delays the stop until
+  the grace period (ten seconds by default) cancels the turn. A turn that is
+  cancelled this way ends stopped with the text it had published.
+- **A route that selects only `lifecycle.completed` is not told about a stop.**
+  Select `lifecycle`, or add `lifecycle.stopped`, to hear every ending.
+- **A stop cannot be made for a run before it is accepted.** Nothing is
+  recorded or published for a run the ledger does not hold yet; ask again once
+  `Accept` has returned the run id.

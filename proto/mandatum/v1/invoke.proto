@@ -263,8 +263,14 @@ enum RunStatus {
   // Terminal, and error carries why.
   RUN_STATUS_FAILED = 5;
 
+  // Stopped means the run was asked to stop and wrapped its turn up before it
+  // finished. Terminal, and neither a completion nor a failure: what the agent
+  // had said so far was kept, and it is never retried. stop_reason and
+  // stopped_by say why and who asked.
+  RUN_STATUS_STOPPED = 6;
+
   // Reserved for growth.
-  reserved 6 to 15;
+  reserved 7 to 15;
 }
 
 // Run is the durable record of one invocation: what was asked, which definition
@@ -326,8 +332,18 @@ message Run {
   // EndedAt is when the run reached a terminal state. Unset until then.
   google.protobuf.Timestamp ended_at = 13;
 
+  // StopReason is why the run was stopped, in the words of whoever asked,
+  // empty unless status is RUN_STATUS_STOPPED. It may be empty then too: a
+  // reason is optional.
+  string stop_reason = 14;
+
+  // StoppedBy is who asked the run to stop, empty unless status is
+  // RUN_STATUS_STOPPED. It is the asking credential's subject, or the person a
+  // surface trusted to act for others named.
+  string stopped_by = 15;
+
   // Reserved for growth.
-  reserved 14 to 31;
+  reserved 16 to 31;
 }
 
 // GetRunRequest reads one run.

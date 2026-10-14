@@ -315,6 +315,39 @@ func TestEventForAnUnroutedRunIsDroppedAndLogged(t *testing.T) {
 	}
 }
 
+// A request addressed to a run travels on the bus under the control namespace.
+// It is for the worker executing the run and is never delivered to a surface,
+// even when its stream's id is one this router has routes for.
+func TestAControlRequestIsNeverDeliveredToASurface(t *testing.T) {
+	slack := newSink("slack")
+	h := start(t, registry(t, slack))
+	for _, id := range []string{"stop-run_1", "run_1"} {
+		if err := h.Register(id, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tp, err := topic.Control("stop", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.publish(t, envelope.Event{Topic: tp, Tenant: "acme", Kind: envelope.KindStop, Payload: []byte(`{"run_id":"run_1"}`)})
+	// The run's own events still arrive, the stopped one included, and the
+	// request published ahead of them is not among what was delivered.
+	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindAccepted))
+	h.publish(t, event("docs-bot", "run_1", 2, envelope.KindStopped))
+
+	slack.waitFor(t, 2)
+	for _, e := range slack.events() {
+		if e.Kind == envelope.KindStop || e.Topic.IsControl() {
+			t.Fatalf("a control request was delivered to a surface: %s on %s", e.Kind, e.Topic)
+		}
+	}
+	if got := slack.count(); got != 2 {
+		t.Fatalf("delivered %d events, want the run's two", got)
+	}
+}
+
 func TestReleasedRunStopsDeliveringAndLeavesNoGoroutines(t *testing.T) {
 	slack, github := newSink("slack"), newSink("github")
 	h := start(t, registry(t, slack, github))

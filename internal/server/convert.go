@@ -309,19 +309,21 @@ func revisionToProto(r Revision) *mandatumv1.Revision {
 // everything needed to explain what the agent did.
 func runToProto(r Run) *mandatumv1.Run {
 	return &mandatumv1.Run{
-		RunId:     r.ID,
-		Tenant:    r.Tenant,
-		Agent:     r.Agent,
-		Rev:       int32Of(r.Rev),
-		Origin:    r.Origin,
-		Topic:     r.Topic.String(),
-		Status:    statusToProto(r.Status),
-		Tag:       tagToProto(r.Tag),
-		LastSeq:   r.LastSeq,
-		Error:     r.Error,
-		CreatedAt: timeToProto(r.CreatedAt),
-		StartedAt: timeToProto(r.StartedAt),
-		EndedAt:   timeToProto(r.EndedAt),
+		RunId:      r.ID,
+		Tenant:     r.Tenant,
+		Agent:      r.Agent,
+		Rev:        int32Of(r.Rev),
+		Origin:     r.Origin,
+		Topic:      r.Topic.String(),
+		Status:     statusToProto(r.Status),
+		Tag:        tagToProto(r.Tag),
+		LastSeq:    r.LastSeq,
+		Error:      r.Error,
+		StopReason: r.StopReason,
+		StoppedBy:  r.StoppedBy,
+		CreatedAt:  timeToProto(r.CreatedAt),
+		StartedAt:  timeToProto(r.StartedAt),
+		EndedAt:    timeToProto(r.EndedAt),
 	}
 }
 
@@ -338,6 +340,8 @@ func statusToProto(s Status) mandatumv1.RunStatus {
 		return mandatumv1.RunStatus_RUN_STATUS_PARKED
 	case StatusCompleted:
 		return mandatumv1.RunStatus_RUN_STATUS_COMPLETED
+	case StatusStopped:
+		return mandatumv1.RunStatus_RUN_STATUS_STOPPED
 	case StatusFailed:
 		return mandatumv1.RunStatus_RUN_STATUS_FAILED
 	default:

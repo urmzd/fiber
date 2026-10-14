@@ -189,6 +189,7 @@ See [the example index](examples/README.md) for more.
 | `mandatum agent` | Create, revise, get, list, history, delete |
 | `mandatum tag` | Tag an agent and stream its answer |
 | `mandatum listen` | Subscribe to a topic and print events |
+| `mandatum stop` | Ask a run to stop; it keeps what it had said and ends with `lifecycle.stopped` |
 | `mandatum index` | Index files into a named knowledge source in Postgres |
 | `mandatum version` | Version, commit, build date |
 | `mandatum update` | Self-update from GitHub releases |
@@ -251,6 +252,7 @@ connecting from a host CLI. Connector setup is covered in the
 
 - **Drain before upgrading.** Stop accepting tags and let in-flight runs finish on the old version. A durable replay recomputes the run id from the tag, so a run accepted by the old version and resumed by the new one is looked up under an id it was never stored under. Do not run old and new workers against the same ledger.
 - **Old redeliveries start new runs.** A webhook redelivered across the upgrade no longer deduplicates against the run its first delivery created, because that run is stored under its old id.
+- **Upgrade clients for the stopped status.** `GetRun` can now report `RUN_STATUS_STOPPED` (6) for a run that was asked to stop. A client generated before this release decodes it as an unknown enum value, so a poller waiting for completed or failed never sees a stopped run end. Regenerate or upgrade clients; until then, treat an unknown status as terminal or watch for `lifecycle.stopped` on the run's stream.
 - **Stored run ids are stale.** Anything that saved a run id from before the upgrade (a link, a dashboard, a surface message) will not resolve it afterwards.
 
 ## Limitations
@@ -261,6 +263,7 @@ connecting from a host CLI. Connector setup is covered in the
 - Citations are derived from RAG context blocks. saige's `CitationDelta`, which reports what a model or tool cited, is not translated into events yet.
 - The bus is at-least-once with no consumer groups. If durable competing consumers become a requirement, NATS JetStream behind the `Bus` interface is a better answer than growing a broker here.
 - Agent specs load from JSON, not YAML.
+- Stopping a run is the HTTP route `POST /v1/runs/{id}/stop`, not an RPC; `GetRun` reports the result as `RUN_STATUS_STOPPED`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
 
 ## Reproduce the Screenshot
 

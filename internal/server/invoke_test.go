@@ -171,6 +171,7 @@ func TestInvokeStreamEndsOnTheTerminalLifecycleEvent(t *testing.T) {
 	tests := map[string]envelope.Kind{
 		"completed": envelope.KindCompleted,
 		"failed":    envelope.KindFailed,
+		"stopped":   envelope.KindStopped,
 	}
 	for name, terminal := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -103,6 +103,7 @@ func TestRunStatusMapsUnknownStatesToUnspecified(t *testing.T) {
 		StatusParked:    mandatumv1.RunStatus_RUN_STATUS_PARKED,
 		StatusCompleted: mandatumv1.RunStatus_RUN_STATUS_COMPLETED,
 		StatusFailed:    mandatumv1.RunStatus_RUN_STATUS_FAILED,
+		StatusStopped:   mandatumv1.RunStatus_RUN_STATUS_STOPPED,
 		"":              mandatumv1.RunStatus_RUN_STATUS_UNSPECIFIED,
 		"reticulating":  mandatumv1.RunStatus_RUN_STATUS_UNSPECIFIED,
 	}

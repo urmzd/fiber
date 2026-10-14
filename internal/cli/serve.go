@@ -161,6 +161,7 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		Blobs:   c.blobs,
 		Invoker: c,
 		Runs:    c,
+		Stopper: c,
 		Metrics: rec,
 		Logger:  log,
 	})
