@@ -67,6 +67,7 @@ import (
 
 	"github.com/urmzd/mandatum/pkg/address"
 	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
@@ -204,6 +205,13 @@ type Entry struct {
 	// At is when the message was said, or when it was appended if that is
 	// all anyone knows. The store stamps a zero value with its own clock.
 	At time.Time `json:"at"`
+	// Attachments are the files that came with the message, as references,
+	// in the order the surface listed them. The bytes stay in pkg/blob: a
+	// journal entry is replayed into every later run of the thread, and a
+	// reference is what can be replayed byte for byte. Nil for a message
+	// with none, which is also what every entry written before this field
+	// existed reads back as.
+	Attachments []attachment.Attachment `json:"attachments,omitempty"`
 }
 
 // validate checks what Append requires of an entry.
@@ -211,12 +219,27 @@ func (e Entry) validate() error {
 	switch {
 	case !e.Role.Valid():
 		return fmt.Errorf("%w: entry has role %q, want %q or %q", ErrInvalid, e.Role, RoleUser, RoleAssistant)
-	case strings.TrimSpace(e.Text) == "":
-		return fmt.Errorf("%w: entry has no text", ErrInvalid)
+	case strings.TrimSpace(e.Text) == "" && len(e.Attachments) == 0:
+		return fmt.Errorf("%w: entry has neither text nor attachments", ErrInvalid)
 	case e.RunID == "" && e.SurfaceID == "":
 		return fmt.Errorf("%w: entry has neither a run id nor a surface message id, so a retried append could not be recognized", ErrInvalid)
 	}
+	if err := attachment.ValidateAll(e.Attachments); err != nil {
+		return fmt.Errorf("%w: entry attachments: %w", ErrInvalid, err)
+	}
 	return nil
+}
+
+// clone returns e with its own copy of the attachment list, so that nothing
+// a caller holds can reach back into a stored entry. An empty list becomes
+// nil: "no attachments" has one representation, whichever store answered.
+func (e Entry) clone() Entry {
+	if len(e.Attachments) == 0 {
+		e.Attachments = nil
+		return e
+	}
+	e.Attachments = append([]attachment.Attachment(nil), e.Attachments...)
+	return e
 }
 
 // Store is a journal of threads.
@@ -292,7 +315,7 @@ func (s settings) prepare(ctx context.Context, key Key, entries []Entry) ([]Entr
 		}
 		e.At = e.At.UTC().Truncate(time.Microsecond)
 		e.Seq = 0
-		out[i] = e
+		out[i] = e.clone()
 	}
 	return out, nil
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
@@ -17,13 +18,24 @@ type Message struct {
 	// message is edited, because it is how the journal knows it has already
 	// seen the message.
 	ID string
-	// Text is the message as it reads now. A message with no text (an
-	// upload, a reaction) is not journaled.
+	// Text is the message as it reads now. A message with neither text nor
+	// files (a reaction, a join) is not journaled.
 	Text string
 	// Actor is who posted it.
 	Actor envelope.Actor
 	// At is when it was posted.
 	At time.Time
+	// Files brings in the files posted with the message, as attachment
+	// references in surface order. Nil means the message has none.
+	//
+	// It is a function rather than a list because bringing a file in means
+	// downloading it, and a surface lists the whole thread on every
+	// reconciliation. Reconcile calls it only for a message the journal does
+	// not hold yet, so each file is fetched once, when its message first
+	// joins the journal. A file that cannot be fetched should come back as
+	// attachment.Missing rather than as an error: an error abandons the whole
+	// reconciliation, and the thread is then retried on the next tag.
+	Files func(ctx context.Context) ([]attachment.Attachment, error)
 	// Own marks a message this deployment posted itself: an agent's rendered
 	// answer or its progress. Reconcile skips these. What an agent said
 	// reaches the journal as the run's final answer, appended by the run;
@@ -87,15 +99,32 @@ func Reconcile(ctx context.Context, store Store, lister Lister, key Key, surface
 	for _, id := range skip {
 		skipped[id] = true
 	}
+	var known map[string]bool
 	entries := make([]Entry, 0, len(msgs))
 	for i, m := range msgs {
 		if m.ID == "" {
 			return fmt.Errorf("%w: reconcile %s: surface message %d of %d has no id", ErrInvalid, key, i+1, len(msgs))
 		}
-		if m.Own || skipped[m.ID] || strings.TrimSpace(m.Text) == "" {
+		if m.Own || skipped[m.ID] {
 			continue
 		}
-		entries = append(entries, Entry{Role: RoleUser, Text: m.Text, Actor: m.Actor, SurfaceID: m.ID, At: m.At})
+		e := Entry{Role: RoleUser, Text: m.Text, Actor: m.Actor, SurfaceID: m.ID, At: m.At}
+		if m.Files != nil {
+			if known == nil {
+				if known, err = heldSurfaceIDs(ctx, store, key); err != nil {
+					return fmt.Errorf("thread: reconcile %s: %w", key, err)
+				}
+			}
+			if !known[m.ID] {
+				if e.Attachments, err = m.Files(ctx); err != nil {
+					return fmt.Errorf("thread: reconcile %s: files of surface message %s: %w", key, m.ID, err)
+				}
+			}
+		}
+		if strings.TrimSpace(e.Text) == "" && len(e.Attachments) == 0 {
+			continue
+		}
+		entries = append(entries, e)
 	}
 	if len(entries) == 0 {
 		return nil
@@ -104,4 +133,27 @@ func Reconcile(ctx context.Context, store Store, lister Lister, key Key, surface
 		return fmt.Errorf("thread: reconcile %s: %w", key, err)
 	}
 	return nil
+}
+
+// heldSurfaceIDs returns the surface message ids the thread already holds. It
+// is read only when some listed message has files, which is what it exists to
+// avoid fetching twice. A message appended between this read and the Append
+// below is fetched once more and then recognized by Append, so a race costs a
+// download and never a duplicate entry.
+func heldSurfaceIDs(ctx context.Context, store Store, key Key) (map[string]bool, error) {
+	head, err := store.Head(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := store.History(ctx, key, head)
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.SurfaceID != "" {
+			held[e.SurfaceID] = true
+		}
+	}
+	return held, nil
 }

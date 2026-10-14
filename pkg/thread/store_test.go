@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/thread"
 )
@@ -342,13 +344,14 @@ func TestTheJournalRefusesWhatItCouldNotKeepConsistent(t *testing.T) {
 		key   thread.Key
 		entry thread.Entry
 	}{
-		"no tenant":   {thread.Key{Agent: "docs-bot", Surface: key.Surface}, user("run-1", "hi")},
-		"no agent":    {thread.Key{Tenant: tenantA, Surface: key.Surface}, user("run-1", "hi")},
-		"no surface":  {thread.Key{Tenant: tenantA, Agent: "docs-bot"}, user("run-1", "hi")},
-		"no role":     {key, thread.Entry{Text: "hi", RunID: "run-1"}},
-		"unknown":     {key, thread.Entry{Role: "system", Text: "hi", RunID: "run-1"}},
-		"no text":     {key, user("run-1", "  ")},
-		"no identity": {key, thread.Entry{Role: thread.RoleUser, Text: "hi"}},
+		"no tenant":        {thread.Key{Agent: "docs-bot", Surface: key.Surface}, user("run-1", "hi")},
+		"no agent":         {thread.Key{Tenant: tenantA, Surface: key.Surface}, user("run-1", "hi")},
+		"no surface":       {thread.Key{Tenant: tenantA, Agent: "docs-bot"}, user("run-1", "hi")},
+		"no role":          {key, thread.Entry{Text: "hi", RunID: "run-1"}},
+		"unknown":          {key, thread.Entry{Role: "system", Text: "hi", RunID: "run-1"}},
+		"no text":          {key, user("run-1", "  ")},
+		"no text or files": {key, thread.Entry{Role: thread.RoleUser, Text: " ", SurfaceID: "1699.9", Attachments: []attachment.Attachment{}}},
+		"no identity":      {key, thread.Entry{Role: thread.RoleUser, Text: "hi"}},
 	}
 	for name, tc := range cases {
 		// A valid entry rides along, to prove a refused append writes nothing.
@@ -372,6 +375,60 @@ func TestTheJournalRefusesWhatItCouldNotKeepConsistent(t *testing.T) {
 	}
 	if out, err := s.Append(ctx, key); err != nil || len(out) != 0 {
 		t.Errorf("Append of nothing = %v, %v; want nothing and no error", out, err)
+	}
+}
+
+// A file posted with a message is part of what was said, so the journal keeps
+// the reference with the entry: read back unchanged, in order, and never
+// reachable for editing through a returned slice. A message that was only a
+// file is still a message.
+func TestAnEntryKeepsItsAttachmentsAsReferencesInOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newStore(t)
+	key := slackThread("docs-bot")
+	origin := address.MustParse("slack://T01/C02?thread=1699.001")
+	shot := attachment.Attachment{Digest: strings.Repeat("a", 64), MediaType: "image/png", Name: "shot.png", Size: 2048, Origin: origin, Alt: "the error"}
+	log := attachment.Attachment{Digest: strings.Repeat("b", 64), MediaType: "text/plain", Name: "build.log", Size: 77}
+	gone := attachment.Missing("huge.mov", origin, "", "it is larger than the 25.0 MB limit for one file")
+
+	q := user("run-1", "why does this fail?")
+	q.Attachments = []attachment.Attachment{shot, log, gone}
+	fileOnly := posted("1699.003", "")
+	fileOnly.Attachments = []attachment.Attachment{log}
+	plain := posted("1699.004", "no files here")
+	plain.Attachments = []attachment.Attachment{}
+
+	wrote := mustAppend(t, s, key, q, assistant("run-1", "the log says why"), fileOnly, plain)
+	got := mustHistory(t, s, key)
+	if !reflect.DeepEqual(got, wrote) {
+		t.Fatalf("entries read back differ from what Append returned:\n got %+v\nwant %+v", got, wrote)
+	}
+	if !reflect.DeepEqual(got[0].Attachments, q.Attachments) {
+		t.Errorf("attachments = %+v, want %+v in order", got[0].Attachments, q.Attachments)
+	}
+	if got[1].Attachments != nil || got[3].Attachments != nil {
+		t.Errorf("an entry with no attachments read back as %#v and %#v, want nil", got[1].Attachments, got[3].Attachments)
+	}
+	if len(got[2].Attachments) != 1 || got[2].Text != "" {
+		t.Errorf("a file-only message read back as %+v", got[2])
+	}
+
+	got[0].Attachments[0].Name = "tampered.png"
+	wrote[0].Attachments[1].Name = "tampered.log"
+	q.Attachments[2].Name = "tampered.mov"
+	again, err := s.History(ctx, key, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := []string{again[0].Attachments[0].Name, again[0].Attachments[1].Name, again[0].Attachments[2].Name}; !reflect.DeepEqual(names, []string{"shot.png", "build.log", "huge.mov"}) {
+		t.Errorf("a caller edited stored attachments through a slice it held: %v", names)
+	}
+
+	bad := posted("1699.005", "forged")
+	bad.Attachments = []attachment.Attachment{{Digest: "../etc/passwd", MediaType: "text/plain"}}
+	if _, err := s.Append(ctx, key, bad); !errors.Is(err, thread.ErrInvalid) {
+		t.Errorf("Append with a malformed attachment = %v, want ErrInvalid", err)
 	}
 }
 

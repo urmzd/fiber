@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/thread"
 	"github.com/urmzd/mandatum/pkg/thread/threadtest"
@@ -182,4 +184,64 @@ type listerFunc func(context.Context, string, address.Address) ([]thread.Message
 
 func (f listerFunc) Messages(ctx context.Context, tenant string, surface address.Address) ([]thread.Message, error) {
 	return f(ctx, tenant, surface)
+}
+
+// Files posted in a thread reach the journal with their message, in order, and
+// each message's files are brought in once: when the message first joins the
+// journal, never again on a later reconciliation, and never for the message
+// being answered or one the deployment posted itself. A message that is only
+// a file is still a message.
+func TestReconcileBringsInEachMessagesFilesOnceAndInOrder(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	surface := threadtest.NewSurface()
+	key := slackThread("docs-bot")
+	shot := attachment.Attachment{Digest: strings.Repeat("a", 64), MediaType: "image/png", Name: "shot.png", Size: 10}
+	trace := attachment.Attachment{Digest: strings.Repeat("b", 64), MediaType: "text/plain", Name: "trace.txt", Size: 5}
+	refused := attachment.Missing("big.mov", slackSource, "", "it is larger than the 25.0 MB limit for one file")
+
+	surface.PostFiles(tenantA, slackSource, "ada", "here is the failure", shot, trace)
+	surface.PostFiles(tenantA, slackSource, "grace", "", refused)
+	surface.PostFiles(tenantA, slackSource, "ada", "", nil...)
+	tagging := surface.PostFiles(tenantA, slackSource, "ada", "@docs-bot why?", shot)
+	reconcile(t, s, surface, key, tagging)
+	reconcile(t, s, surface, key, tagging)
+
+	got := mustHistory(t, s, key)
+	if len(got) != 2 {
+		t.Fatalf("journal = %+v, want the two messages that said or attached something", got)
+	}
+	if !reflect.DeepEqual(got[0].Attachments, []attachment.Attachment{shot, trace}) || got[0].Text != "here is the failure" {
+		t.Errorf("first message = %+v", got[0])
+	}
+	if !reflect.DeepEqual(got[1].Attachments, []attachment.Attachment{refused}) || got[1].Text != "" {
+		t.Errorf("a file-only message = %+v", got[1])
+	}
+	// Three messages not yet journaled were fetched on the first pass (the
+	// empty one has nothing, but its message was new); the second pass
+	// fetched only the one with nothing to journal, which never joins.
+	if n := surface.Fetches(); n != 4 {
+		t.Errorf("files were brought in %d times over two reconciliations, want 4: once per new message, plus the empty one again", n)
+	}
+}
+
+// A surface whose files cannot be listed fails the reconciliation as a whole,
+// which the runtime logs and moves past, and writes nothing half way.
+func TestReconcileWritesNothingWhenAMessagesFilesFail(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	key := slackThread("docs-bot")
+	boom := errors.New("files.info: ratelimited")
+	lister := listerFunc(func(context.Context, string, address.Address) ([]thread.Message, error) {
+		return []thread.Message{
+			{ID: "1", Text: "first"},
+			{ID: "2", Text: "second", Files: func(context.Context) ([]attachment.Attachment, error) { return nil, boom }},
+		}, nil
+	})
+	if err := thread.Reconcile(context.Background(), s, lister, key, slackSource); !errors.Is(err, boom) {
+		t.Fatalf("Reconcile = %v, want the files error", err)
+	}
+	if got := mustHistory(t, s, key); len(got) != 0 {
+		t.Fatalf("a failed reconciliation wrote %+v", got)
+	}
 }
