@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0 (2026-10-14)
+
+### Features
+
+- report usage per run (#15) ([2a1db37](https://github.com/urmzd/mandatum/commit/2a1db3783c89a52aff1f9f43d046498420e338bc))
+
+[Full Changelog](https://github.com/urmzd/mandatum/compare/v0.9.0...v0.10.0)
+
+
 ## 0.9.0 (2026-10-14)
 
 ### Features
