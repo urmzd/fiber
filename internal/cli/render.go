@@ -131,12 +131,33 @@ func renderEventText(u *ui, e *mandatumv1.Event, answerOnly bool) {
 		if v.Rev > 0 {
 			line += fmt.Sprintf(" rev=%d", v.Rev)
 		}
+		if q := v.Question; q != nil {
+			// A parked run says what it is waiting on a person for, and
+			// which question to answer.
+			line += fmt.Sprintf(" question=%s %s %q", q.ID, q.Kind, oneLine(q.Prompt))
+			if len(q.Options) > 0 {
+				line += " options=" + strings.Join(q.Options, "|")
+			}
+			if q.Tool != nil {
+				line += " tool=" + q.Tool.Name + " " + oneLine(string(q.Tool.Arguments))
+			}
+		}
+		if a := v.Answer; a != nil {
+			line += " answer=" + oneLine(firstNonEmptyString(a.Decision, a.Choice, a.Text))
+			if a.Expired {
+				line += " (expired)"
+			} else if a.By != "" {
+				line += " by=" + oneLine(a.By)
+			}
+		}
 		paint := u.dim
 		switch kind {
 		case envelope.KindCompleted:
 			paint = u.green
 		case envelope.KindFailed:
 			paint = u.red
+		case envelope.KindParked:
+			paint = u.yellow
 		}
 		if answerOnly {
 			u.logf("%s\n", paint(line))
@@ -162,6 +183,14 @@ func renderEventText(u *ui, e *mandatumv1.Event, answerOnly bool) {
 		if answerOnly {
 			u.logf("%s\n", u.yellow(line))
 			logUsage(u, v.Usage)
+			return
+		}
+		u.printf("%s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), u.yellow(line))
+
+	case payload.ChildQuestion:
+		line := fmt.Sprintf("%s run=%s question=%s %s %q", kind, v.RunID, v.Question.ID, v.Question.Kind, oneLine(v.Question.Prompt))
+		if answerOnly {
+			u.logf("%s\n", u.yellow(line))
 			return
 		}
 		u.printf("%s %s\n", u.dim(fmt.Sprintf("%4d", e.GetSeq())), u.yellow(line))

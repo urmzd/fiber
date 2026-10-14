@@ -89,6 +89,14 @@
 // retried, and remembered by its thread with what it had said so far. See
 // stop.go.
 //
+// # A run can park on a person
+//
+// A turn that needs a person (an approval, a choice, a reply) ends at the
+// question. The run publishes it on lifecycle.parked, waits on a duraturo
+// event record holding no worker, and continues the turn with the first
+// answer recorded (Answer), the question's default once it expires, or ends
+// stopped if it is stopped while it waits. See park.go.
+//
 // # Usage
 //
 // Every model call is published as usage.call as it happens, and a run's
@@ -141,6 +149,11 @@ const (
 	// replay of the turn re-publishes lifecycle events but must never pay for
 	// the model a second time.
 	ActivityAgent = "mandatum.turn.agent"
+	// ActivityResume continues a turn that parked on a question, with the
+	// answer. It is its own activity because its input is not Input: it
+	// carries the parked turn and the answer, both read from records, so a
+	// replay hashes the same input and reads the same result.
+	ActivityResume = "mandatum.turn.resume"
 )
 
 // ErrInvalid reports a tag or configuration this package cannot run.
@@ -278,6 +291,17 @@ type Request struct {
 	// for a durable run, which is keyed "<run>/a<attempt>"; a delegated
 	// sub-task is handed its parent's prefix extended by its own name.
 	Accounting string `json:"accounting,omitempty"`
+	// Park lets the turn end at a question for a person (see
+	// agentrt.Turn.Park). The runtime sets it for a durable run when it can
+	// record a question and its answer, which takes WithStopLedger. A
+	// delegated sub-task never has it.
+	Park bool `json:"park,omitempty"`
+	// QuestionTTL is how long a question waits for an answer.
+	QuestionTTL time.Duration `json:"question_ttl,omitempty"`
+	// Resume continues a turn that parked, with the answers its pending tool
+	// calls have. Like Revision and History it is a resolved value, read
+	// from the run's records.
+	Resume *agentrt.Parked `json:"resume,omitempty"`
 }
 
 // Agent returns the agent name.
@@ -325,6 +349,10 @@ type Outcome struct {
 	// UsageAttempts is set by the runtime: the earlier attempts whose usage
 	// records Usage counts, which the workflow body claims.
 	UsageAttempts []int `json:"usage_attempts,omitempty"`
+	// Parked is set when the turn ended at a question for a person. Text is
+	// then what it had said so far. An executor sets it from
+	// agentrt.Result.Parked.
+	Parked *agentrt.Parked `json:"parked,omitempty"`
 }
 
 // Acceptance is what a caller learns when a tag is accepted. It mirrors
@@ -408,9 +436,15 @@ type Runtime struct {
 	stopGrace time.Duration
 	stopPoll  time.Duration
 
+	// waker wakes a parked run once its question is answered or it is
+	// stopped. Nil leaves it to the worker's janitor.
+	waker       Waker
+	questionTTL time.Duration
+
 	registry *run.Registry
 	turn     *duraturo.ActivityFn[Input, Output]
 	agent    *duraturo.ActivityFn[Input, Outcome]
+	resume   *duraturo.ActivityFn[Continue, Outcome]
 }
 
 // Option configures a Runtime.
@@ -512,6 +546,8 @@ func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Opt
 
 		stopGrace: DefaultStopGrace,
 		stopPoll:  DefaultStopPoll,
+
+		questionTTL: agentrt.DefaultQuestionTTL,
 	}
 	// Stopping needs the reading half of the bus. It is discovered rather
 	// than configured, as a connector's roles are: every backend in pkg/bus
@@ -528,6 +564,7 @@ func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Opt
 	}
 	r.turn = duraturo.ActivityIn(r.registry, ActivityTurn, r.runTurn)
 	r.agent = duraturo.ActivityIn(r.registry, ActivityAgent, r.runAgent)
+	r.resume = duraturo.ActivityIn(r.registry, ActivityResume, r.runResume)
 	return r, nil
 }
 
@@ -619,32 +656,50 @@ func (r *Runtime) Result(ctx context.Context, runID string) (Output, error) {
 // It publishes the run's lifecycle and delegates the work. Everything in it is
 // either derived from the pinned input or read from the replay frame, so a
 // replay produces the same decisions; nothing here resolves, reads a clock for a
-// decision, or forks.
+// decision, or forks. A turn that parks on a question waits for the answer as
+// a duraturo event record and continues in a later attempt (see park.go).
 func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	attempt := attemptOf(ctx)
 	b, err := newBand(r.stride, attempt)
 	if err != nil {
 		return Output{}, duraturo.NonRetryable(err)
 	}
-
-	// Attempt 1 started the work; every later attempt resumed it, whether it
-	// was parked on an event or interrupted by a crash. The two are one fact
-	// for a subscriber — this run is executing again — and the attempt number
-	// in the payload is what distinguishes them for anyone who cares.
-	opened := envelope.KindStarted
-	if attempt > 1 {
-		opened = envelope.KindResumed
-	}
-	if err := r.publish(ctx, in, b.open, opened, payload.Lifecycle{Attempt: attempt, Rev: in.Rev}); err != nil {
-		return Output{}, err
-	}
+	at := &attemptLog{r: r, in: in, band: b, attempt: attempt}
+	// The agent activity opens the attempt when it executes for real; a
+	// memoized replay publishes nothing until the body has something new to
+	// say. A parked run the janitor wakes with no answer says nothing at all.
+	ctx = context.WithValue(ctx, openerKey{}, at.open)
 
 	out, err := r.agent.Call(ctx, in)
+	claimed := map[int]bool{}
+	var said strings.Builder
+	parks := 0
+	for err == nil && out.Parked != nil {
+		r.claimUsage(ctx, in, out.UsageAttempts, claimed)
+		said.WriteString(out.Text)
+		res, werr := r.awaitAnswer(ctx, at, out)
+		if werr != nil {
+			return Output{}, werr
+		}
+		if res.Stopped != nil {
+			out.Text = said.String()
+			return r.stoppedWhileParked(ctx, at, out, *res.Stopped, parks)
+		}
+		parks++
+		at.answer = res.Answer
+		next := *out.Parked
+		next.Answers = make(map[string]payload.Answer, len(out.Parked.Answers)+1)
+		for k, v := range out.Parked.Answers {
+			next.Answers[k] = v
+		}
+		next.Answers[out.Parked.CallID] = *res.Answer
+		out, err = r.resume.Call(ctx, Continue{Input: in, Seq: parks, Parked: next})
+	}
 	switch {
 	case errors.Is(err, run.ErrParked):
 		// The run stopped at an event that has no record yet. It is not
 		// failed and it has not consumed retry budget; it waits.
-		r.report(ctx, in, b.close, envelope.KindParked, payload.Lifecycle{
+		at.report(ctx, envelope.KindParked, payload.Lifecycle{
 			Attempt: attempt, Rev: in.Rev, Reason: err.Error(),
 		})
 		return Output{}, err
@@ -655,12 +710,15 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// error will not be attempted again, anything else may be. A run that
 		// later exhausts its budget has its last failure on the bus marked
 		// non-terminal; the ledger stays the authority on run status.
-		r.report(ctx, in, b.close, envelope.KindFailed, payload.Lifecycle{
+		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
 			Attempt: attempt, Rev: in.Rev, Error: err.Error(),
 			Terminal: run.IsNonRetryable(err) || errors.Is(err, run.ErrNonDeterministic),
 		})
 		return Output{}, err
 	}
+	// The run's answer is everything it said, across every park.
+	said.WriteString(out.Text)
+	out.Text = said.String()
 
 	// The exchange joins the thread before the run is announced complete, so
 	// that a tag raised in reply to the answer always finds the answer in the
@@ -668,68 +726,123 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	// run. A stopped run is remembered the same way, for the same reason: the
 	// reply to a stopped answer is the whole point of stopping gently.
 	if err := r.remember(ctx, in, out); err != nil {
-		r.report(ctx, in, b.close, envelope.KindFailed, payload.Lifecycle{
+		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
 			Attempt: attempt, Rev: in.Rev, Error: err.Error(),
 		})
 		return Output{}, err
 	}
 
 	if out.StopRecorded {
-		// Claim the request, for the one case where it matters: duraturo
-		// replays from the records it loaded when the attempt began, and
-		// logs any of those that no call read. A request recorded before this
-		// attempt began is among them and is claimed here. One recorded
-		// during the attempt is not among them; it reads as an event that
-		// has not happened (ErrParked), which here means only that there is
-		// nothing to claim, and the body carries on. The claim is advisory
-		// either way: the outcome is already decided.
-		_, err := duraturo.Event[json.RawMessage](ctx, stopRecordName)
-		switch {
-		case err == nil, errors.Is(err, run.ErrParked):
-		default:
-			r.logger.Warn("mandatum/runtime: could not claim the recorded stop request",
-				"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
-		}
+		r.claimStop(ctx, in)
 	}
-	r.claimUsage(ctx, in, out.UsageAttempts)
+	r.claimUsage(ctx, in, out.UsageAttempts, claimed)
+	// accepted, opened, the agent's chunks, a parked and a resumed per
+	// question, and the terminal event.
+	events := out.Chunks + 3 + 2*parks
 	if out.Stopped != nil {
 		// The run is over and nothing failed. Returning a result rather than
 		// an error is what tells the ledger so: it records the run as ended
 		// and never retries it. Everything here comes from the agent's
 		// recorded outcome, so a replay announces the same stop.
-		if err := r.publish(ctx, in, b.close, envelope.KindStopped, payload.Stopped{
+		if err := at.publish(ctx, envelope.KindStopped, payload.Stopped{
 			Attempt: attempt, Rev: in.Rev, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
 			Usage: out.Usage,
 		}); err != nil {
 			return Output{}, err
 		}
 		return Output{
-			Rev:     in.Rev,
-			Text:    out.Text,
-			LastSeq: b.close,
-			Attempt: attempt,
-			// accepted, opened, the agent's chunks, and stopped.
-			Events:  out.Chunks + 3,
-			Stopped: out.Stopped,
-			Usage:   out.Usage,
+			Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
+			Events: events, Stopped: out.Stopped, Usage: out.Usage,
 		}, nil
 	}
 
-	if err := r.publish(ctx, in, b.close, envelope.KindCompleted, payload.Lifecycle{
+	if err := at.publish(ctx, envelope.KindCompleted, payload.Lifecycle{
 		Attempt: attempt, Rev: in.Rev, Text: out.Text, Usage: out.Usage,
 	}); err != nil {
 		return Output{}, err
 	}
 	return Output{
-		Rev:     in.Rev,
-		Text:    out.Text,
-		LastSeq: b.close,
-		Attempt: attempt,
-		// accepted, opened, the agent's chunks, and completed.
-		Events: out.Chunks + 3,
-		Stored: out.Stored,
-		Usage:  out.Usage,
+		Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
+		Events: events, Stored: out.Stored, Usage: out.Usage,
 	}, nil
+}
+
+// claimStop claims a recorded stop request, for the one case where it
+// matters: duraturo replays from the records it loaded when the attempt
+// began, and logs any of those that no call read. A request recorded before
+// this attempt began is among them and is claimed here. One recorded during
+// the attempt is not among them; it reads as an event that has not happened
+// (ErrParked), which here means only that there is nothing to claim, and the
+// body carries on. The claim is advisory either way: the outcome is already
+// decided.
+func (r *Runtime) claimStop(ctx context.Context, in Input) {
+	_, err := duraturo.Event[json.RawMessage](ctx, stopRecordName)
+	switch {
+	case err == nil, errors.Is(err, run.ErrParked):
+	default:
+		r.logger.Warn("mandatum/runtime: could not claim the recorded stop request",
+			"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
+	}
+}
+
+// attemptLog publishes one attempt's lifecycle into its sequence band.
+//
+// The attempt is opened (lifecycle.started, or resumed after the first) by the
+// first thing it publishes, not when it begins: the agent activity opens it
+// when it executes for real, and the body when it announces something. An
+// attempt that only replays recorded work and parks again, as a parked run
+// does every time the worker's janitor polls it, publishes nothing.
+type attemptLog struct {
+	r       *Runtime
+	in      Input
+	band    band
+	attempt int
+	opened  bool
+	// answer is the answer this attempt resumed with, carried on its
+	// resumed event.
+	answer *payload.Answer
+}
+
+type openerKey struct{}
+
+// open publishes the attempt's opening event, once.
+func (a *attemptLog) open(ctx context.Context) error {
+	if a.opened {
+		return nil
+	}
+	kind := envelope.KindStarted
+	if a.attempt > 1 {
+		// Attempt 1 started the work; every later attempt resumed it, whether
+		// it was parked on a question or interrupted by a crash. The answer,
+		// when there is one, says which.
+		kind = envelope.KindResumed
+	}
+	if err := a.r.publish(ctx, a.in, a.band.open, kind, payload.Lifecycle{
+		Attempt: a.attempt, Rev: a.in.Rev, Answer: a.answer,
+	}); err != nil {
+		return err
+	}
+	a.opened = true
+	return nil
+}
+
+// publish opens the attempt if it has not been, then publishes the attempt's
+// last event: it takes the band's closing sequence.
+func (a *attemptLog) publish(ctx context.Context, kind envelope.Kind, body any) error {
+	if err := a.open(ctx); err != nil {
+		return err
+	}
+	return a.r.publish(ctx, a.in, a.band.close, kind, body)
+}
+
+// report publishes an event whose failure must not mask the failure it reports.
+// A parked or failed turn already has an error on its way up; losing the
+// announcement of it is worth a log line, not a different error.
+func (a *attemptLog) report(ctx context.Context, kind envelope.Kind, body any) {
+	if err := a.publish(ctx, kind, body); err != nil {
+		a.r.logger.Warn("mandatum/runtime: could not publish lifecycle event",
+			"run_id", RunID(a.in.Tag.Tenant, a.in.Tag.ID), "kind", string(kind), "seq", a.band.close, "error", err)
+	}
 }
 
 // runAgent is the nested activity that executes the agent.
@@ -739,6 +852,23 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 // memoized, which is the whole reason it is a separate activity: a replay of the
 // turn must re-publish the run's lifecycle without paying for the model again.
 func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
+	return r.executeAgent(ctx, in, nil)
+}
+
+// runResume is the activity that continues a parked turn with its answer.
+func (r *Runtime) runResume(ctx context.Context, c Continue) (Outcome, error) {
+	return r.executeAgent(ctx, c.Input, &c.Parked)
+}
+
+// executeAgent is the agent activity's body, for a fresh turn or for the
+// continuation of a parked one.
+func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Parked) (Outcome, error) {
+	// This attempt is doing real work: it says so before anything else.
+	if open, ok := ctx.Value(openerKey{}).(func(context.Context) error); ok {
+		if err := open(ctx); err != nil {
+			return Outcome{}, err
+		}
+	}
 	rev, err := r.pinned(ctx, in)
 	if err != nil {
 		return Outcome{}, err
@@ -766,6 +896,12 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		Revision: rev,
 
 		Attachments: in.Tag.Attachments,
+
+		// A question can be parked on only where its answer can be
+		// recorded: in the ledger the run lives in.
+		Park:        r.stops != nil,
+		QuestionTTL: r.questionTTL,
+		Resume:      resume,
 	}
 
 	// What earlier attempts spent and failed is read here, inside the
@@ -777,6 +913,7 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 	// A Delegator's report of a child run is checked against the ledger and
 	// its total read from there; see ReportChildUsage.
 	execCtx := context.WithValue(ctx, childUsageKey{}, r.childUsage(in.Tag.Tenant, req.RunID))
+	execCtx = context.WithValue(execCtx, childQuestionKey{}, r.childQuestion(in.Tag.Tenant, req.RunID))
 	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
 		// A call is counted when it is reported, before it is published:
 		// the tokens were spent whether or not the bus takes the event.
@@ -789,6 +926,10 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		}
 		return r.publishRaw(ctx, in, seq, c.Kind, c.Payload)
 	})
+	if resume != nil {
+		// The request is the parked turn's, whatever path this turn took.
+		out.Prompt = resume.Prompt
+	}
 	mine := meter.snapshot()
 	// The attempt spent what it spent. Its calls go on the run before the
 	// outcome goes up, whatever the outcome: a failure is retried, and a
@@ -1034,16 +1175,6 @@ func (r *Runtime) publishRaw(ctx context.Context, in Input, seq uint64, kind env
 			"run_id", e.RunID, "seq", seq, "kind", string(kind), "error", err)
 	}
 	return nil
-}
-
-// report publishes an event whose failure must not mask the failure it reports.
-// A parked or failed turn already has an error on its way up; losing the
-// announcement of it is worth a log line, not a different error.
-func (r *Runtime) report(ctx context.Context, in Input, seq uint64, kind envelope.Kind, body any) {
-	if err := r.publish(ctx, in, seq, kind, body); err != nil {
-		r.logger.Warn("mandatum/runtime: could not publish lifecycle event",
-			"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "kind", string(kind), "seq", seq, "error", err)
-	}
 }
 
 // event builds the identity every event of a run shares. The topic is the most

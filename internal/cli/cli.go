@@ -177,6 +177,7 @@ func newRootCmd(v Version) *cobra.Command {
 		newIndexCmd(),
 		newTagCmd(),
 		newStopCmd(),
+		newAnswerCmd(),
 		newListenCmd(),
 		newVersionCmd(v),
 		newUpdateCmd(v),

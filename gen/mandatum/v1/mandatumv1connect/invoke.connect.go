@@ -61,6 +61,8 @@ const (
 	InvokeServiceInvokeStreamProcedure = "/mandatum.v1.InvokeService/InvokeStream"
 	// InvokeServiceGetRunProcedure is the fully-qualified name of the InvokeService's GetRun RPC.
 	InvokeServiceGetRunProcedure = "/mandatum.v1.InvokeService/GetRun"
+	// InvokeServiceAnswerProcedure is the fully-qualified name of the InvokeService's Answer RPC.
+	InvokeServiceAnswerProcedure = "/mandatum.v1.InvokeService/Answer"
 )
 
 // InvokeServiceClient is a client for the mandatum.v1.InvokeService service.
@@ -88,6 +90,16 @@ type InvokeServiceClient interface {
 	// tag it was accepted from, and its last event sequence number. It reads the
 	// ledger and never touches a worker, so it is safe to poll.
 	GetRun(context.Context, *connect.Request[v1.GetRunRequest]) (*connect.Response[v1.Run], error)
+	// Answer answers a question a run is parked on and wakes the run. The first
+	// answer recorded is the answer: a second one is told it, with first false.
+	// An answer is checked against its question (a decision is approve or deny,
+	// edited arguments fit the tool's schema, a choice is one offered, a reply
+	// is not empty) and refused with INVALID_ARGUMENT when it does not fit. A
+	// question of another tenant's run is NOT_FOUND, like one that does not
+	// exist; a question whose run was stopped or ended is FAILED_PRECONDITION.
+	// An answer after the question expired records its default, and returns
+	// that.
+	Answer(context.Context, *connect.Request[v1.AnswerRequest]) (*connect.Response[v1.AnswerResponse], error)
 }
 
 // NewInvokeServiceClient constructs a client for the mandatum.v1.InvokeService service. By default,
@@ -119,6 +131,12 @@ func NewInvokeServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(invokeServiceMethods.ByName("GetRun")),
 			connect.WithClientOptions(opts...),
 		),
+		answer: connect.NewClient[v1.AnswerRequest, v1.AnswerResponse](
+			httpClient,
+			baseURL+InvokeServiceAnswerProcedure,
+			connect.WithSchema(invokeServiceMethods.ByName("Answer")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -127,6 +145,7 @@ type invokeServiceClient struct {
 	invoke       *connect.Client[v1.Tag, v1.InvokeResponse]
 	invokeStream *connect.Client[v1.Tag, v1.Event]
 	getRun       *connect.Client[v1.GetRunRequest, v1.Run]
+	answer       *connect.Client[v1.AnswerRequest, v1.AnswerResponse]
 }
 
 // Invoke calls mandatum.v1.InvokeService.Invoke.
@@ -142,6 +161,11 @@ func (c *invokeServiceClient) InvokeStream(ctx context.Context, req *connect.Req
 // GetRun calls mandatum.v1.InvokeService.GetRun.
 func (c *invokeServiceClient) GetRun(ctx context.Context, req *connect.Request[v1.GetRunRequest]) (*connect.Response[v1.Run], error) {
 	return c.getRun.CallUnary(ctx, req)
+}
+
+// Answer calls mandatum.v1.InvokeService.Answer.
+func (c *invokeServiceClient) Answer(ctx context.Context, req *connect.Request[v1.AnswerRequest]) (*connect.Response[v1.AnswerResponse], error) {
+	return c.answer.CallUnary(ctx, req)
 }
 
 // InvokeServiceHandler is an implementation of the mandatum.v1.InvokeService service.
@@ -169,6 +193,16 @@ type InvokeServiceHandler interface {
 	// tag it was accepted from, and its last event sequence number. It reads the
 	// ledger and never touches a worker, so it is safe to poll.
 	GetRun(context.Context, *connect.Request[v1.GetRunRequest]) (*connect.Response[v1.Run], error)
+	// Answer answers a question a run is parked on and wakes the run. The first
+	// answer recorded is the answer: a second one is told it, with first false.
+	// An answer is checked against its question (a decision is approve or deny,
+	// edited arguments fit the tool's schema, a choice is one offered, a reply
+	// is not empty) and refused with INVALID_ARGUMENT when it does not fit. A
+	// question of another tenant's run is NOT_FOUND, like one that does not
+	// exist; a question whose run was stopped or ended is FAILED_PRECONDITION.
+	// An answer after the question expired records its default, and returns
+	// that.
+	Answer(context.Context, *connect.Request[v1.AnswerRequest]) (*connect.Response[v1.AnswerResponse], error)
 }
 
 // NewInvokeServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -196,6 +230,12 @@ func NewInvokeServiceHandler(svc InvokeServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(invokeServiceMethods.ByName("GetRun")),
 		connect.WithHandlerOptions(opts...),
 	)
+	invokeServiceAnswerHandler := connect.NewUnaryHandler(
+		InvokeServiceAnswerProcedure,
+		svc.Answer,
+		connect.WithSchema(invokeServiceMethods.ByName("Answer")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/mandatum.v1.InvokeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case InvokeServiceInvokeProcedure:
@@ -204,6 +244,8 @@ func NewInvokeServiceHandler(svc InvokeServiceHandler, opts ...connect.HandlerOp
 			invokeServiceInvokeStreamHandler.ServeHTTP(w, r)
 		case InvokeServiceGetRunProcedure:
 			invokeServiceGetRunHandler.ServeHTTP(w, r)
+		case InvokeServiceAnswerProcedure:
+			invokeServiceAnswerHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -223,4 +265,8 @@ func (UnimplementedInvokeServiceHandler) InvokeStream(context.Context, *connect.
 
 func (UnimplementedInvokeServiceHandler) GetRun(context.Context, *connect.Request[v1.GetRunRequest]) (*connect.Response[v1.Run], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("mandatum.v1.InvokeService.GetRun is not implemented"))
+}
+
+func (UnimplementedInvokeServiceHandler) Answer(context.Context, *connect.Request[v1.AnswerRequest]) (*connect.Response[v1.AnswerResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("mandatum.v1.InvokeService.Answer is not implemented"))
 }

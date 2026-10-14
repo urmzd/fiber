@@ -1,0 +1,357 @@
+package agentrt_test
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/urmzd/saige/agent/agenttest"
+	saigetypes "github.com/urmzd/saige/agent/types"
+
+	"github.com/urmzd/mandatum/pkg/agentrt"
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/mandatum/pkg/envelope"
+)
+
+// parkFixture is an agent with a deploy tool that needs approval, a lookup
+// tool that does not, and ask_person, over one scripted model shared by every
+// turn built from it, so a continuation reads the script where the parked
+// turn stopped.
+type parkFixture struct {
+	model  *agenttest.ScriptedProvider
+	deploy *agenttest.MockTool
+	lookup *agenttest.MockTool
+	runner *agentrt.Runner
+}
+
+func newParkFixture(t *testing.T, approvals []string, script ...[]saigetypes.Delta) *parkFixture {
+	t.Helper()
+	f := &parkFixture{
+		model: &agenttest.ScriptedProvider{Responses: script},
+		deploy: &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "deploy", Parameters: saigetypes.ParameterSchema{
+			Type: "object", Required: []string{"env"},
+			Properties: map[string]saigetypes.PropertyDef{"env": {Type: "string"}},
+		}}, Result: "deployed"},
+		lookup: &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "lookup"}, Result: "found"},
+	}
+	rev := offlineRevision(1, "You deploy things.")
+	rev.Spec.Tools = []string{"deploy", "lookup", agentrt.AskPersonToolName}
+	rev.Spec.Approvals = approvals
+	r, err := agentrt.New(rev,
+		agentrt.WithTools(agentrt.StaticTools(f.deploy, f.lookup)),
+		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return f.model, nil }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	f.runner = r
+	return f
+}
+
+func (f *parkFixture) run(t *testing.T, turn agentrt.Turn) ([]agentrt.Chunk, agentrt.Result) {
+	t.Helper()
+	var got []agentrt.Chunk
+	res, err := f.runner.Run(context.Background(), turn, func(_ context.Context, c agentrt.Chunk) error {
+		got = append(got, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return got, res
+}
+
+func toolCalls(parts ...saigetypes.ToolCallPart) []saigetypes.Delta {
+	var out []saigetypes.Delta
+	for i, p := range parts {
+		out = append(out,
+			saigetypes.PartStart{Index: i, Kind: saigetypes.KindToolCall, ID: p.ID, Name: p.Name},
+			saigetypes.PartEnd{Index: i, Part: p})
+	}
+	return out
+}
+
+func textThen(text string, rest []saigetypes.Delta) []saigetypes.Delta {
+	out := saigetypes.PartDeltas(0, saigetypes.Text(text))
+	for _, d := range rest {
+		switch v := d.(type) {
+		case saigetypes.PartStart:
+			v.Index++
+			d = v
+		case saigetypes.PartEnd:
+			v.Index++
+			d = v
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// An approval parks the turn before anything in the model's batch runs, the
+// tool that needed no approval included, and the question carries the call.
+func TestAnApprovalParksTheTurnBeforeItsBatchRuns(t *testing.T) {
+	t.Parallel()
+	f := newParkFixture(t, []string{"deploy"},
+		textThen("Deploying now.", toolCalls(
+			saigetypes.ToolCallPart{ID: "c1", Name: "lookup", Arguments: map[string]any{}},
+			saigetypes.ToolCallPart{ID: "c2", Name: "deploy", Arguments: map[string]any{"env": "prod"}},
+		)))
+
+	got, res := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a1"})
+
+	if res.Parked == nil {
+		t.Fatalf("the turn did not park: %+v", res)
+	}
+	q := res.Parked.Question
+	if q.Kind != payload.QuestionApproval || q.Tool == nil || q.Tool.Name != "deploy" || q.Tool.CallID != "c2" {
+		t.Fatalf("question is %+v, want an approval of deploy c2", q)
+	}
+	if !strings.Contains(string(q.Tool.Arguments), `"prod"`) || q.ExpiresAt.IsZero() || q.Default == nil || q.Default.Decision != payload.DecisionDeny {
+		t.Errorf("question is %+v, want the arguments, an expiry and a deny default", q)
+	}
+	if len(f.deploy.Calls) != 0 || len(f.lookup.Calls) != 0 {
+		t.Errorf("deploy ran %d and lookup %d times while the turn parked, want 0 and 0", len(f.deploy.Calls), len(f.lookup.Calls))
+	}
+	if hasKind(got, envelope.KindToolDone) {
+		t.Errorf("chunks %v report a tool finishing in a batch that never ran", kinds(got))
+	}
+	if res.Text != "Deploying now." {
+		t.Errorf("text is %q, want what was said before the question", res.Text)
+	}
+	if f.model.CallCount() != 1 {
+		t.Errorf("the model was called %d times, want 1", f.model.CallCount())
+	}
+}
+
+// The continuation runs the parked batch with the answer, sends the model the
+// conversation it would have seen had nobody waited, byte for byte, and does
+// not publish or count the recorded call again.
+func TestAnApprovedContinuationRunsTheBatchAndKeepsThePromptStable(t *testing.T) {
+	t.Parallel()
+	batch := textThen("Deploying now.", toolCalls(
+		saigetypes.ToolCallPart{ID: "c1", Name: "lookup", Arguments: map[string]any{}},
+		saigetypes.ToolCallPart{ID: "c2", Name: "deploy", Arguments: map[string]any{"env": "prod"}},
+	))
+	done := agenttest.TextResponse("Deployed to prod.")
+
+	// The run nobody had to wait for: no approvals.
+	straight := newParkFixture(t, nil, batch, done)
+	_, want := straight.run(t, agentrt.Turn{Text: "ship it", Park: true})
+	if want.Parked != nil || want.Text != "Deploying now.Deployed to prod." {
+		t.Fatalf("the uninterrupted run gave %+v", want)
+	}
+
+	f := newParkFixture(t, []string{"deploy"}, batch, done)
+	_, parked := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a1"})
+	if parked.Parked == nil {
+		t.Fatal("the turn did not park")
+	}
+	resume := *parked.Parked
+	resume.Answers = map[string]payload.Answer{"c2": {QuestionID: parked.Parked.Question.ID, Decision: payload.DecisionApprove, By: "ana"}}
+	got, res := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a2", Resume: &resume})
+
+	if res.Parked != nil {
+		t.Fatalf("the continuation parked again on %+v", res.Parked.Question)
+	}
+	if len(f.deploy.Calls) != 1 || len(f.lookup.Calls) != 1 {
+		t.Errorf("deploy ran %d and lookup %d times, want once each", len(f.deploy.Calls), len(f.lookup.Calls))
+	}
+	if res.Text != "Deployed to prod." {
+		t.Errorf("continuation text is %q, want only what it said", res.Text)
+	}
+	if f.model.CallCount() != 2 {
+		t.Fatalf("the model was called %d times, want 2: the recorded call is not sent", f.model.CallCount())
+	}
+	for _, c := range got {
+		if c.Kind == envelope.KindToolCall {
+			tc, _ := payload.Decode[payload.ToolCall](envelope.Event{Kind: c.Kind, Payload: c.Payload})
+			if tc.Phase == payload.PhaseRequested {
+				t.Errorf("the continuation published the recorded call's request for %s again", tc.Name)
+			}
+		}
+		if c.Kind == envelope.KindText && strings.Contains(string(c.Payload), "Deploying now.") {
+			t.Error("the continuation published the recorded call's text again")
+		}
+	}
+	if n := countKind(got, envelope.KindUsageCall); n != 1 {
+		t.Errorf("the continuation reported %d model calls, want 1", n)
+	}
+	sent := renderMessages(f.model.Requests()[1].Messages)
+	if wantSent := renderMessages(straight.model.Requests()[1].Messages); sent != wantSent {
+		t.Errorf("the continuation sent\n%s\nwant what the uninterrupted run sent\n%s", sent, wantSent)
+	}
+}
+
+// A denial never runs the tool, and the model is told why.
+func TestADeniedApprovalIsNotRunAndTheModelSeesTheReason(t *testing.T) {
+	t.Parallel()
+	f := newParkFixture(t, []string{"deploy"},
+		toolCalls(saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}),
+		agenttest.TextResponse("Not deployed."))
+	_, parked := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a1"})
+	resume := *parked.Parked
+	resume.Answers = map[string]payload.Answer{"c1": {Decision: payload.DecisionDeny, Note: "freeze week"}}
+	_, res := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a2", Resume: &resume})
+
+	if len(f.deploy.Calls) != 0 {
+		t.Errorf("deploy ran %d times after a denial", len(f.deploy.Calls))
+	}
+	if !messagesContain(f.model.Requests()[1].Messages, "freeze week") {
+		t.Errorf("the model was not told the reason: %s", renderMessages(f.model.Requests()[1].Messages))
+	}
+	if res.Text != "Not deployed." {
+		t.Errorf("text is %q", res.Text)
+	}
+}
+
+// Edited arguments are what the tool runs with.
+func TestAnApprovalWithEditedArgumentsRunsTheEditedCall(t *testing.T) {
+	t.Parallel()
+	f := newParkFixture(t, []string{"deploy"},
+		toolCalls(saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}),
+		agenttest.TextResponse("Deployed."))
+	_, parked := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a1"})
+	resume := *parked.Parked
+	resume.Answers = map[string]payload.Answer{"c1": {Decision: payload.DecisionApprove, Arguments: json.RawMessage(`{"env":"staging"}`)}}
+	f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a2", Resume: &resume})
+
+	if len(f.deploy.Calls) != 1 || f.deploy.Calls[0]["env"] != "staging" {
+		t.Errorf("deploy ran with %v, want env staging once", f.deploy.Calls)
+	}
+}
+
+// ask_person parks as a choice when it offers options and as a reply when it
+// does not, and its result is the answer.
+func TestAskPersonParksAsAChoiceOrAReplyAndReturnsTheAnswer(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		args   map[string]any
+		kind   string
+		answer payload.Answer
+		want   string
+	}{
+		{"choice", map[string]any{"question": "Which region?", "options": []any{"eu", "us"}, "default": "eu"}, payload.QuestionChoice, payload.Answer{Choice: "us"}, "us"},
+		{"reply", map[string]any{"question": "What should the release be called?", "asked_of": "release-manager"}, payload.QuestionReply, payload.Answer{Text: "Aurora"}, "Aurora"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newParkFixture(t, nil,
+				toolCalls(saigetypes.ToolCallPart{ID: "q1", Name: agentrt.AskPersonToolName, Arguments: tc.args}),
+				agenttest.TextResponse("Thanks."))
+			_, parked := f.run(t, agentrt.Turn{Text: "release", Park: true, Accounting: "r/a1"})
+			if parked.Parked == nil {
+				t.Fatal("ask_person did not park the turn")
+			}
+			q := parked.Parked.Question
+			if q.Kind != tc.kind || q.Prompt != tc.args["question"] {
+				t.Fatalf("question is %+v, want a %s", q, tc.kind)
+			}
+			if tc.kind == payload.QuestionChoice && (len(q.Options) != 2 || q.Default == nil || q.Default.Choice != "eu") {
+				t.Errorf("choice is %+v, want two options and the default eu", q)
+			}
+			if tc.kind == payload.QuestionReply && q.AskedOf != "release-manager" {
+				t.Errorf("asked_of is %q", q.AskedOf)
+			}
+			resume := *parked.Parked
+			resume.Answers = map[string]payload.Answer{"q1": tc.answer}
+			f.run(t, agentrt.Turn{Text: "release", Park: true, Accounting: "r/a2", Resume: &resume})
+			if !messagesContain(f.model.Requests()[1].Messages, tc.want) {
+				t.Errorf("the model did not see the answer %q: %s", tc.want, renderMessages(f.model.Requests()[1].Messages))
+			}
+		})
+	}
+}
+
+// Two questions in one batch park twice: the second continuation carries both
+// answers, and the batch runs once, after both.
+func TestABatchWithTwoQuestionsParksOncePerQuestion(t *testing.T) {
+	t.Parallel()
+	f := newParkFixture(t, []string{"deploy"},
+		toolCalls(
+			saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}},
+			saigetypes.ToolCallPart{ID: "q1", Name: agentrt.AskPersonToolName, Arguments: map[string]any{"question": "Why?"}},
+		),
+		agenttest.TextResponse("Done."))
+	_, first := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a1"})
+	if first.Parked == nil || first.Parked.CallID != "c1" {
+		t.Fatalf("first park is %+v, want the deploy approval", first.Parked)
+	}
+	resume := *first.Parked
+	resume.Answers = map[string]payload.Answer{"c1": {Decision: payload.DecisionApprove}}
+	_, second := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a2", Resume: &resume})
+	if second.Parked == nil || second.Parked.CallID != "q1" {
+		t.Fatalf("second park is %+v, want the question", second.Parked)
+	}
+	if len(f.deploy.Calls) != 0 {
+		t.Fatal("deploy ran before the batch's second question was answered")
+	}
+	again := *second.Parked
+	again.Answers["q1"] = payload.Answer{Text: "audit"}
+	_, res := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a3", Resume: &again})
+	if res.Parked != nil || res.Text != "Done." || len(f.deploy.Calls) != 1 {
+		t.Errorf("third turn gave %+v with deploy run %d times", res, len(f.deploy.Calls))
+	}
+	if f.model.CallCount() != 2 {
+		t.Errorf("the model was called %d times, want 2", f.model.CallCount())
+	}
+}
+
+// A turn that may not park refuses approvals and tells the model ask_person
+// cannot be answered, so it carries on instead of waiting forever.
+func TestATurnThatCannotParkRefusesInsteadOfWaiting(t *testing.T) {
+	t.Parallel()
+	f := newParkFixture(t, []string{"deploy"},
+		toolCalls(
+			saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}},
+			saigetypes.ToolCallPart{ID: "q1", Name: agentrt.AskPersonToolName, Arguments: map[string]any{"question": "Sure?"}},
+		),
+		agenttest.TextResponse("Could not."))
+	_, res := f.run(t, agentrt.Turn{Text: "go"})
+	if res.Parked != nil || res.Text != "Could not." || len(f.deploy.Calls) != 0 {
+		t.Errorf("result %+v, deploy ran %d times; want a finished turn and no deploy", res, len(f.deploy.Calls))
+	}
+	if !messagesContain(f.model.Requests()[1].Messages, "no person can") {
+		t.Errorf("the model was not told: %s", renderMessages(f.model.Requests()[1].Messages))
+	}
+}
+
+// A parked turn's record survives JSON: what a runtime stores is what it
+// continues from.
+func TestAParkedTurnSurvivesItsRecord(t *testing.T) {
+	t.Parallel()
+	f := newParkFixture(t, []string{"deploy"},
+		textThen("First I look.", toolCalls(saigetypes.ToolCallPart{ID: "c0", Name: "lookup", Arguments: map[string]any{}})),
+		toolCalls(saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}),
+		agenttest.TextResponse("Deployed."))
+	_, parked := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a1"})
+	raw, err := json.Marshal(parked.Parked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back agentrt.Parked
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Transcript) != 2 {
+		t.Fatalf("transcript has %d messages, want the first call and its result", len(back.Transcript))
+	}
+	back.Answers = map[string]payload.Answer{"c1": {Decision: payload.DecisionApprove}}
+	_, res := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a2", Resume: &back})
+	if res.Text != "Deployed." || len(f.lookup.Calls) != 1 || len(f.deploy.Calls) != 1 {
+		t.Errorf("continuation gave %q, lookup %d, deploy %d; want each tool once", res.Text, len(f.lookup.Calls), len(f.deploy.Calls))
+	}
+	if !messagesContain(f.model.Requests()[2].Messages, "First I look.") {
+		t.Error("the continuation's model call is missing the conversation before the park")
+	}
+}
+
+func countKind(chunks []agentrt.Chunk, k envelope.Kind) int {
+	n := 0
+	for _, c := range chunks {
+		if c.Kind == k {
+			n++
+		}
+	}
+	return n
+}

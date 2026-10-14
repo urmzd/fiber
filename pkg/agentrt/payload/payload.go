@@ -145,6 +145,14 @@ type Lifecycle struct {
 	// Usage is what the run spent, on envelope.KindCompleted: every attempt,
 	// and everything it delegated. See RunUsage.
 	Usage *RunUsage `json:"usage,omitempty"`
+	// Question is what the run is waiting on a person for, on
+	// envelope.KindParked when the run parked on a question. A sink shows it
+	// and renders the run as waiting on a person.
+	Question *Question `json:"question,omitempty"`
+	// Answer is the answer the run resumed with, on envelope.KindResumed
+	// when the run had parked on a question: what a person said, or the
+	// question's default when nobody answered in time.
+	Answer *Answer `json:"answer,omitempty"`
 }
 
 // Stopped is the body of envelope.KindStopped: a run that was asked to stop
@@ -172,6 +180,113 @@ type Stopped struct {
 	// Usage is what the run spent before it stopped, the call that was cut
 	// short included when its provider had reported it. See RunUsage.
 	Usage *RunUsage `json:"usage,omitempty"`
+}
+
+// Question kinds: what a run is waiting on a person for.
+const (
+	// QuestionApproval asks whether a tool call may run, as the model asked
+	// for it or with arguments the person edits.
+	QuestionApproval = "approval"
+	// QuestionChoice asks for one of a fixed set of options.
+	QuestionChoice = "choice"
+	// QuestionReply asks for free text.
+	QuestionReply = "reply"
+)
+
+// Decisions on an approval.
+const (
+	DecisionApprove = "approve"
+	DecisionDeny    = "deny"
+)
+
+// Question is what a parked run is waiting on a person for. It travels on
+// envelope.KindParked (Lifecycle.Question) and is what a host renders as an
+// approval, a choice or a reply box.
+//
+// It is recorded on the run when the run parks and never changes, so a host
+// can show it again from the run's record (see the runtime's PendingQuestion)
+// as well as from the stream.
+type Question struct {
+	// ID identifies the question within its run. An answer names it.
+	ID string `json:"id"`
+	// Kind is QuestionApproval, QuestionChoice or QuestionReply.
+	Kind string `json:"kind"`
+	// Agent is the agent that asked.
+	Agent string `json:"agent,omitempty"`
+	// Prompt is the question, for a person.
+	Prompt string `json:"prompt"`
+	// Options are the answers a choice offers. An answer must be one of
+	// them.
+	Options []string `json:"options,omitempty"`
+	// Tool is the call an approval is about.
+	Tool *QuestionTool `json:"tool,omitempty"`
+	// AskedOf is a hint at who should answer: a role ("oncall") or a
+	// principal, as the agent or the tool's marker named it. It is a hint
+	// for routing the question to a person, not an authorization: the host
+	// decides who may answer.
+	AskedOf string `json:"asked_of,omitempty"`
+	// ExpiresAt is when an unanswered question is resolved by its default.
+	ExpiresAt time.Time `json:"expires_at,omitzero"`
+	// Default is the answer applied when the question expires unanswered:
+	// a denial for an approval, the stated default for a choice or a reply,
+	// or nothing, which the agent is told as "nobody answered".
+	Default *Answer `json:"default,omitempty"`
+	// At is when the run asked.
+	At time.Time `json:"at,omitzero"`
+}
+
+// QuestionTool is the tool call an approval asks about.
+type QuestionTool struct {
+	// Name is the tool.
+	Name string `json:"name"`
+	// CallID is the model's id for the call.
+	CallID string `json:"call_id"`
+	// Arguments are the arguments the model asked for, as a JSON object.
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// Schema is the tool's parameter schema, as JSON Schema. Edited
+	// arguments must satisfy it.
+	Schema json.RawMessage `json:"schema,omitempty"`
+}
+
+// Answer is a person's answer to a Question, or the question's default. It
+// travels on envelope.KindResumed (Lifecycle.Answer) and is recorded on the
+// run, once: the first answer recorded is the answer, and every later one is
+// told what it was.
+type Answer struct {
+	// QuestionID is the question answered.
+	QuestionID string `json:"question_id"`
+	// Decision is DecisionApprove or DecisionDeny, for an approval.
+	Decision string `json:"decision,omitempty"`
+	// Arguments replace the model's arguments on an approval, as a JSON
+	// object that satisfies the tool's schema. Empty keeps the model's.
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// Choice is the option chosen, for a choice.
+	Choice string `json:"choice,omitempty"`
+	// Text is the reply, for a reply.
+	Text string `json:"text,omitempty"`
+	// Note is anything the person added: a reason for a denial, a remark on
+	// an approval. The model is shown a denial's note.
+	Note string `json:"note,omitempty"`
+	// By is who answered, as the host authenticated them. It is never shown
+	// to the model.
+	By string `json:"by,omitempty"`
+	// At is when the answer was recorded.
+	At time.Time `json:"at,omitzero"`
+	// Expired is set when nobody answered in time and this is the
+	// question's default.
+	Expired bool `json:"expired,omitempty"`
+}
+
+// ChildQuestion is the body of envelope.KindChildParked: a child run the
+// parent delegated to is waiting on a person, and this is what it asked.
+// Answering it is answering the child run: RunID and Question.ID.
+type ChildQuestion struct {
+	// RunID is the child run.
+	RunID string `json:"run_id"`
+	// Agent is the child run's agent.
+	Agent string `json:"agent,omitempty"`
+	// Question is what the child asked.
+	Question Question `json:"question"`
 }
 
 // StopRequest is the body of envelope.KindStop: a request that one run stop.
@@ -638,6 +753,8 @@ func Of(e envelope.Event) (body any, known bool, err error) {
 		return decodeOr[Lifecycle](e)
 	case envelope.KindStopped:
 		return decodeOr[Stopped](e)
+	case envelope.KindChildParked:
+		return decodeOr[ChildQuestion](e)
 	case envelope.KindStop:
 		return decodeOr[StopRequest](e)
 	case envelope.KindUsageCall:

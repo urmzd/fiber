@@ -348,8 +348,140 @@ message Run {
   // failed run it is what its attempts spent before they failed.
   RunUsage usage = 16;
 
+  // PendingQuestion is what the run is waiting on a person for, set while
+  // status is RUN_STATUS_PARKED on a question. Answer it with
+  // InvokeService.Answer.
+  Question pending_question = 17;
+
   // Reserved for growth.
-  reserved 17 to 31;
+  reserved 18 to 31;
+}
+
+// Question is what a parked run is waiting on a person for: an approval of a
+// tool call, a choice among options, or a free-text reply. It is published on
+// lifecycle.parked when the run parks and kept on the run until it is
+// resolved.
+message Question {
+  // Id identifies the question within its run. An answer names it.
+  string id = 1;
+
+  // Kind is "approval", "choice" or "reply".
+  string kind = 2;
+
+  // Agent is the agent that asked.
+  string agent = 3;
+
+  // Prompt is the question, for a person.
+  string prompt = 4;
+
+  // Options are the answers a choice offers. An answer must be one of them.
+  repeated string options = 5;
+
+  // Tool is the call an approval is about.
+  QuestionTool tool = 6;
+
+  // AskedOf is a hint at who should answer, as a role or a principal. It is
+  // not an authorization: the host decides who may answer.
+  string asked_of = 7;
+
+  // ExpiresAt is when an unanswered question takes its default.
+  google.protobuf.Timestamp expires_at = 8;
+
+  // DefaultAnswer is what an unanswered question resolves to when it
+  // expires: a denial for an approval, the stated default for a choice or a
+  // reply. Unset when there is none, and the agent is then told nobody
+  // answered.
+  Answer default_answer = 9;
+
+  // AskedAt is when the run asked.
+  google.protobuf.Timestamp asked_at = 10;
+
+  // Reserved for growth.
+  reserved 11 to 19;
+}
+
+// QuestionTool is the tool call an approval asks about.
+message QuestionTool {
+  // Name is the tool.
+  string name = 1;
+
+  // CallId is the model's id for the call.
+  string call_id = 2;
+
+  // ArgumentsJson is the arguments the model asked for, as a JSON object.
+  string arguments_json = 3;
+
+  // SchemaJson is the tool's parameter schema, as JSON Schema. Edited
+  // arguments must satisfy it.
+  string schema_json = 4;
+
+  // Reserved for growth.
+  reserved 5 to 9;
+}
+
+// Answer is a person's answer to a Question, or the question's default.
+message Answer {
+  // QuestionId is the question answered. Set by the server.
+  string question_id = 1;
+
+  // Decision is "approve" or "deny", for an approval.
+  string decision = 2;
+
+  // ArgumentsJson replaces the model's arguments on an approval, as a JSON
+  // object that satisfies the tool's schema. Empty keeps the model's.
+  string arguments_json = 3;
+
+  // Choice is the option chosen, for a choice.
+  string choice = 4;
+
+  // Text is the reply, for a reply.
+  string text = 5;
+
+  // Note is anything the person added. The model is shown a denial's note.
+  string note = 6;
+
+  // By is who answered. Set by the server from the caller's credential.
+  string by = 7;
+
+  // AnsweredAt is when the answer was recorded. Set by the server.
+  google.protobuf.Timestamp answered_at = 8;
+
+  // Expired is set when nobody answered in time and this is the question's
+  // default.
+  bool expired = 9;
+
+  // Reserved for growth.
+  reserved 10 to 19;
+}
+
+// AnswerRequest answers a question a run is parked on.
+message AnswerRequest {
+  // RunId is the run. Required.
+  string run_id = 1;
+
+  // QuestionId is the question, as Question.id reported it. Required.
+  string question_id = 2;
+
+  // Answer is the answer. Its question_id, answered_at and expired are
+  // ignored, and so is by unless the credential may act for others.
+  Answer answer = 3;
+
+  // Reserved for growth.
+  reserved 4 to 9;
+}
+
+// AnswerResponse is the answer the question has: this request's, or the one
+// recorded first.
+message AnswerResponse {
+  // Answer is the recorded answer.
+  Answer answer = 1;
+
+  // First reports whether this request's answer is the one recorded. A
+  // second answer to a question is told the first and gets false.
+  bool first = 2;
+
+  // Reserved for growth.
+  reserved 3 to 9;
 }
 
 // RunUsage is what a run spent, split by who spent it. Each model call and
@@ -490,4 +622,15 @@ service InvokeService {
   // tag it was accepted from, and its last event sequence number. It reads the
   // ledger and never touches a worker, so it is safe to poll.
   rpc GetRun(GetRunRequest) returns (Run) {}
+
+  // Answer answers a question a run is parked on and wakes the run. The first
+  // answer recorded is the answer: a second one is told it, with first false.
+  // An answer is checked against its question (a decision is approve or deny,
+  // edited arguments fit the tool's schema, a choice is one offered, a reply
+  // is not empty) and refused with INVALID_ARGUMENT when it does not fit. A
+  // question of another tenant's run is NOT_FOUND, like one that does not
+  // exist; a question whose run was stopped or ended is FAILED_PRECONDITION.
+  // An answer after the question expired records its default, and returns
+  // that.
+  rpc Answer(AnswerRequest) returns (AnswerResponse) {}
 }

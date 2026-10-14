@@ -27,6 +27,7 @@ type Spec struct {
 	Tools        []string
 	Sources      []Source
 	Access       Access
+	Approvals    []string
 }
 
 // Source names one corpus an agent retrieves from.

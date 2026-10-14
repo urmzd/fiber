@@ -54,6 +54,7 @@ type specFile struct {
 	Provider     string            `json:"provider,omitempty"`
 	SystemPrompt string            `json:"system_prompt"`
 	Tools        []string          `json:"tools,omitempty"`
+	Approvals    []string          `json:"approvals,omitempty"`
 	Sources      []specFileSource  `json:"sources,omitempty"`
 	Access       specFileAccess    `json:"access,omitempty"`
 	Meta         map[string]string `json:"meta,omitempty"`
@@ -92,6 +93,7 @@ func loadSpec(path string) (*mandatumv1.AgentSpec, error) {
 		Provider:     f.Provider,
 		SystemPrompt: f.SystemPrompt,
 		Tools:        f.Tools,
+		Approvals:    f.Approvals,
 		Access: &mandatumv1.Access{
 			Spawn:          f.Access.Spawn,
 			WorkspaceAreas: f.Access.WorkspaceAreas,
@@ -378,6 +380,9 @@ func printRevisionFull(u *ui, r *mandatumv1.Revision) error {
 	if len(s.GetTools()) > 0 {
 		u.printf("  tools        %v\n", s.GetTools())
 	}
+	if len(s.GetApprovals()) > 0 {
+		u.printf("  approvals    %v\n", s.GetApprovals())
+	}
 	for _, src := range s.GetSources() {
 		u.printf("  source       %s\n", src.GetUri())
 	}
@@ -411,6 +416,7 @@ func revisionMap(r *mandatumv1.Revision) map[string]any {
 		"model":         s.GetModel(),
 		"system_prompt": s.GetSystemPrompt(),
 		"tools":         s.GetTools(),
+		"approvals":     s.GetApprovals(),
 		"sources":       sources,
 		"created_by":    r.GetCreatedBy(),
 	}

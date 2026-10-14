@@ -122,6 +122,12 @@ type AgentSpec struct {
 	Tools        []string `json:"tools,omitempty"`
 	Sources      []Source `json:"sources,omitempty"`
 	Access       Access   `json:"access,omitzero"`
+	// Approvals names the tools whose every call waits for a person to
+	// approve it. Each must be a tool the agent is granted: one in Tools, or
+	// the delegation tool "tag_<agent>" of an agent in Access.Spawn. A run
+	// parks on the call and resumes with the person's decision; see the
+	// runtime's "Parking a run on a person".
+	Approvals []string `json:"approvals,omitempty"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in. Options are
@@ -216,6 +222,7 @@ func (r Revision) Clone() Revision {
 // Clone returns a deep copy of the definition.
 func (s AgentSpec) Clone() AgentSpec {
 	s.Tools = slices.Clone(s.Tools)
+	s.Approvals = slices.Clone(s.Approvals)
 	s.Access.Spawn = slices.Clone(s.Access.Spawn)
 	s.Access.WorkspaceAreas = slices.Clone(s.Access.WorkspaceAreas)
 	if s.Sources != nil {
@@ -254,6 +261,7 @@ func (s AgentSpec) Normalize() AgentSpec {
 		Provider:     NormalizeName(s.Provider),
 		SystemPrompt: strings.TrimSpace(s.SystemPrompt),
 		Tools:        normalizeSet(s.Tools, false),
+		Approvals:    normalizeSet(s.Approvals, false),
 		Access: Access{
 			Spawn:          normalizeSet(s.Access.Spawn, true),
 			WorkspaceAreas: normalizeSet(s.Access.WorkspaceAreas, false),
@@ -330,6 +338,21 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	}
 	if err := uniqueNonEmpty("spawn grant", c.Name, c.Access.Spawn); err != nil {
 		return err
+	}
+	if err := uniqueNonEmpty("approval", c.Name, c.Approvals); err != nil {
+		return err
+	}
+	for _, name := range c.Approvals {
+		// An approval for a tool the agent cannot call would never be asked,
+		// and a definition that reads as guarded and is not is worse than one
+		// that is refused.
+		granted := slices.Contains(c.Tools, name)
+		if target, ok := strings.CutPrefix(name, "tag_"); ok && slices.Contains(c.Access.Spawn, target) {
+			granted = true
+		}
+		if !granted {
+			return fmt.Errorf("%w: agent %q requires approval for %q, which is not a tool it is granted", ErrInvalid, c.Name, name)
+		}
 	}
 	if err := uniqueNonEmpty("workspace area", c.Name, c.Access.WorkspaceAreas); err != nil {
 		return err

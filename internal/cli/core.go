@@ -29,6 +29,7 @@ import (
 
 	"github.com/urmzd/mandatum/internal/server"
 	"github.com/urmzd/mandatum/pkg/agentrt"
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/agentspec"
 	"github.com/urmzd/mandatum/pkg/attachment/resolve"
 	"github.com/urmzd/mandatum/pkg/blob"
@@ -288,6 +289,9 @@ func newCore(cfg coreConfig) (*core, error) {
 		// A stop asked for before a run's turn starts is recorded on the
 		// run, so it does not depend on the bus still holding it.
 		runtime.WithStopLedger(c.ledger),
+		// An answered or stopped question wakes its run at once rather
+		// than at the worker's next janitor sweep.
+		runtime.WithWaker(c.queue),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cli: runtime: %w", err)
@@ -590,6 +594,13 @@ func (c *core) Run(ctx context.Context, tenant, runID string) (server.Run, error
 			out.Usage = result.Usage
 		}
 	}
+	// A pending run waiting on a person says so, and says what it asked.
+	if rec.Status == drun.StatusPending {
+		if q, ok, err := c.rt.PendingQuestion(ctx, tenant, runID); err == nil && ok {
+			out.Status = server.StatusParked
+			out.Question = &q
+		}
+	}
 	// A failed run has no output. What its attempts spent is on its ledger
 	// records, which is the same figure an output would have carried.
 	if rec.Status == drun.StatusFailed {
@@ -617,6 +628,25 @@ func (c *core) Stop(ctx context.Context, req server.StopRequest) error {
 		return fmt.Errorf("%w: %w", server.ErrUnimplemented, err)
 	}
 	return err
+}
+
+// Answer answers a question a run is parked on. It satisfies server.Answerer,
+// translating the runtime's errors into the edge's.
+func (c *core) Answer(ctx context.Context, req server.AnswerRequest) (payload.Answer, bool, error) {
+	got, first, err := c.rt.Answer(ctx, runtime.AnswerRequest{
+		Tenant: req.Tenant, RunID: req.RunID, QuestionID: req.QuestionID, Answer: req.Answer, By: req.By,
+	})
+	switch {
+	case errors.Is(err, runtime.ErrNoQuestion):
+		return payload.Answer{}, false, fmt.Errorf("%w: %w", server.ErrNotFound, err)
+	case errors.Is(err, runtime.ErrQuestionClosed):
+		return payload.Answer{}, false, fmt.Errorf("%w: %w", server.ErrClosed, err)
+	case errors.Is(err, runtime.ErrInvalid):
+		return payload.Answer{}, false, fmt.Errorf("%w: %w", server.ErrInvalid, err)
+	case errors.Is(err, runtime.ErrAnswerUnavailable):
+		return payload.Answer{}, false, fmt.Errorf("%w: %w", server.ErrUnimplemented, err)
+	}
+	return got, first, err
 }
 
 // statusOf maps a ledger status onto the edge's. The ledger has no word for

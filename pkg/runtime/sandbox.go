@@ -171,6 +171,9 @@ type turn struct {
 	// childUsage checks and reads a child run a Delegator reports, from the
 	// runtime executing the turn. Nil when the runtime offered none.
 	childUsage func(context.Context, string) (payload.UsageChild, error)
+	// childQuestion checks and reads a child run a Delegator watches for
+	// questions (WatchChildQuestions). Nil when the runtime offered none.
+	childQuestion func(context.Context, string) (payload.ChildQuestion, bool, bool, error)
 }
 
 // SandboxOption configures a Sandbox.
@@ -335,7 +338,8 @@ func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Co
 	// type: the channel holds the request until the turn reads it, so a
 	// request that arrives before the task has been picked up is not lost to
 	// timing.
-	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx)}); err != nil {
+	childQuestion, _ := ctx.Value(childQuestionKey{}).(func(context.Context, string) (payload.ChildQuestion, bool, bool, error))
+	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx), childQuestion: childQuestion}); err != nil {
 		return Outcome{}, err
 	}
 	// Detaching aborts the task if it is still running, which it is on every
@@ -623,6 +627,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		Text: req.Text, Meta: req.Meta, History: req.History,
 		Attachments: req.Attachments, Tenant: req.Tenant,
 		Stop: stop, Accounting: req.Accounting,
+		Park: req.Park, QuestionTTL: req.QuestionTTL, Resume: req.Resume,
 	}, func(_ context.Context, c agentrt.Chunk) error {
 		return send(c)
 	})
@@ -630,8 +635,8 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		return nil, err
 	}
 
-	out := Outcome{Text: res.Text, Prompt: res.Prompt, Chunks: res.Chunks, Citations: res.Citations, Stopped: res.Stopped}
-	if out.Stopped != nil {
+	out := Outcome{Text: res.Text, Prompt: res.Prompt, Chunks: res.Chunks, Citations: res.Citations, Stopped: res.Stopped, Parked: res.Parked}
+	if out.Stopped != nil || out.Parked != nil {
 		// Half an answer is not the run's answer artifact.
 		return json.Marshal(out)
 	}
@@ -781,6 +786,19 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 						return err
 					}
 					return send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
+				})
+				dctx = context.WithValue(dctx, childQuestionKey{}, func(ctx context.Context, runID string) error {
+					t := s.turn(parent.RunID)
+					if t == nil || t.childQuestion == nil {
+						return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
+					}
+					return watchChild(ctx, t.childQuestion, runID, func(cq payload.ChildQuestion) error {
+						body, err := payload.Encode(cq)
+						if err != nil {
+							return err
+						}
+						return send(agentrt.Chunk{Kind: envelope.KindChildParked, Payload: body})
+					})
 				})
 				return s.delegator(dctx, parent, target, text, report)
 			}

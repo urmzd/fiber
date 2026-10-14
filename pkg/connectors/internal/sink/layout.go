@@ -83,7 +83,7 @@ func StatusLabel(s render.Status) string {
 	case render.StatusRunning:
 		return "working"
 	case render.StatusParked:
-		return "waiting for input"
+		return "waiting on a person"
 	case render.StatusDone:
 		return "done"
 	case render.StatusFailed:
@@ -105,6 +105,8 @@ func StatusLabel(s render.Status) string {
 //	[1] Design doc                         footnotes, one per cited source
 //	changed: commented on PR #42           what it changed on a real surface
 //	failed: provider timeout               why there is no answer
+//	waiting on a person: Deploy to prod?   what a parked run asked, and of whom
+//	answered: approved by ana              how the question was resolved
 //	stopped: Stopped by a user             why the answer is not finished
 //
 // Sections that are empty are omitted entirely rather than rendered as a
@@ -137,6 +139,25 @@ func Layout(m Markup, v render.View) string {
 	if v.Error != "" {
 		sections = append(sections, m.Bold("failed")+": "+v.Error)
 	}
+	if q := v.Question; q != nil {
+		sections = append(sections, layoutQuestion(m, "waiting on a person", q))
+	} else if q := v.Waiting; q != nil {
+		who := "a delegated run"
+		if q.Agent != "" {
+			who = q.Agent
+		}
+		sections = append(sections, layoutQuestion(m, who+" is waiting on a person", q))
+	}
+	if a := v.Answered; a != nil {
+		line := m.Bold("answered") + ": " + truncate(collapse(a.Summary), 200)
+		switch {
+		case a.Expired:
+			line += " " + m.Italic("(nobody answered in time)")
+		case a.By != "":
+			line += " " + m.Italic("by "+truncate(collapse(a.By), 80))
+		}
+		sections = append(sections, line)
+	}
 	if v.Status == render.StatusStopped {
 		// Always said in the body, not only in the header: a stopped run's
 		// text is an unfinished answer, and a reader who skips the header
@@ -149,6 +170,28 @@ func Layout(m Markup, v render.View) string {
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+// layoutQuestion renders what a run waits on a person for. It is plain
+// words, never a spinner or an ellipsis: a run waiting on a person is not
+// working, and a surface must not look as if it were. Answering happens on
+// the host, so the question is shown, not made interactive.
+func layoutQuestion(m Markup, title string, q *render.Question) string {
+	lines := []string{m.Bold(title) + ": " + truncate(collapse(q.Prompt), 400)}
+	if q.Tool != "" {
+		call := m.Code(q.Tool)
+		if q.Args != "" {
+			call += " " + m.Code(truncate(q.Args, 160))
+		}
+		lines = append(lines, m.Item("approve or deny "+call))
+	}
+	for _, o := range q.Options {
+		lines = append(lines, m.Item(truncate(collapse(o), 160)))
+	}
+	if q.AskedOf != "" {
+		lines = append(lines, m.Italic("asked of "+truncate(collapse(q.AskedOf), 80)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func layoutHeader(m Markup, v render.View) string {
@@ -178,6 +221,10 @@ func layoutTools(m Markup, v render.View) string {
 			line += " -> " + m.Bold("error") + ": " + truncate(collapse(t.Error), 160)
 		case t.Done:
 			line += " -> " + truncate(collapse(t.Result), 160)
+		case v.Status == render.StatusParked:
+			// A call in the batch a run parked on has not run and will not
+			// until a person answers.
+			line += " " + m.Italic("waiting")
 		default:
 			line += " " + m.Italic("running")
 		}

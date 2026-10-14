@@ -80,6 +80,13 @@ func (s AgentSpec) Hash() string {
 	}
 	writeStrings(h, c.Access.Spawn)
 	writeStrings(h, c.Access.WorkspaceAreas)
+	// Approvals came later. They are hashed only when there are some, behind
+	// a label, so every revision written before them keeps the hash it was
+	// recorded with.
+	if len(c.Approvals) > 0 {
+		writeString(h, "approvals")
+		writeStrings(h, c.Approvals)
+	}
 	return HashAlgorithm + ":" + hex.EncodeToString(h.Sum(nil))
 }
 

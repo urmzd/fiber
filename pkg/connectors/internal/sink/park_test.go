@@ -1,0 +1,38 @@
+package sink_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
+	"github.com/urmzd/mandatum/pkg/envelope"
+)
+
+// A run waiting on a person reads as waiting, in words: the question, what
+// it would run, and nothing that looks like work in progress. The resolution
+// is shown once it resumes.
+func TestAParkedRunReadsAsWaitingOnAPersonAndNotAsWorking(t *testing.T) {
+	d := render.New()
+	d.Apply(ev(2, envelope.KindStarted, `{}`))
+	d.Apply(ev(3, envelope.KindToolCall, `{"id":"c1","name":"deploy","phase":"requested"}`))
+	d.Apply(ev(9, envelope.KindParked, `{"question":{"id":"q1","kind":"approval","prompt":"Deploy to prod?","tool":{"name":"deploy","arguments":{"env":"prod"}}}}`))
+
+	got := layout(d.View())
+	for _, want := range []string{"docs-bot (waiting on a person)", "waiting on a person: Deploy to prod?", `approve or deny deploy {"env":"prod"}`, "deploy waiting"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("layout is missing %q:\n%s", want, got)
+		}
+	}
+	for _, animated := range []string{"working", "running", "..."} {
+		if strings.Contains(got, animated) {
+			t.Errorf("a parked run reads as %q:\n%s", animated, got)
+		}
+	}
+
+	d.Apply(ev(20, envelope.KindResumed, `{"answer":{"question_id":"q1","decision":"deny","by":"ana"}}`))
+	d.Apply(ev(30, envelope.KindCompleted, `{"text":"Not deployed."}`))
+	got = layout(d.View())
+	if !strings.Contains(got, "answered: denied by ana") || strings.Contains(got, "Deploy to prod?") {
+		t.Errorf("after the answer:\n%s", got)
+	}
+}

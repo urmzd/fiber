@@ -74,6 +74,9 @@ func renderSpec(s agentspec.AgentSpec) []string {
 	for _, t := range s.Tools {
 		lines = append(lines, "tool: "+t)
 	}
+	for _, t := range s.Approvals {
+		lines = append(lines, "approval: "+t)
+	}
 	for _, t := range s.Access.Spawn {
 		lines = append(lines, "spawn: "+t)
 	}

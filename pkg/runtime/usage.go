@@ -198,8 +198,16 @@ func (r *Runtime) recordSpent(ctx context.Context, runID string, s spent) bool {
 // outcome counted, so the ledger keeps no record that no call read. Which ones
 // is decided by the memoized outcome, so every replay claims the same set. The
 // claim is advisory: the total is already decided.
-func (r *Runtime) claimUsage(ctx context.Context, in Input, attempts []int) {
+//
+// A run that parked has an outcome per turn, and each counts every earlier
+// attempt: claimed holds what this body has claimed already, since a second
+// claim of one record would read an occurrence that does not exist.
+func (r *Runtime) claimUsage(ctx context.Context, in Input, attempts []int, claimed map[int]bool) {
 	for _, a := range attempts {
+		if claimed[a] {
+			continue
+		}
+		claimed[a] = true
 		_, err := duraturo.Event[json.RawMessage](ctx, usageRecordName+strconv.Itoa(a))
 		switch {
 		case err == nil, errors.Is(err, run.ErrParked):
@@ -219,16 +227,32 @@ func (r *Runtime) claimUsage(ctx context.Context, in Input, attempts []int) {
 // of the attempts that failed, which is every model call the run made. It
 // reports false when the records hold neither.
 func RecordedUsage(records []run.Record) (payload.RunUsage, bool) {
+	// A run that parked has an outcome per turn; the latest counts every
+	// one before it.
+	var best *payload.RunUsage
+	bestAttempt := -1
 	for _, rec := range records {
-		if rec.Name != ActivityAgent || rec.Kind != run.KindActivity || rec.Status != run.RecordOK {
+		if (rec.Name != ActivityAgent && rec.Name != ActivityResume) || rec.Kind != run.KindActivity || rec.Status != run.RecordOK {
 			continue
 		}
 		var out Outcome
-		if json.Unmarshal(rec.Output, &out) == nil && out.Usage != nil {
-			return *out.Usage, true
+		if json.Unmarshal(rec.Output, &out) == nil && out.Usage != nil && rec.Attempt > bestAttempt {
+			best, bestAttempt = out.Usage, rec.Attempt
 		}
 	}
 	prior := usageRecords(records)
+	if best != nil {
+		// An attempt after the latest outcome executed a turn that failed:
+		// a continuation of a parked turn, say. Every attempt that executed
+		// records its calls, so the records are then the whole total.
+		later := false
+		for _, s := range prior {
+			later = later || s.Attempt > bestAttempt
+		}
+		if !later {
+			return *best, true
+		}
+	}
 	if len(prior) == 0 {
 		return payload.RunUsage{}, false
 	}

@@ -32,6 +32,9 @@ type Spec struct {
 	Tools        []string `json:"tools,omitempty"`
 	Sources      []Source `json:"sources,omitempty"`
 	Access       Access   `json:"access,omitempty"`
+	// Approvals names the tools whose calls wait for a person: see
+	// agentspec.AgentSpec.Approvals.
+	Approvals []string `json:"approvals,omitempty"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in.

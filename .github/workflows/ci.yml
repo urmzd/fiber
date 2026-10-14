@@ -96,7 +96,7 @@ jobs:
       - name: Run backend conformance and persistence tests
         shell: bash
         run: |
-          # pkg/runtime runs its stop and usage tests on the Postgres ledger,
+          # pkg/runtime runs its stop, usage and park tests on the Postgres ledger,
           # queue and journal and the Redis bus when both variables are set.
           go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/bus ./pkg/runtime | tee integration-results.jsonl
       - name: Reject skipped integration tests
@@ -132,7 +132,19 @@ jobs:
             ["runtime", "TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting"],
             ["runtime", "TestSubTaskCallsRollUpIntoTheRunThatDelegated"],
             ["runtime", "TestAnAttemptWhoseResultWasNeverRecordedIsStillCounted"],
-            ["runtime", "TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt"]
+            ["runtime", "TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt"],
+            ["runtime", "TestEachQuestionKindParksPublishesItsQuestionReleasesItsWorkerAndResumesWithTheAnswer"],
+            ["runtime", "TestTheResumedTurnSeesTheThreadTheRequestAndWhatItSaidBeforeAsking"],
+            ["runtime", "TestARunParkedAcrossARestartResumesOnTheAnswer"],
+            ["runtime", "TestConcurrentAnswersResumeTheRunExactlyOnce"],
+            ["runtime", "TestASecondAnswerReturnsTheFirstOutcome"],
+            ["runtime", "TestAnAnswerThatDoesNotFitTheQuestionIsRefused"],
+            ["runtime", "TestAnUnansweredQuestionTakesItsDefaultWhenItExpires"],
+            ["runtime", "TestAnotherTenantCannotAnswerOrSeeAQuestion"],
+            ["runtime", "TestStoppingAParkedRunEndsItWithoutResumingItsTurn"],
+            ["runtime", "TestUsageBeforeAParkIsCountedOnce"],
+            ["runtime", "TestReplayingAParkedThenResumedRunIsDeterministic"],
+            ["runtime", "TestAChildRunParksAndItsParentShowsItsQuestion"]
           ] | all(. as $required | any($events[];
             .Action == "pass"
             and .Package == ("github.com/urmzd/mandatum/pkg/" + $required[0])
