@@ -7,8 +7,8 @@ its events to anyone, deliver them anywhere. Go module
 **Status: v0 alpha, pre-1.0, not recommended for production.** Interfaces are
 still moving and may change between minor versions. The single-binary deployment
 is complete and tested; the Redis bus backend is conformance-tested but not
-exercised in CI; there is no persistent registry yet, so agent specs do not
-survive a restart. Keep the surface small and document limitations honestly.
+exercised in CI. The Postgres registry, run ledger (`pkg/durable`) and
+knowledge store run in CI's integration job and in `make e2e`. Keep the surface small and document limitations honestly.
 
 The design turns on one idea: where a tag is raised and where its answer lands
 are independent. Read `docs/architecture/overview.md` before changing anything
@@ -28,7 +28,13 @@ sandboxing and access control.
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
 | `pkg/agentspec` | Immutable agent specs, content-addressed revisions. Leaf. |
 | `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
-| `pkg/registry` | Agent store and revision history. `Memory` implementation, plus the adapter to `internal/server.Store`. |
+| `pkg/registry` | Agent store and revision history. `Memory` and `Postgres` implementations, plus the adapter to `internal/server.Store`. |
+| `pkg/durable` | The Postgres schema for duraturo's ledger and queue adapters, and `Open`, which builds both on it. |
+| `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`. |
+| `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem. |
+| `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
+| `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`. |
+| `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
 | `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. `payload/` holds typed event bodies. |
@@ -54,6 +60,9 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 | run server | `make run` (or `go run ./cmd/mandatum serve`) |
 | regenerate proto | `make proto` (needs `buf` on PATH) |
 | end-to-end demo | `go run ./examples/local` |
+| compose stack | `make up` (Postgres, Redis, mandatum), `make down` |
+| compose end-to-end | `make e2e` |
+| registry on Postgres | `MANDATUM_POSTGRES_TEST_URL=postgres://... go test ./pkg/registry/` |
 
 ## Code Style
 
@@ -78,7 +87,15 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   compiles into legatus's policy graph with default deny. Changes need tests
   proving spawn gating and workspace confinement still hold.
 - **Preserve the DAG.** Leaves (`topic`, `address`, `envelope`, `signature`,
-  `agentspec`) stay stdlib-only. Nothing under `pkg/` imports `internal/`.
+  `agentspec`, `attachment`) stay stdlib-only. Nothing under `pkg/` imports `internal/`.
+- **History pinning is load-bearing too.** A run pins "thread history up to
+  sequence N" at accept, next to its revision, and every attempt loads exactly
+  that. The journal only appends, and what it replays is byte-identical from
+  run to run, which is what keeps a long thread's prompt cache warm.
+- **Volatile content goes last.** Tools and system prompt, then history, then
+  the request, then its files. Nothing that changes per turn (timestamps, run
+  ids, retrieved passages, attachments) may sit ahead of something that does
+  not.
 - **Revision pinning is load-bearing.** A run pins its revision at accept time
   and must never re-resolve "latest" inside a workflow body: duraturo replays
   from the top, and an unpinned run diverges. Tests that assert this exist in
@@ -89,6 +106,9 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   per run and edit it; never post per delta.
 - **Tenant is never read from a request body.** The server sets it from the
   caller's credential and overwrites whatever the client sent.
+- **Neither is the actor.** A tag's actor is the credential's subject unless
+  the credential is marked `ActAs`, which is what a surface that authenticated
+  the person itself holds. Authorship and approvals are decided on it.
 - This is a v0 alpha: keep the surface small and document limitations honestly
   rather than papering over them.
 
@@ -102,7 +122,9 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 - **New bus backend**: implement `bus.Bus` and run it through
   `pkg/bus/bustest.Run`, which holds every backend to the identical contract.
 - **New registry backend**: implement `registry.Store`; the adapter to the
-  server's interface already exists.
+  server's interface already exists. Make `newStore` in
+  `pkg/registry/memory_test.go` able to build it, so it runs the same suite
+  `Memory` and `Postgres` do.
 - **New agent provider**: extend `pkg/agentrt`'s provider construction. Keep
   `agenttest.ScriptedProvider` working, since it is what makes the example and
   the tests run with no API key.
