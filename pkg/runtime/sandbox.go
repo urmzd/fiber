@@ -54,7 +54,7 @@ func Connectors(reg *connector.Registry) Catalog {
 		if err != nil {
 			return nil, err
 		}
-		return agentrt.ConnectorTools(reg, target, action), nil
+		return agentrt.ConnectorToolsForRun(reg, target, req.RunID, action), nil
 	}
 }
 

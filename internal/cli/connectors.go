@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/urmzd/mandatum/pkg/connector"
@@ -36,10 +38,15 @@ const (
 	EnvSlackDefault = "MANDATUM_SLACK_DEFAULT_AGENT"
 
 	// GitHub.
-	EnvGitHubToken  = "MANDATUM_GITHUB_TOKEN"
-	EnvGitHubSecret = "MANDATUM_GITHUB_WEBHOOK_SECRET"
-	EnvGitHubOwners = "MANDATUM_GITHUB_OWNERS"
-	EnvGitHubBots   = "MANDATUM_GITHUB_BOTS"
+	EnvGitHubReadRepositories = "MANDATUM_GITHUB_READ_REPOSITORIES"
+	EnvGitHubToken            = "MANDATUM_GITHUB_TOKEN"
+	EnvGitHubSecret           = "MANDATUM_GITHUB_WEBHOOK_SECRET"
+	EnvGitHubOwners           = "MANDATUM_GITHUB_OWNERS"
+	EnvGitHubBots             = "MANDATUM_GITHUB_BOTS"
+	EnvGitHubAutoLabels       = "MANDATUM_GITHUB_AUTO_LABELS"
+	EnvGitHubChecks           = "MANDATUM_GITHUB_CHECKS"
+	EnvGitHubGuides           = "MANDATUM_GITHUB_GUIDES"
+	EnvGitHubMutations        = "MANDATUM_GITHUB_MUTATIONS"
 
 	// Jira. Sites is a comma-separated list of short-key=base-URL pairs; the
 	// short key, not the hostname, is what appears in a jira:// address.
@@ -116,12 +123,48 @@ func newGitHub(cfg coreConfig, agents mention.Set) (connector.Connector, error) 
 	if token == "" || secret == "" {
 		return nil, usagef("github needs both $%s and $%s", EnvGitHubToken, EnvGitHubSecret)
 	}
+	var mutations bool
+	if raw := os.Getenv(EnvGitHubMutations); raw != "" {
+		var err error
+		mutations, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, usagef("invalid $%s: %v", EnvGitHubMutations, err)
+		}
+	}
+	var guides bool
+	if raw := os.Getenv(EnvGitHubGuides); raw != "" {
+		var err error
+		guides, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, usagef("invalid $%s: %v", EnvGitHubGuides, err)
+		}
+	}
+	var checks bool
+	if raw := os.Getenv(EnvGitHubChecks); raw != "" {
+		var err error
+		checks, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, usagef("invalid $%s: %v", EnvGitHubChecks, err)
+		}
+	}
+	var autoLabels map[string]map[string]string
+	if raw := os.Getenv(EnvGitHubAutoLabels); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &autoLabels); err != nil {
+			return nil, usagef("invalid $%s: %v", EnvGitHubAutoLabels, err)
+		}
+	}
 	c, err := github.New(github.Config{
-		API:      github.NewHTTPAPI(token, http.DefaultClient),
-		Verifier: signature.NewGitHub(secret),
-		Owners:   list(os.Getenv(EnvGitHubOwners)),
-		Bots:     pairs(os.Getenv(EnvGitHubBots)),
-		Agents:   agents,
+		API:              github.NewHTTPAPI(token, http.DefaultClient),
+		Verifier:         signature.NewGitHub(secret),
+		Owners:           list(os.Getenv(EnvGitHubOwners)),
+		Bots:             pairs(os.Getenv(EnvGitHubBots)),
+		Agents:           agents,
+		AutoLabels:       autoLabels,
+		Checks:           checks,
+		Guides:           guides,
+		Mutations:        mutations,
+		MutationSecret:   []byte(secret),
+		ReadRepositories: list(os.Getenv(EnvGitHubReadRepositories)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cli: github: %w", err)

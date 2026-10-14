@@ -10,12 +10,18 @@ import (
 // recorded per pull request. It ships in the package so the mesh can be run
 // end to end — mention in, edited comment out — with no token and no network.
 type Fake struct {
-	mu       sync.Mutex
-	comments []FakeComment
-	byID     map[int64]int
-	labels   map[string][]string
-	reviews  map[string][]string
-	nextID   int64
+	workflows map[string]map[int64]WorkflowRun
+	writers   map[string]bool
+	files     map[string]map[string]string
+	commits   []FakeCommit
+	mu        sync.Mutex
+	contexts  map[string]Context
+	checks    map[int64]FakeCheck
+	comments  []FakeComment
+	byID      map[int64]int
+	labels    map[string][]string
+	reviews   map[string][]string
+	nextID    int64
 	// Err, when set, fails every call, which is how a test drives the retry path.
 	Err error
 }
@@ -25,6 +31,10 @@ type FakeComment struct {
 	ID   int64
 	Ref  Ref
 	Body string
+	// ReviewRoot is nonzero for a reply in a PR review thread.
+	ReviewRoot int64
+	GuideAgent string
+	GuideLogin string
 	// Edits counts body replacements, which is what "one comment, edited" is
 	// asserted on.
 	Edits int

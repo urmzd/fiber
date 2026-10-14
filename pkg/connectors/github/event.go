@@ -1,6 +1,7 @@
 package github
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -110,6 +111,7 @@ type pull struct {
 // A review dates itself with submitted_at rather than created_at, so both are
 // decoded and whichever is present is used.
 type body struct {
+	InReplyToID int64     `json:"in_reply_to_id"`
 	ID          int64     `json:"id"`
 	Body        string    `json:"body"`
 	User        user      `json:"user"`
@@ -139,6 +141,7 @@ type subject struct {
 	pull  bool
 	base  string
 	head  string
+	sha   string
 	draft bool
 	at    time.Time
 }
@@ -149,19 +152,26 @@ type subject struct {
 // The events that raise tags are the ones where a human named an agent
 // (issue_comment, issues, pull_request opened, a review or review comment) and
 // the one where GitHub names it structurally (pull_request review_requested).
-// Everything else — a push, a label change, a merge — is acknowledged and
+// Explicit repository label mappings also raise tags on labeled events.
+// Everything else, including unconfigured label changes, is acknowledged and
 // dropped, because a mesh that ran an agent on every repository event would be a
 // denial of service with a bill attached.
 func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool) {
-	// Loop prevention first, and unconditionally: this connector comments on
-	// issues, and its own comment comes back as an issue_comment event.
-	if h.Sender.Type == "Bot" {
+	// Ignore bot conversations to prevent loops. Bot-authored commits may still
+	// trigger a review on an explicitly activated PR.
+	if h.Sender.Type == "Bot" && (event != "pull_request" || h.Action != "synchronize") {
 		return envelope.Tag{}, false
 	}
 	if h.Repository.Name == "" || h.Repository.Owner.Login == "" {
 		return envelope.Tag{}, false
 	}
 	if err := address.ValidWorkspace(h.Repository.Owner.Login); err != nil {
+		return envelope.Tag{}, false
+	}
+	if c.owners != nil && !c.owners[strings.ToLower(h.Repository.Owner.Login)] {
+		return envelope.Tag{}, false
+	}
+	if !validRepository(h.Repository.Name) {
 		return envelope.Tag{}, false
 	}
 
@@ -205,11 +215,17 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		}
 
 	case "issues":
-		if h.Action != "opened" || h.Issue == nil {
+		if h.Issue == nil {
 			return envelope.Tag{}, false
 		}
 		subj = subjectOf(h)
-		if agent, text, ok = mention.Find(h.Issue.Title+"\n\n"+h.Issue.Body, c.agents()); !ok {
+		switch h.Action {
+		case "labeled":
+			agent, text, ok = c.autoLabel(h, subj)
+		case "opened":
+			agent, text, ok = mention.Find(h.Issue.Title+"\n\n"+h.Issue.Body, c.agents())
+		}
+		if !ok {
 			return envelope.Tag{}, false
 		}
 
@@ -219,6 +235,17 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		}
 		subj = subjectOf(h)
 		switch h.Action {
+		case "synchronize":
+			if subj.draft || subj.state == "closed" || !validSHA(subj.sha) {
+				return envelope.Tag{}, false
+			}
+			if agent, text, ok = c.activeLabel(h, subj); !ok {
+				return envelope.Tag{}, false
+			}
+		case "labeled":
+			if agent, text, ok = c.autoLabel(h, subj); !ok {
+				return envelope.Tag{}, false
+			}
 		case "review_requested":
 			// The agent is named by GitHub, not by a human: the review was
 			// requested from its login. This is the one path where no mention
@@ -248,10 +275,23 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		return envelope.Tag{}, false
 	}
 
+	if subj.number <= 0 {
+		return envelope.Tag{}, false
+	}
+	if (h.Action == "labeled" || h.Action == "synchronize") && delivery == "" {
+		// A label can be removed and reapplied. A synthesized resource key
+		// would collapse distinct requests, so require GitHub's delivery ID.
+		return envelope.Tag{}, false
+	}
 	if delivery == "" {
 		// GitHub always sends a delivery GUID. Without one, the resource plus
 		// the comment or subject identity is the best stable key available.
 		delivery = event + ":" + h.Repository.FullName + ":" + strconv.Itoa(subj.number) + ":" + strconv.FormatInt(commentID, 10)
+	}
+	if event == "pull_request" && h.Action == "synchronize" {
+		// Different deliveries for the same commit still represent one automatic
+		// review. An explicit human mention retains its independent delivery ID.
+		delivery = "github:commit:" + strings.ToLower(h.Repository.Owner.Login+"/"+h.Repository.Name) + ":" + strconv.Itoa(subj.number) + ":" + agent + ":" + strings.ToLower(subj.sha)
 	}
 
 	// When the event is a comment or a review, its own timestamp is when the
@@ -273,7 +313,30 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		Meta:    metaOf(event, h, subj, commentID),
 		At:      at,
 	}
+	if event == "pull_request_review_comment" {
+		root := h.Comment.ID
+		if h.Comment.InReplyToID != 0 {
+			root = h.Comment.InReplyToID
+		}
+		if root <= 0 {
+			return envelope.Tag{}, false
+		}
+		tag.Source = tag.Source.WithParam("review_comment", strconv.FormatInt(root, 10))
+		tag.Meta["github_review_root_id"] = strconv.FormatInt(root, 10)
+	}
 	return tag, true
+}
+
+func (c *Connector) autoLabel(h hook, subj subject) (string, string, bool) {
+	if h.Label == nil {
+		return "", "", false
+	}
+	repo := strings.ToLower(h.Repository.Owner.Login + "/" + h.Repository.Name)
+	agent, ok := c.cfg.AutoLabels[repo][h.Label.Name]
+	if !ok {
+		return "", "", false
+	}
+	return agent, strings.TrimSpace(subj.title + "\n\n" + subj.body), true
 }
 
 // subjectOf normalizes the issue or pull request an event is about.
@@ -291,6 +354,7 @@ func subjectOf(h hook) subject {
 			pull:   true,
 			base:   p.Base.Ref,
 			head:   p.Head.Ref,
+			sha:    p.Head.SHA,
 			draft:  p.Draft,
 			at:     latest(p.UpdatedAt, p.CreatedAt),
 		}
@@ -323,11 +387,14 @@ func sourceOf(repo repository, subj subject) address.Address {
 	if subj.pull {
 		kind = "pull"
 	}
-	return address.Address{
-		Connector: Name,
-		Workspace: repo.Owner.Login,
-		Path:      []string{repo.Name, kind, strconv.Itoa(subj.number)},
+	source := address.Address{
+		Connector: Name, Workspace: repo.Owner.Login,
+		Path: []string{repo.Name, kind, strconv.Itoa(subj.number)},
 	}
+	if subj.sha != "" {
+		source = source.WithParam("head_sha", subj.sha)
+	}
+	return source
 }
 
 // metaOf carries the repository context an agent's tools need. Without it the
@@ -354,6 +421,7 @@ func metaOf(event string, h hook, subj subject, commentID int64) map[string]stri
 	set("github_url", subj.url)
 	set("github_base_ref", subj.base)
 	set("github_head_ref", subj.head)
+	set("github_head_sha", subj.sha)
 	set("github_labels", strings.Join(subj.labels, ","))
 	if subj.pull && subj.draft {
 		m["github_draft"] = "true"
@@ -395,4 +463,18 @@ func latest(times ...time.Time) time.Time {
 		}
 	}
 	return out
+}
+
+// activeLabel chooses deterministically when several configured labels exist.
+// Keeping the activation on the PR makes commit triggers survive a restart.
+func (c *Connector) activeLabel(h hook, subj subject) (string, string, bool) {
+	labels := append([]string(nil), subj.labels...)
+	sort.Strings(labels)
+	for _, name := range labels {
+		h.Label = &label{Name: name}
+		if agent, text, ok := c.autoLabel(h, subj); ok {
+			return agent, "Review commit " + subj.sha + ".\n\n" + text, true
+		}
+	}
+	return "", "", false
 }

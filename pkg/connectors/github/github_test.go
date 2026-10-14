@@ -224,7 +224,7 @@ func TestAReviewRequestNamesTheAgentWithoutAnyMention(t *testing.T) {
 	if tag.Agent != "docs-bot" {
 		t.Errorf("Tag.Agent = %q, want the requested reviewer's agent", tag.Agent)
 	}
-	if got, want := tag.Source.String(), "github://urmzd/mandatum/pull/77"; got != want {
+	if got, want := tag.Source.String(), "github://urmzd/mandatum/pull/77?head_sha=deadbeef"; got != want {
 		t.Errorf("Tag.Source = %q, want %q", got, want)
 	}
 	// With no message, the pull request is the request.
@@ -526,8 +526,8 @@ func TestActionsChangeGitHubAndReportWhatTheyChanged(t *testing.T) {
 	for _, a := range c.Actions() {
 		actions[a.Name] = a
 	}
-	if len(actions) != 3 {
-		t.Fatalf("actions = %v, want three", actions)
+	if len(actions) != 6 {
+		t.Fatalf("actions = %v, want six", actions)
 	}
 
 	res, err := actions["github_comment"].Invoke(ctx, target, json.RawMessage(`{"body":"looked into it"}`))

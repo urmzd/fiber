@@ -47,6 +47,7 @@
 package render
 
 import (
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,6 +197,7 @@ type Doc struct {
 	status    Status
 	statusSeq uint64
 	errText   string
+	finalText string
 
 	text     strings.Builder
 	thinking strings.Builder
@@ -284,7 +286,17 @@ func (d *Doc) effect(e envelope.Event) bool {
 	case envelope.KindParked:
 		return d.setStatus(e.Seq, StatusParked, "")
 	case envelope.KindCompleted:
-		return d.setStatus(e.Seq, StatusDone, "")
+		changed := d.setStatus(e.Seq, StatusDone, "")
+		if e.Seq == 0 || e.Seq >= d.statusSeq {
+			var final struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(e.Payload, &final) == nil && final.Text != "" && final.Text != d.finalText {
+				d.finalText = final.Text
+				changed = true
+			}
+		}
+		return changed
 	case envelope.KindFailed:
 		return d.setStatus(e.Seq, StatusFailed, decodeError(e.Payload))
 	default:
@@ -496,6 +508,9 @@ func (d *Doc) View() View {
 	}
 
 	v.Text = assemble(&d.text, d.pending, streamText)
+	if d.finalText != "" {
+		v.Text = d.finalText
+	}
 	v.Thinking = assemble(&d.thinking, d.pending, streamThinking)
 
 	if len(d.tools) > 0 {

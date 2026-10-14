@@ -383,3 +383,19 @@ func equalViews(a, b render.View) bool {
 	}
 	return true
 }
+
+func TestFinalAnswerReplacesPartialAndLateDeltas(t *testing.T) {
+	for _, events := range [][]envelope.Event{
+		{ev(5, envelope.KindCompleted, `{"text":"complete answer"}`)},
+		{text(2, "partial"), ev(5, envelope.KindCompleted, `{"text":"complete answer"}`), text(3, " late")},
+		{ev(5, envelope.KindCompleted, `{"text":"complete answer"}`), ev(4, envelope.KindCompleted, `{"text":"stale answer"}`)},
+	} {
+		var doc render.Doc
+		for _, e := range events {
+			doc.Apply(e)
+		}
+		if got := doc.View().Text; got != "complete answer" {
+			t.Fatalf("final answer = %q", got)
+		}
+	}
+}

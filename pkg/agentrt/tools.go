@@ -46,12 +46,24 @@ var ErrNoSuchTool = fmt.Errorf("%w: no such tool", ErrInvalid)
 // passes a function that publishes envelope.KindActionTaken, which is what puts
 // "the work got done" on the bus next to the conversation.
 func ConnectorTools(reg *connector.Registry, target address.Address, after func(payload.Action) error) Tools {
+	return ConnectorToolsForRun(reg, target, "", after)
+}
+
+// ConnectorToolsForRun also binds the durable run identity for actions whose
+// authorization must not be replayed from another run.
+func ConnectorToolsForRun(reg *connector.Registry, target address.Address, runID string, after func(payload.Action) error) Tools {
 	return ToolsFunc(func(name string) (saigetypes.Tool, error) {
 		if reg == nil {
 			return nil, fmt.Errorf("%w: %q (no connector registry configured)", ErrNoSuchTool, name)
 		}
 		for _, a := range reg.Actions() {
 			if a.Name == name {
+				invoke := a.Invoke
+				if invoke != nil {
+					a.Invoke = func(ctx context.Context, target address.Address, args json.RawMessage) (connector.Result, error) {
+						return invoke(connector.WithRunID(ctx, runID), target, args)
+					}
+				}
 				return ActionTool(a, target, after)
 			}
 		}

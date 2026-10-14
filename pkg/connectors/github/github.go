@@ -15,8 +15,9 @@
 // a review from it — the case with no message at all, where the pull request
 // itself is the request.
 //
+// Configured repository labels also raise tags when applied.
 // Everything else is acknowledged and dropped, and an event whose sender is a Bot
-// is always dropped: this connector's own comment arrives back as an
+// is dropped except for a labeled PR's synchronize event: this connector's own comment arrives back as an
 // issue_comment, and acting on it would have the mesh answer itself in a loop.
 //
 // # Sink
@@ -35,10 +36,12 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
@@ -79,6 +82,10 @@ type Config struct {
 	// refused with ErrUndeliverable instead of being attempted with our token.
 	Owners []string
 
+	// ReadRepositories grants cross-source read access to exact owner/repo
+	// names. It never grants mutation or delivery access.
+	ReadRepositories []string
+
 	// Bots maps a GitHub login to the agent it stands for, and is how a review
 	// request is resolved: GitHub names the reviewer, not the agent. A GitHub App
 	// appears as "docs-bot[bot]" in some payloads and as its slug in a mention,
@@ -90,6 +97,24 @@ type Config struct {
 	// "@docs-bot" are the same syntax, so an open name set would start a run
 	// every time one human tagged another.
 	Agents mention.Set
+
+	// AutoLabels maps owner/repo to label-to-agent mappings. Only a labeled
+	// event activates automatic runs; PR synchronize events keep reviewing while
+	// the label remains. Empty is off.
+	AutoLabels map[string]map[string]string
+
+	// Checks publishes run progress on a PR's pinned head. Requires Checks write
+	// permission and an API implementing CheckAPI.
+	Checks bool
+
+	// Guides maintains one navigational guide per PR and agent. Bots must map
+	// the authenticated bot login to each agent whose PR guide is enabled.
+	Guides bool
+
+	// Mutations enables explicit /fix requests from repository writers.
+	// MutationSecret signs run-bound grants; keep it stable across restarts.
+	Mutations      bool
+	MutationSecret []byte
 
 	// Deliver overrides where a tag's events go. Empty answers on the issue or
 	// pull request the tag came from.
@@ -109,12 +134,15 @@ type Config struct {
 
 // Connector is the GitHub peer.
 type Connector struct {
-	cfg    Config
-	bots   map[string]string
-	owners map[string]bool
-	gate   inbound.Gate
-	pipe   inbound.Pipe
-	engine *sink.Engine
+	cfg       Config
+	bots      map[string]string
+	owners    map[string]bool
+	gate      inbound.Gate
+	pipe      inbound.Pipe
+	engine    *sink.Engine
+	checks    *sink.Engine
+	guideMu   sync.Mutex
+	readRepos map[string]bool
 }
 
 var (
@@ -130,6 +158,55 @@ func New(cfg Config) (*Connector, error) {
 		return nil, fmt.Errorf("github: config needs an API")
 	}
 	c := &Connector{cfg: cfg}
+	c.readRepos = make(map[string]bool, len(cfg.ReadRepositories))
+	for _, repo := range cfg.ReadRepositories {
+		parts := strings.Split(repo, "/")
+		if len(parts) != 2 || address.ValidWorkspace(parts[0]) != nil || !validRepository(parts[1]) {
+			return nil, fmt.Errorf("github: invalid read repository %q", repo)
+		}
+		c.readRepos[strings.ToLower(repo)] = true
+	}
+	c.cfg.MutationSecret = append([]byte(nil), cfg.MutationSecret...)
+	if cfg.Mutations {
+		if len(cfg.MutationSecret) < 16 {
+			return nil, fmt.Errorf("github: mutations need a signing secret of at least 16 bytes")
+		}
+		if _, ok := cfg.API.(MutationAPI); !ok {
+			return nil, fmt.Errorf("github: mutations need MutationAPI")
+		}
+		if _, ok := cfg.API.(ContextAPI); !ok {
+			return nil, fmt.Errorf("github: mutations need ContextAPI")
+		}
+	}
+	if cfg.Guides {
+		if _, ok := cfg.API.(GuideAPI); !ok {
+			return nil, fmt.Errorf("github: guides need GuideAPI")
+		}
+		if _, ok := cfg.API.(ContextAPI); !ok {
+			return nil, fmt.Errorf("github: guides need ContextAPI")
+		}
+		if len(cfg.Bots) == 0 {
+			return nil, fmt.Errorf("github: guides need the authenticated bot login in Bots")
+		}
+	}
+	c.cfg.AutoLabels = make(map[string]map[string]string, len(cfg.AutoLabels))
+	for repo, labels := range cfg.AutoLabels {
+		parts := strings.Split(repo, "/")
+		if len(parts) != 2 || address.ValidWorkspace(parts[0]) != nil || !validRepository(parts[1]) {
+			return nil, fmt.Errorf("github: auto labels repository %q must be owner/repo", repo)
+		}
+		key := strings.ToLower(repo)
+		if _, exists := c.cfg.AutoLabels[key]; exists {
+			return nil, fmt.Errorf("github: duplicate auto labels repository %q", repo)
+		}
+		c.cfg.AutoLabels[key] = make(map[string]string, len(labels))
+		for label, agent := range labels {
+			if strings.TrimSpace(label) == "" || !mention.Valid(agent) {
+				return nil, fmt.Errorf("github: invalid auto label %q or agent %q", label, agent)
+			}
+			c.cfg.AutoLabels[key][label] = agent
+		}
+	}
 
 	c.bots = make(map[string]string, len(cfg.Bots))
 	for login, agent := range cfg.Bots {
@@ -157,6 +234,13 @@ func New(cfg Config) (*Connector, error) {
 		interval = sink.DefaultInterval
 	}
 	c.engine = sink.New(surface{c: c}, c.body, sink.WithInterval(interval), sink.WithClock(cfg.Clock))
+	if cfg.Checks {
+		api, ok := cfg.API.(CheckAPI)
+		if !ok {
+			return nil, fmt.Errorf("github: checks need CheckAPI")
+		}
+		c.checks = sink.New(checkSurface{c: c, api: api}, checkBody, sink.WithInterval(interval), sink.WithClock(cfg.Clock))
+	}
 	return c, nil
 }
 
@@ -196,6 +280,37 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tag, ok := c.tagFrom(event, r.Header.Get(HeaderDelivery), h)
 	if !ok {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// Issue-comment payloads identify a PR but omit its head. Resolve it before
+	// accepting the tag so replay and check delivery never choose a later head.
+	if (c.cfg.Checks || c.cfg.Mutations) && tag.Source.Path[1] == "pull" && tag.Source.Params["head_sha"] == "" && !c.cfg.Guides {
+		api, supported := c.cfg.API.(ContextAPI)
+		if !supported {
+			http.Error(w, "github: checks need context reads for PR comments", http.StatusBadGateway)
+			return
+		}
+		ref, err := c.ref(tag.Source)
+		if err != nil {
+			http.Error(w, "invalid PR reference", http.StatusBadRequest)
+			return
+		}
+		ctx, err := api.ReadContext(r.Context(), ref, 1)
+		if err != nil || !validSHA(ctx.Subject.Head.SHA) {
+			http.Error(w, "could not resolve PR head", http.StatusBadGateway)
+			return
+		}
+		tag.Source = tag.Source.WithParam("head_sha", ctx.Subject.Head.SHA)
+		tag.Meta["github_head_sha"] = ctx.Subject.Head.SHA
+	}
+	if c.cfg.Guides && tag.Source.Path[1] == "pull" {
+		if err := c.prepareGuide(r.Context(), &tag); err != nil {
+			http.Error(w, "could not prepare current PR guide", http.StatusBadGateway)
+			return
+		}
+	}
+	if err := c.grantMutation(r.Context(), &tag); err != nil {
+		http.Error(w, "could not authorize requested PR mutation", http.StatusBadGateway)
 		return
 	}
 	if err := c.pipe.Send(r.Context(), tag); err != nil {
@@ -239,11 +354,24 @@ func (c *Connector) Deliver(ctx context.Context, target address.Address, e envel
 	if _, err := c.ref(target); err != nil {
 		return err
 	}
-	return c.engine.Deliver(ctx, target, e)
+	if _, err := reviewRoot(target); err != nil {
+		return err
+	}
+	commentErr := c.engine.Deliver(ctx, target, e)
+	if c.checks != nil && target.Path[1] == "pull" && validSHA(target.Params["head_sha"]) {
+		return errors.Join(commentErr, c.checks.Deliver(ctx, target, e))
+	}
+	return commentErr
 }
 
 // Flush writes every run whose comment edits are still being coalesced.
-func (c *Connector) Flush(ctx context.Context) error { return c.engine.Flush(ctx) }
+func (c *Connector) Flush(ctx context.Context) error {
+	err := c.engine.Flush(ctx)
+	if c.checks != nil {
+		return errors.Join(err, c.checks.Flush(ctx))
+	}
+	return err
+}
 
 // ref reads a github address: github://<owner>/<repo>/{issues|pull}/<number>.
 func (c *Connector) ref(target address.Address) (Ref, error) {
@@ -257,6 +385,9 @@ func (c *Connector) ref(target address.Address) (Ref, error) {
 	if len(target.Path) != 3 {
 		return Ref{}, fmt.Errorf("%w: %s is not github://<owner>/<repo>/{issues|pull}/<number>",
 			connector.ErrUndeliverable, target)
+	}
+	if address.ValidWorkspace(target.Workspace) != nil || !validRepository(target.Path[0]) {
+		return Ref{}, fmt.Errorf("%w: invalid GitHub repository", connector.ErrUndeliverable)
 	}
 	switch target.Path[1] {
 	case "issues", "pull":
@@ -281,7 +412,20 @@ func (s surface) Create(ctx context.Context, target address.Address, body string
 	if err != nil {
 		return "", err
 	}
-	id, err := s.c.cfg.API.CreateComment(ctx, ref, body)
+	root, err := reviewRoot(target)
+	if err != nil {
+		return "", err
+	}
+	var id int64
+	if root != 0 {
+		api, ok := s.c.cfg.API.(ReplyAPI)
+		if !ok {
+			return "", fmt.Errorf("%w: GitHub review replies", connector.ErrUnsupported)
+		}
+		id, err = api.CreateReviewReply(ctx, ref, root, body)
+	} else {
+		id, err = s.c.cfg.API.CreateComment(ctx, ref, body)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -297,6 +441,17 @@ func (s surface) Update(ctx context.Context, target address.Address, handle, bod
 	if err != nil {
 		return fmt.Errorf("github: comment handle %q is not an id: %w", handle, err)
 	}
+	root, err := reviewRoot(target)
+	if err != nil {
+		return err
+	}
+	if root != 0 {
+		api, ok := s.c.cfg.API.(ReplyAPI)
+		if !ok {
+			return fmt.Errorf("%w: GitHub review replies", connector.ErrUnsupported)
+		}
+		return api.UpdateReviewComment(ctx, ref, id, body)
+	}
 	return s.c.cfg.API.UpdateComment(ctx, ref, id, body)
 }
 
@@ -307,12 +462,18 @@ func (s surface) Update(ctx context.Context, target address.Address, handle, bod
 // The fragments this package interpolates into its own markup are neutralized in
 // markdown.go instead.
 func (c *Connector) body(v render.View) string {
-	return sink.Clamp(sink.Layout(markdown{}, v), MaxBodyChars)
+	return reviewBody(v)
 }
 
 // Actions implements connector.Actor.
 func (c *Connector) Actions() []connector.Action {
-	return []connector.Action{
+	actions := []connector.Action{
+		{
+			Name:        "github_read_context",
+			Description: "Read the issue or pull request, conversation, reviews, diff comments and changed-file patches in this run's repository. Follow next_page until absent. Missing patches are unavailable evidence, not proof that a file has no changes.",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"address":{"type":"string","description":"Optional GitHub issue/PR URL or github:// address. Other repositories require an operator read grant."},"number":{"type":"integer","minimum":1,"description":"Issue or PR number. Defaults to this run's subject."},"page":{"type":"integer","minimum":1,"description":"Page to read, starting at 1."}},"additionalProperties":false}`),
+			Invoke:      c.readContext,
+		},
 		{
 			Name: "github_comment",
 			Description: "Post a comment on a GitHub issue or pull request. Use this " +
@@ -360,6 +521,11 @@ func (c *Connector) Actions() []connector.Action {
 			Invoke: c.addLabels,
 		},
 	}
+	actions = append(actions, c.fileAction(), c.workflowStatusAction())
+	if c.cfg.Mutations {
+		actions = append(actions, c.mutationAction(), c.runChecksAction())
+	}
+	return actions
 }
 
 func (c *Connector) comment(ctx context.Context, target address.Address, raw json.RawMessage) (connector.Result, error) {
