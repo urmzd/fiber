@@ -393,7 +393,13 @@ type Tag struct {
 	// At is when the trigger observed the native event, not when the server
 	// received it. The gap between the two is the delivery latency of the surface
 	// and is worth being able to measure.
-	At            *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=at,proto3" json:"at,omitempty"`
+	At *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=at,proto3" json:"at,omitempty"`
+	// Attachments are the files that arrived with the tag, in the order the
+	// surface listed them. Each is a reference to content already in the
+	// server's blob store under the caller's tenant, never the bytes: a tag is
+	// the durable input of a run and is replayed on every attempt, so it has to
+	// stay small. A reference to a blob the tenant does not hold is rejected.
+	Attachments   []*Attachment `protobuf:"bytes,10,rep,name=attachments,proto3" json:"attachments,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -491,6 +497,109 @@ func (x *Tag) GetAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Tag) GetAttachments() []*Attachment {
+	if x != nil {
+		return x.Attachments
+	}
+	return nil
+}
+
+// Attachment is a reference to one stored file. The digest is the identity:
+// the same bytes uploaded twice are one blob, and a run that is replayed reads
+// exactly the bytes its first attempt read.
+type Attachment struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Digest is the lowercase hex SHA-256 of the content.
+	Digest string `protobuf:"bytes,1,opt,name=digest,proto3" json:"digest,omitempty"`
+	// MediaType is the type detected from the content when it was stored. It is
+	// a hint for display: the server sniffs the stored bytes again before a
+	// model sees them and does not trust this field.
+	MediaType string `protobuf:"bytes,2,opt,name=media_type,json=mediaType,proto3" json:"media_type,omitempty"`
+	// Name is the file name the surface gave, for display.
+	Name string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// Size is the content length in bytes.
+	Size int64 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	// Origin is where the file was attached, when that differs from the tag's
+	// source or is worth citing.
+	Origin *Address `protobuf:"bytes,5,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Alt is the uploader's description of the file, if the surface has one.
+	Alt           string `protobuf:"bytes,6,opt,name=alt,proto3" json:"alt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Attachment) Reset() {
+	*x = Attachment{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Attachment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Attachment) ProtoMessage() {}
+
+func (x *Attachment) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Attachment.ProtoReflect.Descriptor instead.
+func (*Attachment) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Attachment) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *Attachment) GetMediaType() string {
+	if x != nil {
+		return x.MediaType
+	}
+	return ""
+}
+
+func (x *Attachment) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Attachment) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *Attachment) GetOrigin() *Address {
+	if x != nil {
+		return x.Origin
+	}
+	return nil
+}
+
+func (x *Attachment) GetAlt() string {
+	if x != nil {
+		return x.Alt
+	}
+	return ""
+}
+
 // InvokeResponse acknowledges an accepted tag. It returns as soon as the run is
 // durable, before any inference has happened, because the surfaces that raise
 // tags have short timeouts and a run that outlives its HTTP request is the
@@ -518,7 +627,7 @@ type InvokeResponse struct {
 
 func (x *InvokeResponse) Reset() {
 	*x = InvokeResponse{}
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -530,7 +639,7 @@ func (x *InvokeResponse) String() string {
 func (*InvokeResponse) ProtoMessage() {}
 
 func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -543,7 +652,7 @@ func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeResponse.ProtoReflect.Descriptor instead.
 func (*InvokeResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{4}
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *InvokeResponse) GetRunId() string {
@@ -627,7 +736,7 @@ type Run struct {
 
 func (x *Run) Reset() {
 	*x = Run{}
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -639,7 +748,7 @@ func (x *Run) String() string {
 func (*Run) ProtoMessage() {}
 
 func (x *Run) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -652,7 +761,7 @@ func (x *Run) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Run.ProtoReflect.Descriptor instead.
 func (*Run) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{5}
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Run) GetRunId() string {
@@ -757,7 +866,7 @@ type GetRunRequest struct {
 
 func (x *GetRunRequest) Reset() {
 	*x = GetRunRequest{}
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -769,7 +878,7 @@ func (x *GetRunRequest) String() string {
 func (*GetRunRequest) ProtoMessage() {}
 
 func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -782,7 +891,7 @@ func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunRequest.ProtoReflect.Descriptor instead.
 func (*GetRunRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{6}
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetRunRequest) GetRunId() string {
@@ -811,7 +920,7 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x05Actor\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\adisplay\x18\x02 \x01(\tR\adisplay\x12\x10\n" +
-	"\x03bot\x18\x03 \x01(\bR\x03botJ\x04\b\x04\x10\x10\"\xf8\x02\n" +
+	"\x03bot\x18\x03 \x01(\bR\x03botJ\x04\b\x04\x10\x10\"\xb3\x03\n" +
 	"\x03Tag\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x16\n" +
@@ -821,11 +930,21 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x05actor\x18\x06 \x01(\v2\x12.mandatum.v1.ActorR\x05actor\x12,\n" +
 	"\adeliver\x18\a \x03(\v2\x12.mandatum.v1.RouteR\adeliver\x12.\n" +
 	"\x04meta\x18\b \x03(\v2\x1a.mandatum.v1.Tag.MetaEntryR\x04meta\x12*\n" +
-	"\x02at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x1a7\n" +
+	"\x02at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x129\n" +
+	"\vattachments\x18\n" +
+	" \x03(\v2\x17.mandatum.v1.AttachmentR\vattachments\x1a7\n" +
 	"\tMetaEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\n" +
-	"\x10\x19\"\x92\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\v\x10\x19\"\xb1\x01\n" +
+	"\n" +
+	"Attachment\x12\x16\n" +
+	"\x06digest\x18\x01 \x01(\tR\x06digest\x12\x1d\n" +
+	"\n" +
+	"media_type\x18\x02 \x01(\tR\tmediaType\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
+	"\x04size\x18\x04 \x01(\x03R\x04size\x12,\n" +
+	"\x06origin\x18\x05 \x01(\v2\x14.mandatum.v1.AddressR\x06origin\x12\x10\n" +
+	"\x03alt\x18\x06 \x01(\tR\x03altJ\x04\b\a\x10\x10\"\x92\x01\n" +
 	"\x0eInvokeResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x10\n" +
 	"\x03rev\x18\x02 \x01(\x05R\x03rev\x12\x14\n" +
@@ -877,46 +996,49 @@ func file_mandatum_v1_invoke_proto_rawDescGZIP() []byte {
 }
 
 var file_mandatum_v1_invoke_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_mandatum_v1_invoke_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_mandatum_v1_invoke_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_mandatum_v1_invoke_proto_goTypes = []any{
 	(RunStatus)(0),                // 0: mandatum.v1.RunStatus
 	(*Address)(nil),               // 1: mandatum.v1.Address
 	(*Route)(nil),                 // 2: mandatum.v1.Route
 	(*Actor)(nil),                 // 3: mandatum.v1.Actor
 	(*Tag)(nil),                   // 4: mandatum.v1.Tag
-	(*InvokeResponse)(nil),        // 5: mandatum.v1.InvokeResponse
-	(*Run)(nil),                   // 6: mandatum.v1.Run
-	(*GetRunRequest)(nil),         // 7: mandatum.v1.GetRunRequest
-	nil,                           // 8: mandatum.v1.Address.ParamsEntry
-	nil,                           // 9: mandatum.v1.Tag.MetaEntry
-	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
-	(*Event)(nil),                 // 11: mandatum.v1.Event
+	(*Attachment)(nil),            // 5: mandatum.v1.Attachment
+	(*InvokeResponse)(nil),        // 6: mandatum.v1.InvokeResponse
+	(*Run)(nil),                   // 7: mandatum.v1.Run
+	(*GetRunRequest)(nil),         // 8: mandatum.v1.GetRunRequest
+	nil,                           // 9: mandatum.v1.Address.ParamsEntry
+	nil,                           // 10: mandatum.v1.Tag.MetaEntry
+	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
+	(*Event)(nil),                 // 12: mandatum.v1.Event
 }
 var file_mandatum_v1_invoke_proto_depIdxs = []int32{
-	8,  // 0: mandatum.v1.Address.params:type_name -> mandatum.v1.Address.ParamsEntry
+	9,  // 0: mandatum.v1.Address.params:type_name -> mandatum.v1.Address.ParamsEntry
 	1,  // 1: mandatum.v1.Route.target:type_name -> mandatum.v1.Address
 	1,  // 2: mandatum.v1.Tag.source:type_name -> mandatum.v1.Address
 	3,  // 3: mandatum.v1.Tag.actor:type_name -> mandatum.v1.Actor
 	2,  // 4: mandatum.v1.Tag.deliver:type_name -> mandatum.v1.Route
-	9,  // 5: mandatum.v1.Tag.meta:type_name -> mandatum.v1.Tag.MetaEntry
-	10, // 6: mandatum.v1.Tag.at:type_name -> google.protobuf.Timestamp
-	10, // 7: mandatum.v1.InvokeResponse.accepted_at:type_name -> google.protobuf.Timestamp
-	0,  // 8: mandatum.v1.Run.status:type_name -> mandatum.v1.RunStatus
-	4,  // 9: mandatum.v1.Run.tag:type_name -> mandatum.v1.Tag
-	10, // 10: mandatum.v1.Run.created_at:type_name -> google.protobuf.Timestamp
-	10, // 11: mandatum.v1.Run.started_at:type_name -> google.protobuf.Timestamp
-	10, // 12: mandatum.v1.Run.ended_at:type_name -> google.protobuf.Timestamp
-	4,  // 13: mandatum.v1.InvokeService.Invoke:input_type -> mandatum.v1.Tag
-	4,  // 14: mandatum.v1.InvokeService.InvokeStream:input_type -> mandatum.v1.Tag
-	7,  // 15: mandatum.v1.InvokeService.GetRun:input_type -> mandatum.v1.GetRunRequest
-	5,  // 16: mandatum.v1.InvokeService.Invoke:output_type -> mandatum.v1.InvokeResponse
-	11, // 17: mandatum.v1.InvokeService.InvokeStream:output_type -> mandatum.v1.Event
-	6,  // 18: mandatum.v1.InvokeService.GetRun:output_type -> mandatum.v1.Run
-	16, // [16:19] is the sub-list for method output_type
-	13, // [13:16] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	10, // 5: mandatum.v1.Tag.meta:type_name -> mandatum.v1.Tag.MetaEntry
+	11, // 6: mandatum.v1.Tag.at:type_name -> google.protobuf.Timestamp
+	5,  // 7: mandatum.v1.Tag.attachments:type_name -> mandatum.v1.Attachment
+	1,  // 8: mandatum.v1.Attachment.origin:type_name -> mandatum.v1.Address
+	11, // 9: mandatum.v1.InvokeResponse.accepted_at:type_name -> google.protobuf.Timestamp
+	0,  // 10: mandatum.v1.Run.status:type_name -> mandatum.v1.RunStatus
+	4,  // 11: mandatum.v1.Run.tag:type_name -> mandatum.v1.Tag
+	11, // 12: mandatum.v1.Run.created_at:type_name -> google.protobuf.Timestamp
+	11, // 13: mandatum.v1.Run.started_at:type_name -> google.protobuf.Timestamp
+	11, // 14: mandatum.v1.Run.ended_at:type_name -> google.protobuf.Timestamp
+	4,  // 15: mandatum.v1.InvokeService.Invoke:input_type -> mandatum.v1.Tag
+	4,  // 16: mandatum.v1.InvokeService.InvokeStream:input_type -> mandatum.v1.Tag
+	8,  // 17: mandatum.v1.InvokeService.GetRun:input_type -> mandatum.v1.GetRunRequest
+	6,  // 18: mandatum.v1.InvokeService.Invoke:output_type -> mandatum.v1.InvokeResponse
+	12, // 19: mandatum.v1.InvokeService.InvokeStream:output_type -> mandatum.v1.Event
+	7,  // 20: mandatum.v1.InvokeService.GetRun:output_type -> mandatum.v1.Run
+	18, // [18:21] is the sub-list for method output_type
+	15, // [15:18] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_mandatum_v1_invoke_proto_init() }
@@ -931,7 +1053,7 @@ func file_mandatum_v1_invoke_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mandatum_v1_invoke_proto_rawDesc), len(file_mandatum_v1_invoke_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

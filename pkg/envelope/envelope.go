@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/topic"
 )
 
@@ -170,6 +171,11 @@ type Tag struct {
 	// pull request number, an issue title, a Jira status.
 	Meta map[string]string `json:"meta,omitempty"`
 
+	// Attachments are the files that arrived with the tag, as references
+	// into the blob store. They are omitted when empty so that the durable
+	// input of a run with no files is byte for byte what it always was.
+	Attachments []attachment.Attachment `json:"attachments,omitempty"`
+
 	// At is when the trigger observed the event.
 	At time.Time `json:"at"`
 }
@@ -188,6 +194,9 @@ func (t Tag) Validate() error {
 		if err := r.Validate(); err != nil {
 			return fmt.Errorf("%w (route %d)", err, i)
 		}
+	}
+	if err := attachment.ValidateAll(t.Attachments); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	return nil
 }
