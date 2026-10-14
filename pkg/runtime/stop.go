@@ -297,7 +297,14 @@ func StopTopic(tenant, runID string) (topic.Topic, error) {
 //   - a run that has already been asked: the first request a run hears is the
 //     one it honours, and later ones change nothing
 //
-// which is what makes it safe to call twice and impossible to probe with.
+// which is what makes it safe to call twice, and means its result never says
+// whether a run exists. Its timing can: a run id is computable from a tenant
+// and a tag id, and with WithStopLedger, Stop for an id the ledger holds reads
+// and decodes that run before deciding to do nothing, while an unknown id
+// returns after one missed read. A caller who can time the call precisely can
+// therefore learn whether some tenant's run with that id exists, though
+// nothing about it. The ledger has no tenant-keyed lookup that would make the
+// two cost the same.
 //
 // With WithStopLedger (which a deployment should always pass) the ledger
 // decides. The request is recorded on the run and then published, but only if
@@ -383,7 +390,7 @@ func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
 // holds at most one per run and lives exactly as long as the run's own
 // records do.
 func (r *Runtime) recordStop(ctx context.Context, tenant, runID string, body []byte) (bool, error) {
-	rec, _, err := r.stops.Load(ctx, runID)
+	rec, err := r.loadRun(ctx, runID)
 	switch {
 	case errors.Is(err, run.ErrNotFound):
 		return false, nil
@@ -457,6 +464,19 @@ func (r *Runtime) StopRequested(ctx context.Context, tenant, runID string) (Stop
 		return StopRecord{Reason: body.Reason, By: body.By, At: at}, true, nil
 	}
 	return StopRecord{}, false, nil
+}
+
+// loadRun reads a run without its records when the ledger offers that point
+// read (every ledger in duraturo and pkg/durable does), and with them
+// otherwise.
+func (r *Runtime) loadRun(ctx context.Context, runID string) (run.Run, error) {
+	if g, ok := r.stops.(interface {
+		GetRun(context.Context, string) (run.Run, error)
+	}); ok {
+		return g.GetRun(ctx, runID)
+	}
+	rec, _, err := r.stops.Load(ctx, runID)
+	return rec, err
 }
 
 // recordedStop reports a stop request recorded on the run in the ledger.

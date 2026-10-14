@@ -36,7 +36,7 @@ type StopRequest struct {
 //
 // Stop publishes a request and does not report what the run did with it. It
 // must behave identically for a run that is unknown, finished, already asked,
-// or another tenant's, so that the answer cannot be used to learn whether a
+// or another tenant's, so that the answer does not say whether a
 // run exists.
 type Stopper interface {
 	Stop(ctx context.Context, req StopRequest) error
