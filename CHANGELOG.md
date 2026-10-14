@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0 (2026-10-14)
+
+### Breaking
+
+- park a run on a person and resume it with the answer (#16) ([8aaec82](https://github.com/urmzd/mandatum/commit/8aaec82b8fa753d3438258f60da17b94629cc09f))
+
+[Full Changelog](https://github.com/urmzd/mandatum/compare/v0.10.0...v0.11.0)
+
+
 ## 0.10.0 (2026-10-14)
 
 ### Features
