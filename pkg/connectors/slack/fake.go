@@ -16,12 +16,16 @@ import (
 // out — with no credentials and no network. Everything the sink relies on is
 // modelled: a message has a timestamp, an edit replaces its text, an edit of a
 // timestamp that does not exist fails the way Slack fails it, and reactions
-// accumulate per message.
+// accumulate per message. Sessions and commands follow Slack's own rule that a
+// code channel is its own session while every other channel has one per thread.
 type Fake struct {
 	mu       sync.Mutex
 	messages []FakeMessage
 	byTS     map[string]int
 	seq      int64
+	code     map[string]bool
+	sessions []Session
+	commands map[string][]Command
 	// Err, when set, fails every call. It is how a test drives the retry path.
 	Err error
 }
@@ -40,7 +44,78 @@ type FakeMessage struct {
 }
 
 // NewFake returns an empty fake workspace.
-func NewFake() *Fake { return &Fake{byTS: make(map[string]int)} }
+func NewFake() *Fake {
+	return &Fake{
+		byTS:     make(map[string]int),
+		code:     make(map[string]bool),
+		commands: make(map[string][]Command),
+	}
+}
+
+// CodeChannel marks channel as a code channel, the only kind of channel that
+// accepts commands and the only kind whose session has no thread.
+func (f *Fake) CodeChannel(channel string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.code[channel] = true
+}
+
+// SetStatus implements API.
+func (f *Fake) SetStatus(_ context.Context, s Session) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return f.Err
+	}
+	const method = "/agents.sessions.setStatus"
+	switch {
+	case s.Channel == "":
+		return &Error{Method: method, Code: "channel_not_found"}
+	case f.code[s.Channel] && s.ThreadTS != "":
+		return &Error{Method: method, Code: "thread_ts_not_allowed"}
+	case !f.code[s.Channel] && s.ThreadTS == "":
+		return &Error{Method: method, Code: "thread_ts_required"}
+	}
+	switch s.Status {
+	case StatusProcessing, StatusActive, StatusSuspended, StatusClosed:
+	default:
+		return &Error{Method: method, Code: "invalid_status"}
+	}
+	f.sessions = append(f.sessions, s)
+	return nil
+}
+
+// SetCommands implements API.
+func (f *Fake) SetCommands(_ context.Context, _, channel string, commands []Command) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Err != nil {
+		return f.Err
+	}
+	const method = "/agents.conversations.setCommands"
+	if !f.code[channel] {
+		return &Error{Method: method, Code: "not_agent_channel"}
+	}
+	if len(commands) > MaxCommands {
+		return &Error{Method: method, Code: "too_many_commands"}
+	}
+	f.commands[channel] = append([]Command(nil), commands...)
+	return nil
+}
+
+// Statuses returns every status report accepted, oldest first.
+func (f *Fake) Statuses() []Session {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Session(nil), f.sessions...)
+}
+
+// Commands returns the commands registered in channel.
+func (f *Fake) Commands(channel string) []Command {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Command(nil), f.commands[channel]...)
+}
 
 // PostMessage implements API.
 func (f *Fake) PostMessage(_ context.Context, m Message) (string, error) {
