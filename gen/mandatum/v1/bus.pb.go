@@ -111,8 +111,9 @@ type Event struct {
 	//   lifecycle.resumed, lifecycle.completed, lifecycle.failed,
 	//   lifecycle.stopped          run lifecycle
 	//   control.stop               a request that one run stop, published to
-	//                              agent:_control:stop-<run> and not to the
-	//                              run's own topic
+	//                              agent:_control:stop-<key>, the key a hash of
+	//                              the asker's tenant and the run id, and not
+	//                              to the run's own topic
 	//   action.taken               the agent changed something on a real surface
 	//   control.created, control.revised, control.deleted
 	//                              control-plane changes, on the same bus as the
