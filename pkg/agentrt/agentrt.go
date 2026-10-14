@@ -66,6 +66,15 @@
 // With no History a turn starts a fresh conversation, and the prefix two runs
 // of the same revision share is the tool definitions and the system prompt.
 //
+// # Stopping a turn
+//
+// A turn can be asked to stop while it runs (Turn.Stop). The model call in
+// flight is cancelled, running tools are cancelled through their context, and
+// the turn returns what it had answered so far with Result.Stopped set and no
+// error: a stopped turn is neither a completed one nor a failed one, and a
+// caller that retries failures must not retry it. This package does not decide
+// what a stopped turn means for a run or a thread; pkg/runtime does.
+//
 // # Revisions are pinned, not resolved
 //
 // New takes a Revision, never an agent name. Nothing in this package can look
@@ -82,6 +91,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
@@ -119,8 +129,23 @@ type Message struct {
 	Text string `json:"text"`
 }
 
+// Stop asks a turn to wrap up before it has finished.
+type Stop struct {
+	// Reason is why, in the words of whoever asked. Empty takes saige's
+	// default.
+	Reason string `json:"reason,omitempty"`
+	// By is who asked. It is recorded and never sent to the model.
+	By string `json:"by,omitempty"`
+}
+
 // Turn is one request to an agent.
 type Turn struct {
+	// Stop, when set, is how the turn is asked to wrap up early: the first
+	// value received on it stops the turn (see "Stopping a turn" in the
+	// package documentation). A nil channel is a turn that cannot be stopped,
+	// only cancelled through its context. Nothing is read from it once the
+	// turn has returned.
+	Stop <-chan Stop
 	// Attachments are the files that arrived with the request. They need
 	// WithAttachments, and Tenant, which scopes every read of them.
 	Attachments []attachment.Attachment
@@ -162,6 +187,11 @@ type Result struct {
 	// order. It is empty unless WithCompaction set a budget and the turn
 	// crossed it.
 	Compactions []payload.Compaction
+	// Stopped is set when the turn ended because it was asked to stop, and
+	// says why and by whom. Text is then what had been answered so far, which
+	// may be nothing. It is nil for a turn that finished before the request
+	// took effect: that turn completed, and its Text is the whole answer.
+	Stopped *Stop
 }
 
 // Runner runs turns of one pinned revision.
@@ -352,8 +382,24 @@ func (r *Runner) SystemPrompt() string { return r.rev.Spec.SystemPrompt }
 // A failed turn returns an error and whatever text was produced before it
 // failed, because a partially-answered turn is what a sink has already rendered
 // and pretending otherwise would make the thread inconsistent with the run.
+//
+// A stopped turn returns no error: see Turn.Stop and Result.Stopped.
 func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chunk) error) (Result, error) {
 	var res Result
+
+	// A stop that was already waiting when the turn began ends it here,
+	// before retrieval and before any model call. The request is recorded as
+	// it would have been sent, without retrieved passages, since none were
+	// fetched.
+	if stop, ok := pendingStop(t.Stop); ok {
+		res.Prompt = t.Text
+		if meta := renderMeta(t.Meta); meta != "" {
+			res.Prompt = meta + "\n\n" + t.Text
+		}
+		res.Stopped = &stop
+		return res, nil
+	}
+
 	send := func(c Chunk) error {
 		if emit == nil {
 			res.Chunks++
@@ -423,6 +469,27 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	stream := agent.Invoke(ctx, input)
 	translator := NewTranslator()
 
+	// The stop request is applied from its own goroutine, because this one is
+	// busy draining the stream and saige's Stop is safe to call from anywhere.
+	// The goroutine ends with the turn: settle runs on every return path
+	// below, which is what makes "nothing is read from Turn.Stop once the
+	// turn has returned" true rather than likely.
+	stopping := newStopper(stream)
+	finished := make(chan struct{})
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		select {
+		case stop := <-t.Stop:
+			stopping.apply(stop)
+		case <-finished:
+		}
+	}()
+	settle := func() {
+		close(finished)
+		<-watched
+	}
+
 	var answer strings.Builder
 	var streamErr error
 	for d := range stream.Deltas() {
@@ -436,6 +503,10 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			if streamErr == nil && v.Error != nil {
 				streamErr = v.Error
 			}
+		case saigetypes.StoppedDelta:
+			// The turn wrapped up on request. Like failure it is a
+			// lifecycle fact and not an event of its own; the request it
+			// answers is read off the stream once it has drained.
 		case saigetypes.UsageDelta:
 			// Telemetry, so it goes on the Result and not on the bus (see
 			// Translator.Delta).
@@ -467,13 +538,30 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		if err := send(c); err != nil {
 			stream.Cancel()
 			drain(stream)
+			settle()
 			return res, err
 		}
 	}
 
 	res.Text = answer.String()
-	if err := stream.Wait(); err != nil {
-		streamErr = errors.Join(streamErr, err)
+	waitErr := stream.Wait()
+	settle()
+	if req, ok := stream.Stopped(); ok {
+		// saige wrapped the turn up: the partial text is kept and the stream
+		// ended cleanly.
+		res.Stopped = &Stop{Reason: req.Reason, By: req.By}
+		return res, nil
+	}
+	if stop, ok := stopping.cancelled(); ok {
+		// The stream could not wrap up on request and was cancelled instead.
+		// What the caller asked for still happened, with whatever text had
+		// arrived, so it is reported as a stop and not as the cancellation
+		// it was implemented with.
+		res.Stopped = &stop
+		return res, nil
+	}
+	if waitErr != nil {
+		streamErr = errors.Join(streamErr, waitErr)
 	}
 	if streamErr != nil {
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, streamErr)
@@ -498,6 +586,55 @@ func (r *Runner) withFiles(ctx context.Context, t Turn, prompt string) (saigetyp
 		return nil, fmt.Errorf("attachments: %w", err)
 	}
 	return out.Message(prompt), nil
+}
+
+// pendingStop reports a stop request that is already waiting, without
+// blocking.
+func pendingStop(ch <-chan Stop) (Stop, bool) {
+	select {
+	case stop := <-ch:
+		return stop, true
+	default:
+		return Stop{}, false
+	}
+}
+
+// stopper applies one stop request to a stream and remembers whether it had to
+// fall back to cancelling it.
+type stopper struct {
+	stream *saige.EventStream
+
+	mu       sync.Mutex
+	fallback *Stop
+}
+
+func newStopper(stream *saige.EventStream) *stopper { return &stopper{stream: stream} }
+
+// apply asks the stream to wrap up. A stream that cannot (saige refuses it for
+// a replayed or remote stream and under a durable step runner) is cancelled,
+// which ends it as surely and keeps less.
+//
+// A stream that has already ended is left alone: the turn finished before the
+// request arrived and its outcome stands.
+func (s *stopper) apply(stop Stop) {
+	err := s.stream.Stop(saige.StopRequest{Reason: stop.Reason, By: stop.By})
+	if err == nil || errors.Is(err, saige.ErrRunFinished) {
+		return
+	}
+	s.mu.Lock()
+	s.fallback = &stop
+	s.mu.Unlock()
+	s.stream.Cancel()
+}
+
+// cancelled reports the stop that was carried out by cancelling the stream.
+func (s *stopper) cancelled() (Stop, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fallback == nil {
+		return Stop{}, false
+	}
+	return *s.fallback, true
 }
 
 // drain empties a cancelled stream so its producing goroutine can exit.
