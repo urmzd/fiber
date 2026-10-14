@@ -153,8 +153,9 @@ type taskInput struct {
 // executing it. The two never share a context (see call), so everything that
 // has to cross between them crosses here.
 type turn struct {
-	// sink carries the turn's chunks out. Nil for a delegated sub-task, which
-	// has no stream of its own.
+	// sink carries the turn's chunks out. For a delegated sub-task, which has
+	// no stream of its own, only its usage is relayed from it onto its
+	// parent's stream; the rest is dropped.
 	sink chan agentrt.Chunk
 	// stop asks the turn to wrap up. Nil for a turn that can only be
 	// cancelled.
@@ -553,9 +554,10 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		}(waited.abort)
 	}
 
-	// A turn with no sink is a delegated sub-task: its answer is the tool
-	// result its parent reads, and it is not a durable run of its own, so it
-	// has no stream to publish onto.
+	// A delegated sub-task's sink is read by the delegation waiting on it,
+	// which relays only the sub-task's usage onto the parent's stream: its
+	// answer is the tool result its parent reads, and it is not a durable run
+	// of its own, so it has no stream to publish onto.
 	var sink chan agentrt.Chunk
 	var stop <-chan agentrt.Stop
 	if waited != nil {
@@ -587,6 +589,9 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		}
 	}
 
+	// Every call this turn makes is keyed under one prefix, which a sub-task
+	// it delegates to extends.
+	req.Accounting = accountingOf(req)
 	tools, granted, err := s.turnTools(rt, req, send)
 	if err != nil {
 		return nil, err
@@ -614,7 +619,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	res, err := runner.Run(ctx, agentrt.Turn{
 		Text: req.Text, Meta: req.Meta, History: req.History,
 		Attachments: req.Attachments, Tenant: req.Tenant,
-		Stop: stop,
+		Stop: stop, Accounting: req.Accounting,
 	}, func(_ context.Context, c agentrt.Chunk) error {
 		return send(c)
 	})
@@ -675,7 +680,7 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 	delegates := make(map[string]saigetypes.Tool, len(req.Revision.Spec.Access.Spawn))
 	for _, target := range req.Revision.Spec.Access.Spawn {
 		name := DelegateToolName(target)
-		delegates[name] = s.delegateTool(rt, req, target, report)
+		delegates[name] = s.delegateTool(rt, req, target, report, send)
 		add(name)
 	}
 
@@ -728,7 +733,13 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 // creates a durable run of its own with its own pinned revision and its own
 // topic. That is the right shape when the delegated work should outlive this
 // turn; this one is the right shape when the parent needs the answer to continue.
-func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, report func(payload.Action) error) saigetypes.Tool {
+//
+// What the child spends is the parent's spending too. The child's model calls
+// are relayed onto the parent's stream as usage.call events one level deeper,
+// as they happen, so they are counted in the parent run's total (as Children)
+// whether the child answers, fails or is aborted. A host Delegator reports the
+// run it started with ReportChildUsage, from the context it is given.
+func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, report func(payload.Action) error, send func(agentrt.Chunk) error) saigetypes.Tool {
 	return &saigetypes.ToolFunc{
 		Def: saigetypes.ToolDef{
 			Name:        DelegateToolName(target),
@@ -752,6 +763,13 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			if s.delegator != nil && parent.RunID != "" {
 				dctx, done := s.delegationContext(ctx, parent.RunID)
 				defer done()
+				dctx = context.WithValue(dctx, usageReporterKey{}, func(c payload.UsageChild) error {
+					body, err := payload.Encode(c)
+					if err != nil {
+						return err
+					}
+					return send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
+				})
 				return s.delegator(dctx, parent, target, text, report)
 			}
 			if s.specs == nil {
@@ -767,10 +785,15 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			// stopped parent would leave its helpers working on answers
 			// nobody will read.
 			sub := fmt.Sprintf("sub-%d", s.subs.Add(1))
-			if err := s.attach(sub, &turn{abort: make(chan struct{})}); err != nil {
+			sink := make(chan agentrt.Chunk, s.buffer)
+			if err := s.attach(sub, &turn{sink: sink, abort: make(chan struct{})}); err != nil {
 				return "", err
 			}
 			defer s.detach(sub)
+			// Deferred after detach, so it runs first: everything the
+			// sub-task reported before it returned is relayed before the
+			// delegation returns its answer.
+			defer relay(sink, send)()
 			child := Request{
 				// No run id: a sub-task has no stream of its own, and its
 				// output would be attributed to the wrong agent on the
@@ -784,6 +807,9 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 				// No History: see above.
 				Revision: rev,
 				Service:  parent.Service,
+				// The child's calls are keyed under the parent's, so no two
+				// calls of one run share a key at any depth.
+				Accounting: parent.Accounting + "/" + target + "." + sub,
 				// The files the parent was asked about go with the work it
 				// hands off; a specialist asked to read a log it was never
 				// given can only guess.
@@ -805,6 +831,45 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			}
 			return out.Text, nil
 		},
+	}
+}
+
+// relay forwards the usage a delegated sub-task reports on sink to its
+// parent's stream, one level deeper, until the returned function is called;
+// that function relays what is still buffered and waits for the relay to end.
+// Everything else a sub-task streams is dropped: its answer reaches the parent
+// as the delegation tool's result.
+func relay(sink <-chan agentrt.Chunk, send func(agentrt.Chunk) error) func() {
+	forward := func(c agentrt.Chunk) {
+		if up, ok := relayUsage(c); ok {
+			// A parent that has gone away cannot be told. The child's
+			// calls are then lost with the parent's own unfinished ones.
+			_ = send(up)
+		}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case c := <-sink:
+				forward(c)
+			case <-stop:
+				for {
+					select {
+					case c := <-sink:
+						forward(c)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
 	}
 }
 

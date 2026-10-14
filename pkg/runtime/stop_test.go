@@ -182,6 +182,9 @@ type world struct {
 	busOnly bool
 	// log, when set, receives what the runtimes and workers log.
 	log *slog.Logger
+	// concurrency is how many runs a worker executes at once; zero is two.
+	// A run that waits on a run of its own needs more.
+	concurrency int
 }
 
 func newWorld(t *testing.T) *world {
@@ -245,7 +248,7 @@ func (w *world) work(t *testing.T, rt *runtime.Runtime, between func()) {
 		_ = worker.New(w.ledger, w.queue,
 			worker.WithLogger(logger),
 			worker.WithRegistry(rt.Registry()),
-			worker.WithConcurrency(2),
+			worker.WithConcurrency(max(2, w.concurrency)),
 			worker.WithJanitorEvery(0),
 			worker.WithLeaseTTL(5*time.Second),
 			worker.WithBackoff(func(int) time.Duration {
@@ -538,6 +541,12 @@ func TestAStoppedRunKeepsItsPartialAnswerAndTheNextTurnIsShownIt(t *testing.T) {
 		t.Errorf("Output.LastSeq = %d, the stopped event is at %d", out.LastSeq, last.Seq)
 	}
 	body := stoppedBody(t, last)
+	// The call that was cut short is counted (see the usage tests); the
+	// rest of the body is compared here.
+	if body.Usage == nil || body.Usage.Own.ModelCalls != 1 {
+		t.Errorf("lifecycle.stopped usage = %+v, want the one call that was cut short", body.Usage)
+	}
+	body.Usage = nil
 	want := payload.Stopped{Attempt: 1, Rev: 1, Reason: "Stopped by a user", By: "slack:U1", Text: "The deploy failed because"}
 	if body != want {
 		t.Errorf("lifecycle.stopped = %+v, want %+v", body, want)

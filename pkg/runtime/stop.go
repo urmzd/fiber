@@ -184,6 +184,11 @@ type StopLedger interface {
 //
 // Without it a request that waits for a turn is held only by the bus, and is
 // lost if the bus forgets it first.
+//
+// The same ledger holds what an attempt that failed had spent, so the run's
+// total counts it (see usage.go). Without it Output.Usage counts only the
+// attempt that produced the outcome; the usage.call events still report every
+// call.
 func WithStopLedger(l StopLedger) Option {
 	return func(r *Runtime) { r.stops = l }
 }

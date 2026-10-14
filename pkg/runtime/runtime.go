@@ -89,6 +89,14 @@
 // retried, and remembered by its thread with what it had said so far. See
 // stop.go.
 //
+// # Usage
+//
+// Every model call is published as usage.call as it happens, and a run's
+// total, delegations included and every call of every attempt counted once,
+// is on its terminal event and its Output. A failed attempt's calls are kept
+// on the run in the ledger so the total counts them; a replay counts nothing.
+// See usage.go.
+//
 // # Single goroutine
 //
 // duraturo v1 workflow bodies are single-goroutine. Nothing in this package
@@ -218,6 +226,12 @@ type Output struct {
 	// the sequence of the stopped event. The ledger records such a run as
 	// succeeded: it ended, it did not fail, and it is never retried.
 	Stopped *agentrt.Stop `json:"stopped,omitempty"`
+	// Usage is what the run spent: every model call of every attempt, and
+	// everything it delegated, each counted once (see usage.go). It is in
+	// the ledger with the rest of the output, so it survives a restart. Nil
+	// when the run made no model call, and for an output recorded before
+	// usage was.
+	Usage *payload.RunUsage `json:"usage,omitempty"`
 }
 
 // Request is one turn handed to an Executor: the tag's content, plus the exact
@@ -258,6 +272,11 @@ type Request struct {
 	// Service is set by the Sandbox: the legatus deployment this turn runs
 	// in, so a delegated sub-task can be awaited in the right place.
 	Service string `json:"service,omitempty"`
+	// Accounting is the prefix the turn's model calls are keyed under when
+	// saige reports no key of its own (see agentrt.Turn.Accounting). Empty
+	// for a durable run, which is keyed "<run>/a<attempt>"; a delegated
+	// sub-task is handed its parent's prefix extended by its own name.
+	Accounting string `json:"accounting,omitempty"`
 }
 
 // Agent returns the agent name.
@@ -297,6 +316,14 @@ type Outcome struct {
 	// whether or not the turn was stopped by it, so the workflow body claims
 	// that record and the ledger has no record left over that no call read.
 	StopRecorded bool `json:"stop_recorded,omitempty"`
+	// Usage is set by the runtime, never by an executor: what the run spent
+	// up to and including this outcome, counted from the usage events the
+	// attempts published (see usage.go). Whatever an executor puts here is
+	// replaced.
+	Usage *payload.RunUsage `json:"usage,omitempty"`
+	// UsageAttempts is set by the runtime: the earlier attempts whose usage
+	// records Usage counts, which the workflow body claims.
+	UsageAttempts []int `json:"usage_attempts,omitempty"`
 }
 
 // Acceptance is what a caller learns when a tag is accepted. It mirrors
@@ -663,6 +690,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 				"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
 		}
 	}
+	r.claimUsage(ctx, in, out.UsageAttempts)
 	if out.Stopped != nil {
 		// The run is over and nothing failed. Returning a result rather than
 		// an error is what tells the ledger so: it records the run as ended
@@ -670,6 +698,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// recorded outcome, so a replay announces the same stop.
 		if err := r.publish(ctx, in, b.close, envelope.KindStopped, payload.Stopped{
 			Attempt: attempt, Rev: in.Rev, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
+			Usage: out.Usage,
 		}); err != nil {
 			return Output{}, err
 		}
@@ -681,11 +710,12 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 			// accepted, opened, the agent's chunks, and stopped.
 			Events:  out.Chunks + 3,
 			Stopped: out.Stopped,
+			Usage:   out.Usage,
 		}, nil
 	}
 
 	if err := r.publish(ctx, in, b.close, envelope.KindCompleted, payload.Lifecycle{
-		Attempt: attempt, Rev: in.Rev, Text: out.Text,
+		Attempt: attempt, Rev: in.Rev, Text: out.Text, Usage: out.Usage,
 	}); err != nil {
 		return Output{}, err
 	}
@@ -697,6 +727,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// accepted, opened, the agent's chunks, and completed.
 		Events: out.Chunks + 3,
 		Stored: out.Stored,
+		Usage:  out.Usage,
 	}, nil
 }
 
@@ -736,7 +767,16 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		Attachments: in.Tag.Attachments,
 	}
 
+	// What earlier attempts spent and failed is read here, inside the
+	// memoized activity, and never in the workflow body: which attempts
+	// failed is exactly the kind of fact that differs between replays.
+	prior, priorAttempts := r.priorUsage(ctx, req.RunID, attempt)
+	meter := &meter{s: spent{Attempt: attempt}}
+
 	out, err := r.execute(ctx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
+		// A call is counted when it is reported, before it is published:
+		// the tokens were spent whether or not the bus takes the event.
+		meter.observe(c)
 		seq, err := b.delta()
 		if err != nil {
 			// The band is spent. Retrying would produce the same flood, so
@@ -745,9 +785,22 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		}
 		return r.publishRaw(ctx, in, seq, c.Kind, c.Payload)
 	})
+	mine := meter.snapshot()
 	if err != nil {
+		// The attempt spent what it spent. Its calls go on the run before
+		// the failure goes up, so the attempt that finishes counts them.
+		r.recordSpent(ctx, req.RunID, mine)
 		return out, fmt.Errorf("runtime: run %s: agent %q revision %d: %w", req.RunID, rev.Spec.Name, rev.Rev, err)
 	}
+	var tally payload.Tally
+	for i := range prior {
+		prior[i].into(&tally)
+	}
+	mine.into(&tally)
+	if usage := tally.Usage(); usage.Total != (payload.Usage{}) {
+		out.Usage = &usage
+	}
+	out.UsageAttempts = priorAttempts
 	return out, nil
 }
 

@@ -692,7 +692,8 @@ func TestCancellingAWaitingTurnCancelsItsTask(t *testing.T) {
 }
 
 // The integration job sets $MANDATUM_POSTGRES_TEST_URL and $MANDATUM_REDIS_ADDR
-// and requires this test to pass, which is how it knows every stop test above
+// and requires this test to pass, which is how it knows every stop test above,
+// and the usage tests in usage_test.go,
 // ran on Postgres (ledger, queue, journal) and Redis (bus) rather than on the
 // in-memory fallbacks. Without both it skips, so plain `go test ./...` stays
 // hermetic.
