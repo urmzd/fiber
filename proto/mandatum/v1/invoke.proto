@@ -396,18 +396,23 @@ message Usage {
   // CompletionTokens is all output.
   int64 completion_tokens = 6;
 
-  // Cost is what the priced calls cost, from saige's price catalog. Unset
-  // when no call could be priced. A lower bound whenever unpriced_calls is
-  // not zero.
+  // Cost is what the calls priced in its currency cost, from saige's price
+  // catalog: the currency of the first priced call counted. Unset when no
+  // call could be priced. A lower bound whenever unpriced_calls is not zero,
+  // and it does not include other_costs.
   Cost cost = 7;
 
-  // UnpricedCalls counts calls whose tokens are counted above and whose cost
-  // is not in cost: no rate card for the model, or a currency other than
-  // cost's. Nothing is estimated for them.
+  // UnpricedCalls counts calls whose tokens are counted above and that have
+  // no cost: no rate card for the model, an unpriced modality, or no tokens
+  // reported. Nothing is estimated for them.
   int64 unpriced_calls = 8;
 
+  // OtherCosts is what calls priced in currencies other than cost's cost,
+  // one entry per currency in the order first counted. Nothing is converted.
+  repeated Cost other_costs = 9;
+
   // Reserved for growth.
-  reserved 9 to 15;
+  reserved 10 to 15;
 }
 
 // Cost is an amount of money in integer micro-units of a currency: one US

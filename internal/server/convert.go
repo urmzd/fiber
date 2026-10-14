@@ -359,6 +359,9 @@ func usageToProto(u payload.Usage) *mandatumv1.Usage {
 	if c := u.Cost; c != nil {
 		out.Cost = &mandatumv1.Cost{Micros: c.Micros, Currency: c.Currency, AsOf: c.AsOf}
 	}
+	for _, c := range u.OtherCosts {
+		out.OtherCosts = append(out.OtherCosts, &mandatumv1.Cost{Micros: c.Micros, Currency: c.Currency, AsOf: c.AsOf})
+	}
 	return out
 }
 

@@ -990,14 +990,18 @@ type Usage struct {
 	CacheWriteTokens int64 `protobuf:"varint,5,opt,name=cache_write_tokens,json=cacheWriteTokens,proto3" json:"cache_write_tokens,omitempty"`
 	// CompletionTokens is all output.
 	CompletionTokens int64 `protobuf:"varint,6,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
-	// Cost is what the priced calls cost, from saige's price catalog. Unset
-	// when no call could be priced. A lower bound whenever unpriced_calls is
-	// not zero.
+	// Cost is what the calls priced in its currency cost, from saige's price
+	// catalog: the currency of the first priced call counted. Unset when no
+	// call could be priced. A lower bound whenever unpriced_calls is not zero,
+	// and it does not include other_costs.
 	Cost *Cost `protobuf:"bytes,7,opt,name=cost,proto3" json:"cost,omitempty"`
-	// UnpricedCalls counts calls whose tokens are counted above and whose cost
-	// is not in cost: no rate card for the model, or a currency other than
-	// cost's. Nothing is estimated for them.
+	// UnpricedCalls counts calls whose tokens are counted above and that have
+	// no cost: no rate card for the model, an unpriced modality, or no tokens
+	// reported. Nothing is estimated for them.
 	UnpricedCalls int64 `protobuf:"varint,8,opt,name=unpriced_calls,json=unpricedCalls,proto3" json:"unpriced_calls,omitempty"`
+	// OtherCosts is what calls priced in currencies other than cost's cost,
+	// one entry per currency in the order first counted. Nothing is converted.
+	OtherCosts    []*Cost `protobuf:"bytes,9,rep,name=other_costs,json=otherCosts,proto3" json:"other_costs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1086,6 +1090,13 @@ func (x *Usage) GetUnpricedCalls() int64 {
 		return x.UnpricedCalls
 	}
 	return 0
+}
+
+func (x *Usage) GetOtherCosts() []*Cost {
+	if x != nil {
+		return x.OtherCosts
+	}
+	return nil
 }
 
 // Cost is an amount of money in integer micro-units of a currency: one US
@@ -1343,7 +1354,7 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x03own\x18\x01 \x01(\v2\x12.mandatum.v1.UsageR\x03own\x12.\n" +
 	"\bchildren\x18\x02 \x01(\v2\x12.mandatum.v1.UsageR\bchildren\x12(\n" +
 	"\x05total\x18\x03 \x01(\v2\x12.mandatum.v1.UsageR\x05total\x123\n" +
-	"\acontext\x18\x04 \x01(\v2\x19.mandatum.v1.ContextUsageR\acontextJ\x04\b\x05\x10\x10\"\xca\x02\n" +
+	"\acontext\x18\x04 \x01(\v2\x19.mandatum.v1.ContextUsageR\acontextJ\x04\b\x05\x10\x10\"\xfe\x02\n" +
 	"\x05Usage\x12\x1f\n" +
 	"\vmodel_calls\x18\x01 \x01(\x03R\n" +
 	"modelCalls\x12\x1a\n" +
@@ -1353,7 +1364,10 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x12cache_write_tokens\x18\x05 \x01(\x03R\x10cacheWriteTokens\x12+\n" +
 	"\x11completion_tokens\x18\x06 \x01(\x03R\x10completionTokens\x12%\n" +
 	"\x04cost\x18\a \x01(\v2\x11.mandatum.v1.CostR\x04cost\x12%\n" +
-	"\x0eunpriced_calls\x18\b \x01(\x03R\runpricedCallsJ\x04\b\t\x10\x10\"U\n" +
+	"\x0eunpriced_calls\x18\b \x01(\x03R\runpricedCalls\x122\n" +
+	"\vother_costs\x18\t \x03(\v2\x11.mandatum.v1.CostR\n" +
+	"otherCostsJ\x04\b\n" +
+	"\x10\x10\"U\n" +
 	"\x04Cost\x12\x16\n" +
 	"\x06micros\x18\x01 \x01(\x03R\x06micros\x12\x1a\n" +
 	"\bcurrency\x18\x02 \x01(\tR\bcurrency\x12\x13\n" +
@@ -1435,17 +1449,18 @@ var file_mandatum_v1_invoke_proto_depIdxs = []int32{
 	9,  // 18: mandatum.v1.RunUsage.total:type_name -> mandatum.v1.Usage
 	11, // 19: mandatum.v1.RunUsage.context:type_name -> mandatum.v1.ContextUsage
 	10, // 20: mandatum.v1.Usage.cost:type_name -> mandatum.v1.Cost
-	4,  // 21: mandatum.v1.InvokeService.Invoke:input_type -> mandatum.v1.Tag
-	4,  // 22: mandatum.v1.InvokeService.InvokeStream:input_type -> mandatum.v1.Tag
-	12, // 23: mandatum.v1.InvokeService.GetRun:input_type -> mandatum.v1.GetRunRequest
-	6,  // 24: mandatum.v1.InvokeService.Invoke:output_type -> mandatum.v1.InvokeResponse
-	16, // 25: mandatum.v1.InvokeService.InvokeStream:output_type -> mandatum.v1.Event
-	7,  // 26: mandatum.v1.InvokeService.GetRun:output_type -> mandatum.v1.Run
-	24, // [24:27] is the sub-list for method output_type
-	21, // [21:24] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	10, // 21: mandatum.v1.Usage.other_costs:type_name -> mandatum.v1.Cost
+	4,  // 22: mandatum.v1.InvokeService.Invoke:input_type -> mandatum.v1.Tag
+	4,  // 23: mandatum.v1.InvokeService.InvokeStream:input_type -> mandatum.v1.Tag
+	12, // 24: mandatum.v1.InvokeService.GetRun:input_type -> mandatum.v1.GetRunRequest
+	6,  // 25: mandatum.v1.InvokeService.Invoke:output_type -> mandatum.v1.InvokeResponse
+	16, // 26: mandatum.v1.InvokeService.InvokeStream:output_type -> mandatum.v1.Event
+	7,  // 27: mandatum.v1.InvokeService.GetRun:output_type -> mandatum.v1.Run
+	25, // [25:28] is the sub-list for method output_type
+	22, // [22:25] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_mandatum_v1_invoke_proto_init() }

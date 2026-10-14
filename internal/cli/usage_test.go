@@ -16,8 +16,8 @@ import (
 
 // Through the composition root: a run's usage is delivered on its terminal
 // event and read back from the ledger by GetRun, and the two agree. A route
-// that selected every kind also receives the usage.call events, which is how a
-// webhook consumer gets them.
+// that selects usage receives the usage.call events, which is how a webhook
+// consumer gets them.
 func TestGetRunReadsTheUsageTheRunRecorded(t *testing.T) {
 	c, err := newCore(coreConfig{Tenant: "acme", Workspace: t.TempDir()})
 	if err != nil {
@@ -44,7 +44,7 @@ func TestGetRunReadsTheUsageTheRunRecorded(t *testing.T) {
 	target := address.MustParse("inbox://acme/out")
 	acc, err := c.Invoke(ctx, envelope.Tag{
 		ID: "Ev-1", Tenant: "acme", Agent: "docs-bot", Origin: "test",
-		Text: "explain", Deliver: []envelope.Route{{Target: target}}, At: time.Now(),
+		Text: "explain", Deliver: []envelope.Route{{Target: target, Kinds: []string{"usage", "lifecycle"}}}, At: time.Now(),
 	})
 	if err != nil {
 		t.Fatalf("invoke: %v", err)
@@ -98,6 +98,9 @@ func TestTheUsageSummaryShowsExactMoneyAndSaysWhatIsUnknown(t *testing.T) {
 		{"partly priced", payload.Usage{ModelCalls: 3, PromptTokens: 10, CompletionTokens: 2, UnpricedCalls: 1,
 			Cost: &payload.Cost{Micros: 1_250_000, Currency: "USD"}},
 			"3 calls, 10 in, 2 out, at least USD 1.250000 (1 calls unpriced)"},
+		{"two currencies", payload.Usage{ModelCalls: 2, PromptTokens: 10, CompletionTokens: 2,
+			Cost: &payload.Cost{Micros: 1_000, Currency: "USD"}, OtherCosts: []payload.Cost{{Micros: 2_000, Currency: "EUR"}}},
+			"2 calls, 10 in, 2 out, USD 0.001000 + EUR 0.002000"},
 		{"unpriced", payload.Usage{ModelCalls: 1, PromptTokens: 700, CompletionTokens: 20, UnpricedCalls: 1},
 			"1 call, 700 in, 20 out, cost unknown"},
 	}

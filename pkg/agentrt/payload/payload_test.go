@@ -2,6 +2,7 @@ package payload_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/urmzd/mandatum/pkg/address"
@@ -280,10 +281,11 @@ func TestATallyCountsEachAccountingIDOnce(t *testing.T) {
 	}
 }
 
-// Money adds only within one currency, and nothing is converted or guessed: a
-// call in another currency, or with no price at all, is counted in
-// UnpricedCalls and its tokens still count. A total priced from a card with no
-// date has no date.
+// Money adds only within one currency, and nothing is converted, dropped or
+// guessed: Cost is in the first priced call's currency, a call priced in
+// another currency is summed in OtherCosts for that currency, and a call with
+// no price is counted in UnpricedCalls. Every call's tokens count. A total
+// priced from a card with no date has no date.
 func TestCostsAddOnlyWithinOneCurrency(t *testing.T) {
 	t.Parallel()
 
@@ -294,12 +296,13 @@ func TestCostsAddOnlyWithinOneCurrency(t *testing.T) {
 		wantNoCost   bool
 		wantAsOf     string
 		wantUnpriced int
+		wantOther    []payload.Cost
 	}{
-		{"one currency", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "USD", "2026-07-24")}, 30, false, "2026-07-24", 0},
-		{"a second currency", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "EUR", "2026-07-24")}, 10, false, "2026-07-24", 1},
-		{"an unpriced call", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 0, "", "")}, 10, false, "2026-07-24", 1},
-		{"nothing priced", []payload.UsageCall{call("a", 0, 1, 1, 0, "", "")}, 0, true, "", 1},
-		{"an undated card", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "USD", "")}, 30, false, "", 0},
+		{"one currency", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "USD", "2026-07-24")}, 30, false, "2026-07-24", 0, nil},
+		{"a second currency", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "EUR", "2026-07-24"), call("c", 0, 1, 1, 5, "EUR", "")}, 10, false, "2026-07-24", 0, []payload.Cost{{Micros: 25, Currency: "EUR"}}},
+		{"an unpriced call", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 0, "", "")}, 10, false, "2026-07-24", 1, nil},
+		{"nothing priced", []payload.UsageCall{call("a", 0, 1, 1, 0, "", "")}, 0, true, "", 1, nil},
+		{"an undated card", []payload.UsageCall{call("a", 0, 1, 1, 10, "USD", "2026-07-24"), call("b", 0, 1, 1, 20, "USD", "")}, 30, false, "", 0, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -310,6 +313,9 @@ func TestCostsAddOnlyWithinOneCurrency(t *testing.T) {
 			}
 			if u.PromptTokens != len(tc.calls) {
 				t.Errorf("PromptTokens = %d, want every call's tokens counted", u.PromptTokens)
+			}
+			if !reflect.DeepEqual(u.OtherCosts, tc.wantOther) {
+				t.Errorf("OtherCosts = %+v, want %+v", u.OtherCosts, tc.wantOther)
 			}
 			if u.UnpricedCalls != tc.wantUnpriced {
 				t.Errorf("UnpricedCalls = %d, want %d", u.UnpricedCalls, tc.wantUnpriced)

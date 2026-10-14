@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -467,7 +468,7 @@ func TestUsageAccountsForCacheReadsAndWritesAcrossATurn(t *testing.T) {
 	// The test provider declares no rate card, so the calls are counted and
 	// not priced.
 	want := payload.Usage{ModelCalls: 4, Requests: 4, PromptTokens: 4000, CachedPromptTokens: 3200, CacheWriteTokens: 600, CompletionTokens: 80, UnpricedCalls: 4}
-	if res.Usage != want {
+	if !reflect.DeepEqual(res.Usage, want) {
 		t.Errorf("Usage = %+v, want %+v", res.Usage, want)
 	}
 	if got := res.Usage.CacheReadRatio(); got != 0.8 {

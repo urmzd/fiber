@@ -229,9 +229,9 @@ func parseAddr(s string) (address.Address, error) {
 // and everything it delegated (see RunUsage).
 //
 // Token counts are accounting, not conversation, so no connector renders
-// them: they travel as their own kinds (usage.call, usage.child) that a chat
-// surface ignores, and on the terminal event and the run's record. See
-// UsageCall for one call.
+// them: they travel as their own kinds (usage.call, usage.child), delivered
+// only to a route that asks for them, and on the terminal event and the run's
+// record. See UsageCall for one call.
 //
 // The cache fields are what make prompt-cache health measurable. A long run
 // whose requests keep a stable prefix reads most of its input from the cache,
@@ -240,8 +240,12 @@ func parseAddr(s string) (address.Address, error) {
 // Providers that do not report cache activity leave both at zero, which is
 // indistinguishable from a cold cache.
 //
-// Every field is a sum, so two Usage values add field by field (see Add),
-// except Cost, which adds only within one currency.
+// Every field is a sum, so two Usage values add field by field (see Add).
+// Money adds only within one currency and is never converted: Cost is in the
+// currency of the first priced call counted, and calls priced in any other
+// currency are summed in OtherCosts, one entry per currency. saige's catalog
+// prices everything in USD, so OtherCosts is empty unless a deployment
+// supplies rate cards of its own.
 type Usage struct {
 	// ModelCalls is the number of model calls counted: every call of the
 	// tool loop, plus every compaction summary whose provider reported
@@ -262,14 +266,26 @@ type Usage struct {
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 	// CompletionTokens is all output.
 	CompletionTokens int `json:"completion_tokens,omitempty"`
-	// Cost is what the priced calls cost, nil when none was priced. It is a
-	// lower bound whenever UnpricedCalls is not zero.
+	// Cost is what the calls priced in its currency cost, nil when none was
+	// priced. Its currency is that of the first priced call counted. It is a
+	// lower bound whenever UnpricedCalls is not zero, and it does not include
+	// OtherCosts.
 	Cost *Cost `json:"cost,omitempty"`
-	// UnpricedCalls counts the calls whose tokens are in the counts above
-	// and whose cost is not in Cost: a model saige has no rate card for, a
-	// modality the card does not price, or a call priced in a currency other
-	// than Cost's. Nothing is ever guessed for them.
+	// OtherCosts is what calls priced in other currencies cost, one entry per
+	// currency in the order first counted. Nothing is converted.
+	OtherCosts []Cost `json:"other_costs,omitempty"`
+	// UnpricedCalls counts the calls whose tokens are in the counts above and
+	// that have no cost anywhere: a model saige has no rate card for, a
+	// modality the card does not price, or a call whose provider reported no
+	// tokens. Nothing is ever guessed for them.
 	UnpricedCalls int `json:"unpriced_calls,omitempty"`
+}
+
+// IsZero reports whether nothing was counted.
+func (u Usage) IsZero() bool {
+	return u.ModelCalls == 0 && u.Requests == 0 && u.PromptTokens == 0 && u.CompletionTokens == 0 &&
+		u.CachedPromptTokens == 0 && u.CacheWriteTokens == 0 && u.Cost == nil && len(u.OtherCosts) == 0 &&
+		u.UnpricedCalls == 0
 }
 
 // Cost is an amount of money: integer micro-units of a currency, so that
@@ -298,11 +314,16 @@ type Cost struct {
 // docs/architecture/overview.md, "Usage"), so the key only ever collapses
 // copies of one report.
 type UsageCall struct {
-	// AccountingID identifies the call. It is saige's UsageDelta.AccountingID
-	// when saige reports one (it does when a budget is attached), and
-	// otherwise one mandatum derives from the run, the attempt, the
-	// delegation path and the call's position, which is unique per call.
+	// AccountingID identifies the call: "<run>/a<attempt>[/<agent>.<sub>]/<n>",
+	// derived from the run, the attempt, the delegation path and the call's
+	// position, so no two calls of any attempt share it.
 	AccountingID string `json:"accounting_id"`
+	// SaigeAccountingID is saige's own key for the call, when it reported one
+	// (it does when a budget is attached). It is carried for correlation with
+	// saige's budget receipts and never used to count: saige keeps it stable
+	// across a durable replay of its own, so two attempts' real calls could
+	// share it.
+	SaigeAccountingID string `json:"saige_accounting_id,omitempty"`
 	// Agent is the agent whose model made the call: the run's own agent, or
 	// the agent a sub-task was delegated to.
 	Agent string `json:"agent,omitempty"`
@@ -393,9 +414,7 @@ type RunUsage struct {
 	Context *ContextUsage `json:"context,omitempty"`
 }
 
-// Add returns u and o summed. Costs in one currency add; when the currencies
-// differ, o's priced calls are counted in UnpricedCalls instead, since there is
-// no rate to convert at.
+// Add returns u and o summed. Money adds per currency (see Usage).
 func (u Usage) Add(o Usage) Usage {
 	u.ModelCalls += o.ModelCalls
 	u.Requests += o.Requests
@@ -405,11 +424,10 @@ func (u Usage) Add(o Usage) Usage {
 	u.CompletionTokens += o.CompletionTokens
 	u.UnpricedCalls += o.UnpricedCalls
 	if o.Cost != nil {
-		if sum, ok := addCost(u.Cost, *o.Cost); ok {
-			u.Cost = sum
-		} else {
-			u.UnpricedCalls += o.ModelCalls - o.UnpricedCalls
-		}
+		u = u.addCost(*o.Cost)
+	}
+	for _, c := range o.OtherCosts {
+		u = u.addCost(c)
 	}
 	return u
 }
@@ -424,31 +442,42 @@ func (u Usage) AddCall(c UsageCall) Usage {
 	u.CompletionTokens += c.CompletionTokens
 	switch {
 	case c.Cost != nil:
-		if sum, ok := addCost(u.Cost, *c.Cost); ok {
-			u.Cost = sum
-		} else {
-			u.UnpricedCalls++
-		}
+		u = u.addCost(*c.Cost)
 	case !c.ResponseCacheHit:
 		u.UnpricedCalls++
 	}
 	return u
 }
 
-// addCost adds c to sum, which may be nil, and reports false when the
-// currencies differ.
-func addCost(sum *Cost, c Cost) (*Cost, bool) {
-	if sum == nil {
+// addCost adds c to the sum in its currency: Cost when it has none yet or the
+// currencies match, otherwise that currency's entry in OtherCosts. It never
+// writes through to a value u shares with another Usage.
+func (u Usage) addCost(c Cost) Usage {
+	plus := func(sum Cost) Cost {
+		sum.Micros += c.Micros
+		sum.AsOf = olderAsOf(sum.AsOf, c.AsOf)
+		return sum
+	}
+	switch {
+	case u.Cost == nil:
 		out := c
-		return &out, true
+		u.Cost = &out
+		return u
+	case u.Cost.Currency == c.Currency:
+		out := plus(*u.Cost)
+		u.Cost = &out
+		return u
 	}
-	if sum.Currency != c.Currency {
-		return sum, false
+	others := append([]Cost(nil), u.OtherCosts...)
+	for i := range others {
+		if others[i].Currency == c.Currency {
+			others[i] = plus(others[i])
+			u.OtherCosts = others
+			return u
+		}
 	}
-	out := *sum
-	out.Micros += c.Micros
-	out.AsOf = olderAsOf(sum.AsOf, c.AsOf)
-	return &out, true
+	u.OtherCosts = append(others, c)
+	return u
 }
 
 // olderAsOf is the less trustworthy of two recording dates: unknown when either

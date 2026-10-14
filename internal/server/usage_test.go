@@ -23,8 +23,9 @@ func TestGetRunCarriesTheRunsUsage(t *testing.T) {
 		Usage: &payload.RunUsage{
 			Own:      payload.Usage{ModelCalls: 2, Requests: 2, PromptTokens: 12_000, CachedPromptTokens: 9_000, CacheWriteTokens: 500, CompletionTokens: 300, Cost: cost},
 			Children: payload.Usage{ModelCalls: 1, Requests: 1, PromptTokens: 700, CompletionTokens: 20, UnpricedCalls: 1},
-			Total:    payload.Usage{ModelCalls: 3, Requests: 3, PromptTokens: 12_700, CachedPromptTokens: 9_000, CacheWriteTokens: 500, CompletionTokens: 320, Cost: cost, UnpricedCalls: 1},
-			Context:  &payload.ContextUsage{Model: "claude-test", Window: 200_000, Tokens: 6_500},
+			Total: payload.Usage{ModelCalls: 3, Requests: 3, PromptTokens: 12_700, CachedPromptTokens: 9_000, CacheWriteTokens: 500, CompletionTokens: 320, Cost: cost, UnpricedCalls: 1,
+				OtherCosts: []payload.Cost{{Micros: 900, Currency: "EUR", AsOf: "2026-07-01"}}},
+			Context: &payload.ContextUsage{Model: "claude-test", Window: 200_000, Tokens: 6_500},
 		}})
 	h.runs.put(Run{ID: "run_old", Tenant: tenantAcme, Agent: "docs-bot", Status: StatusCompleted, EndedAt: fixedTime})
 
@@ -44,6 +45,9 @@ func TestGetRunCarriesTheRunsUsage(t *testing.T) {
 	}
 	if c := total.GetCost(); c.GetMicros() != 40_500 || c.GetCurrency() != "USD" || c.GetAsOf() != "2026-07-24" {
 		t.Errorf("total cost = %v, want 40500 micro-USD as of 2026-07-24", c)
+	}
+	if o := total.GetOtherCosts(); len(o) != 1 || o[0].GetCurrency() != "EUR" || o[0].GetMicros() != 900 {
+		t.Errorf("other_costs = %v, want the EUR sum carried, not dropped", o)
 	}
 	if u.GetOwn().GetModelCalls() != 2 || u.GetChildren().GetModelCalls() != 1 || u.GetChildren().GetCost() != nil {
 		t.Errorf("own %v children %v", u.GetOwn(), u.GetChildren())
@@ -90,6 +94,9 @@ func TestTheRunResourceOnlyGrew(t *testing.T) {
 	}
 	if u := fields.ByName("usage"); u == nil || u.Number() != 16 || u.Message().FullName() != "mandatum.v1.RunUsage" {
 		t.Errorf("Run.usage = %v, want field 16 of type RunUsage", u)
+	}
+	if f := (&mandatumv1.Usage{}).ProtoReflect().Descriptor().Fields().ByName("other_costs"); f == nil || f.Number() != 9 || !f.IsList() {
+		t.Errorf("Usage.other_costs = %v, want repeated field 9", f)
 	}
 	if fields.Len() != len(before)+1 {
 		t.Errorf("Run has %d fields, want the %d it had plus usage", fields.Len(), len(before))

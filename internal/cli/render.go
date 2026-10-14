@@ -224,11 +224,21 @@ func usageLine(t payload.Usage) string {
 		line += fmt.Sprintf(" (%s cached, %s written)", count(t.CachedPromptTokens), count(t.CacheWriteTokens))
 	}
 	line += fmt.Sprintf(", %s out", count(t.CompletionTokens))
+	costs := ""
+	if t.Cost != nil {
+		costs = money(*t.Cost)
+	}
+	for _, c := range t.OtherCosts {
+		if costs != "" {
+			costs += " + "
+		}
+		costs += money(c)
+	}
 	switch {
-	case t.Cost != nil && t.UnpricedCalls == 0:
-		line += ", " + money(*t.Cost)
-	case t.Cost != nil:
-		line += fmt.Sprintf(", at least %s (%d calls unpriced)", money(*t.Cost), t.UnpricedCalls)
+	case costs != "" && t.UnpricedCalls == 0:
+		line += ", " + costs
+	case costs != "":
+		line += fmt.Sprintf(", at least %s (%d calls unpriced)", costs, t.UnpricedCalls)
 	default:
 		line += ", cost unknown"
 	}
