@@ -128,6 +128,13 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   an expiry, and whichever was first is the answer. The body never reads the
   clock or a request to decide; it reads that record. An attempt runs at most
   one turn: the attempt that asked parks, and the answer wakes the next.
+- **An approval is a second pair of eyes.** `Runtime.Answer` refuses an
+  approval from the requester, or from the credential that raised the run,
+  unless the pinned spec sets `self_approval`, and admits only the spec's
+  `approvers`/`answerers` when it names them. Never widen this to tenant-wide.
+- **A run never waits for another run in its turn.** With
+  `runtime.WithChildRuns` a delegation parks the parent on the child's ending;
+  a blocking wait holds a worker and N of them deadlock N workers.
 - **A continuation sends what an uninterrupted turn would have.** The resumed
   turn rebuilds the parked conversation from the pinned history, the recorded
   request and the recorded transcript, and answers its first model call with
