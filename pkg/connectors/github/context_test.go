@@ -93,12 +93,10 @@ func TestContextAPIErrorsRemainErrors(t *testing.T) {
 	}
 }
 
-func TestCompletedOnlyDeliveryRendersTheStructuredReviewOnce(t *testing.T) {
+func TestCompletedOnlyDeliveryRendersOrdinaryMarkdownOnce(t *testing.T) {
 	fake := github.NewFake()
 	c := sinkConnector(t, fake)
-	report := github.ReviewReport{Format: github.ReviewFormat, Summary: "Inspected abc; no findings. Tests not run.", Findings: []github.ReviewFinding{}}
-	text, _ := json.Marshal(report)
-	payload, _ := json.Marshal(map[string]string{"text": string(text)})
+	payload, _ := json.Marshal(map[string]string{"text": "**Inspected abc.** Tests not run."})
 	e := event(4, envelope.KindCompleted, string(payload))
 	for range 2 {
 		if err := c.Deliver(context.Background(), target, e); err != nil {
@@ -106,7 +104,7 @@ func TestCompletedOnlyDeliveryRendersTheStructuredReviewOnce(t *testing.T) {
 		}
 	}
 	comments := fake.Comments()
-	if len(comments) != 1 || !strings.Contains(comments[0].Body, "🔴 **0 errors**") || strings.Contains(comments[0].Body, github.ReviewFormat) {
+	if len(comments) != 1 || !strings.Contains(comments[0].Body, "**Inspected abc.** Tests not run.") {
 		t.Fatalf("comments %+v", comments)
 	}
 }

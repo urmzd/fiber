@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/urmzd/mandatum/pkg/address"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
@@ -113,7 +112,7 @@ func validSHA(s string) bool {
 	return true
 }
 
-func checkBody(v render.View) string {
+func (c *Connector) checkBody(v render.View) string {
 	check := Check{Name: "mandatum/" + v.Agent, ExternalID: v.RunID, Status: "in_progress", Output: CheckOutput{Title: sink.StatusLabel(v.Status)}}
 	if check.Output.Title == "" {
 		check.Output.Title = "working"
@@ -127,27 +126,16 @@ func checkBody(v render.View) string {
 	case render.StatusDone:
 		check.Status = "completed"
 		check.Conclusion = "neutral"
-		var report ReviewReport
-		if json.Unmarshal([]byte(v.Text), &report) == nil && report.Format == ReviewFormat {
-			if _, err := FormatReview(report); err != nil {
-				check.Conclusion = "action_required"
-			} else {
-				for _, finding := range report.Findings {
-					if finding.Severity == "error" {
-						check.Conclusion = "failure"
-						break
-					}
-				}
-			}
-		} else if strings.Contains(v.Text, ReviewFormat) {
-			check.Conclusion = "action_required"
+		if c.cfg.Conclusion != nil {
+			check.Conclusion = c.cfg.Conclusion(v)
 		}
+
 	}
 	// Review completion is neutral unless an error was found: completing a model
 	// turn does not prove tests passed or every changed line was inspected.
 	progress := v
 	progress.Thinking = ""
-	check.Output.Summary = sink.Clamp(reviewBody(progress), MaxBodyChars-1024)
+	check.Output.Summary = sink.Clamp(c.body(progress), MaxBodyChars-1024)
 	if check.Output.Summary == "" {
 		check.Output.Summary = "Waiting for agent output."
 	}

@@ -15,7 +15,7 @@
 // a review from it — the case with no message at all, where the pull request
 // itself is the request.
 //
-// Configured repository labels also raise tags when applied.
+// Application automation callbacks can raise tags for labels and new commits.
 // Everything else is acknowledged and dropped, and an event whose sender is a Bot
 // is dropped except for a labeled PR's synchronize event: this connector's own comment arrives back as an
 // issue_comment, and acting on it would have the mesh answer itself in a loop.
@@ -41,7 +41,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
@@ -98,23 +97,17 @@ type Config struct {
 	// every time one human tagged another.
 	Agents mention.Set
 
-	// AutoLabels maps owner/repo to label-to-agent mappings. Only a labeled
-	// event activates automatic runs; PR synchronize events keep reviewing while
-	// the label remains. Empty is off.
-	AutoLabels map[string]map[string]string
-
-	// Checks publishes run progress on a PR's pinned head. Requires Checks write
-	// permission and an API implementing CheckAPI.
+	// Automation chooses the agent for labeled/synchronize events. Nil is off.
+	// It runs only after signature and repository validation.
+	Automation func(Hook) (agent, text string, ok bool)
+	// Prepare applies application policy before a verified tag is accepted.
+	Prepare func(context.Context, *envelope.Tag) error
+	// Render formats the accumulated run view. Nil uses ordinary Markdown.
+	Render func(View) string
+	// Checks publishes lifecycle progress on the pinned PR head.
 	Checks bool
-
-	// Guides maintains one navigational guide per PR and agent. Bots must map
-	// the authenticated bot login to each agent whose PR guide is enabled.
-	Guides bool
-
-	// Mutations enables explicit /fix requests from repository writers.
-	// MutationSecret signs run-bound grants; keep it stable across restarts.
-	Mutations      bool
-	MutationSecret []byte
+	// Conclusion derives a completed check's outcome. Nil means neutral.
+	Conclusion func(View) string
 
 	// Deliver overrides where a tag's events go. Empty answers on the issue or
 	// pull request the tag came from.
@@ -141,7 +134,6 @@ type Connector struct {
 	pipe      inbound.Pipe
 	engine    *sink.Engine
 	checks    *sink.Engine
-	guideMu   sync.Mutex
 	readRepos map[string]bool
 }
 
@@ -165,47 +157,6 @@ func New(cfg Config) (*Connector, error) {
 			return nil, fmt.Errorf("github: invalid read repository %q", repo)
 		}
 		c.readRepos[strings.ToLower(repo)] = true
-	}
-	c.cfg.MutationSecret = append([]byte(nil), cfg.MutationSecret...)
-	if cfg.Mutations {
-		if len(cfg.MutationSecret) < 16 {
-			return nil, fmt.Errorf("github: mutations need a signing secret of at least 16 bytes")
-		}
-		if _, ok := cfg.API.(MutationAPI); !ok {
-			return nil, fmt.Errorf("github: mutations need MutationAPI")
-		}
-		if _, ok := cfg.API.(ContextAPI); !ok {
-			return nil, fmt.Errorf("github: mutations need ContextAPI")
-		}
-	}
-	if cfg.Guides {
-		if _, ok := cfg.API.(GuideAPI); !ok {
-			return nil, fmt.Errorf("github: guides need GuideAPI")
-		}
-		if _, ok := cfg.API.(ContextAPI); !ok {
-			return nil, fmt.Errorf("github: guides need ContextAPI")
-		}
-		if len(cfg.Bots) == 0 {
-			return nil, fmt.Errorf("github: guides need the authenticated bot login in Bots")
-		}
-	}
-	c.cfg.AutoLabels = make(map[string]map[string]string, len(cfg.AutoLabels))
-	for repo, labels := range cfg.AutoLabels {
-		parts := strings.Split(repo, "/")
-		if len(parts) != 2 || address.ValidWorkspace(parts[0]) != nil || !validRepository(parts[1]) {
-			return nil, fmt.Errorf("github: auto labels repository %q must be owner/repo", repo)
-		}
-		key := strings.ToLower(repo)
-		if _, exists := c.cfg.AutoLabels[key]; exists {
-			return nil, fmt.Errorf("github: duplicate auto labels repository %q", repo)
-		}
-		c.cfg.AutoLabels[key] = make(map[string]string, len(labels))
-		for label, agent := range labels {
-			if strings.TrimSpace(label) == "" || !mention.Valid(agent) {
-				return nil, fmt.Errorf("github: invalid auto label %q or agent %q", label, agent)
-			}
-			c.cfg.AutoLabels[key][label] = agent
-		}
 	}
 
 	c.bots = make(map[string]string, len(cfg.Bots))
@@ -239,7 +190,7 @@ func New(cfg Config) (*Connector, error) {
 		if !ok {
 			return nil, fmt.Errorf("github: checks need CheckAPI")
 		}
-		c.checks = sink.New(checkSurface{c: c, api: api}, checkBody, sink.WithInterval(interval), sink.WithClock(cfg.Clock))
+		c.checks = sink.New(checkSurface{c: c, api: api}, c.checkBody, sink.WithInterval(interval), sink.WithClock(cfg.Clock))
 	}
 	return c, nil
 }
@@ -284,7 +235,7 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Issue-comment payloads identify a PR but omit its head. Resolve it before
 	// accepting the tag so replay and check delivery never choose a later head.
-	if (c.cfg.Checks || c.cfg.Mutations) && tag.Source.Path[1] == "pull" && tag.Source.Params["head_sha"] == "" && !c.cfg.Guides {
+	if c.cfg.Checks && tag.Source.Path[1] == "pull" && tag.Source.Params["head_sha"] == "" {
 		api, supported := c.cfg.API.(ContextAPI)
 		if !supported {
 			http.Error(w, "github: checks need context reads for PR comments", http.StatusBadGateway)
@@ -303,15 +254,11 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tag.Source = tag.Source.WithParam("head_sha", ctx.Subject.Head.SHA)
 		tag.Meta["github_head_sha"] = ctx.Subject.Head.SHA
 	}
-	if c.cfg.Guides && tag.Source.Path[1] == "pull" {
-		if err := c.prepareGuide(r.Context(), &tag); err != nil {
-			http.Error(w, "could not prepare current PR guide", http.StatusBadGateway)
+	if c.cfg.Prepare != nil {
+		if err := c.cfg.Prepare(r.Context(), &tag); err != nil {
+			http.Error(w, "could not prepare GitHub request", http.StatusBadGateway)
 			return
 		}
-	}
-	if err := c.grantMutation(r.Context(), &tag); err != nil {
-		http.Error(w, "could not authorize requested PR mutation", http.StatusBadGateway)
-		return
 	}
 	if err := c.pipe.Send(r.Context(), tag); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
@@ -462,7 +409,10 @@ func (s surface) Update(ctx context.Context, target address.Address, handle, bod
 // The fragments this package interpolates into its own markup are neutralized in
 // markdown.go instead.
 func (c *Connector) body(v render.View) string {
-	return reviewBody(v)
+	if c.cfg.Render != nil {
+		return c.cfg.Render(v)
+	}
+	return RenderDefault(v)
 }
 
 // Actions implements connector.Actor.
@@ -522,9 +472,6 @@ func (c *Connector) Actions() []connector.Action {
 		},
 	}
 	actions = append(actions, c.fileAction(), c.workflowStatusAction())
-	if c.cfg.Mutations {
-		actions = append(actions, c.mutationAction(), c.runChecksAction())
-	}
 	return actions
 }
 
