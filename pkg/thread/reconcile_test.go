@@ -245,3 +245,35 @@ func TestReconcileWritesNothingWhenAMessagesFilesFail(t *testing.T) {
 		t.Fatalf("a failed reconciliation wrote %+v", got)
 	}
 }
+
+// The dispatcher hands a surface to its own connector's lister, with the
+// tenant unchanged, and a surface no connector lists reconciles to nothing.
+func TestListersDispatchesOnTheSurfacesConnector(t *testing.T) {
+	t.Parallel()
+	var asked []string
+	lister := func(name string) thread.Lister {
+		return listerFunc(func(_ context.Context, tenant string, surface address.Address) ([]thread.Message, error) {
+			asked = append(asked, name+" "+tenant+" "+surface.String())
+			return []thread.Message{{ID: name + "-1", Text: "from " + name}}, nil
+		})
+	}
+	l := thread.Listers{"slack": lister("slack"), "github": lister("github")}
+	gh := address.MustParse("github://acme/handbook/issues/7")
+	msgs, err := l.Messages(context.Background(), tenantA, gh)
+	if err != nil || len(msgs) != 1 || msgs[0].ID != "github-1" {
+		t.Fatalf("github surface = %+v, %v", msgs, err)
+	}
+	if msgs, err := l.Messages(context.Background(), tenantA, address.MustParse("jira://acme/PROJ-5")); err != nil || msgs != nil {
+		t.Fatalf("a surface with no lister = %+v, %v; want nothing and no error", msgs, err)
+	}
+	if want := []string{"github acme " + gh.String()}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked %q, want %q", asked, want)
+	}
+	s := newStore(t)
+	if err := thread.Reconcile(context.Background(), s, l, slackThread("docs-bot"), slackSource); err != nil {
+		t.Fatal(err)
+	}
+	if got := texts(mustHistory(t, s, slackThread("docs-bot"))); !reflect.DeepEqual(got, []string{"from slack"}) {
+		t.Errorf("reconciled through the dispatcher: %q", got)
+	}
+}

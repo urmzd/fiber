@@ -157,3 +157,21 @@ func heldSurfaceIDs(ctx context.Context, store Store, key Key) (map[string]bool,
 	}
 	return held, nil
 }
+
+// Listers is a Lister that hands each surface to the Lister of the connector
+// that owns it, by the address's scheme: "slack" to the Slack connector,
+// "github" to GitHub's. A surface no connector lists (a schedule, a surface
+// whose connector cannot read its history) has nothing to reconcile, which is
+// an empty listing and not an error.
+type Listers map[string]Lister
+
+var _ Lister = Listers(nil)
+
+// Messages implements Lister.
+func (l Listers) Messages(ctx context.Context, tenant string, surface address.Address) ([]Message, error) {
+	lister, ok := l[surface.Connector]
+	if !ok || lister == nil {
+		return nil, nil
+	}
+	return lister.Messages(ctx, tenant, surface)
+}
