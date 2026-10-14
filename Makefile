@@ -1,4 +1,4 @@
-.PHONY: all init build test lint fmt check run proto install
+.PHONY: all init build test lint fmt check run proto install up down e2e
 
 MOD := mandatum
 CMD := cmd/$(MOD)
@@ -31,3 +31,12 @@ proto:
 
 install:
 	CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" ./$(CMD)
+
+up:
+	docker compose up --build --wait
+
+down:
+	docker compose down
+
+e2e:
+	sh examples/compose/e2e.sh

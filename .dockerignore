@@ -1,0 +1,8 @@
+.git
+.worktrees
+bin
+build
+.env
+.env.*
+*.pem
+*.key
