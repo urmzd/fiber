@@ -239,3 +239,30 @@ func TestSubscriptionAcceptsAndResumes(t *testing.T) {
 		t.Error("resume cursor dropped the next event")
 	}
 }
+
+// Usage is opt-in for a route. A route with no kind filter was written to
+// receive the conversation and the outcome, and its receiver may refuse, or
+// fail and have retried, a kind it has never seen, once per model call. Only
+// a route that names the family or one of its kinds receives it.
+func TestARouteReceivesUsageOnlyWhenItAsksForIt(t *testing.T) {
+	cases := []struct {
+		name  string
+		kinds []string
+		want  map[envelope.Kind]bool
+	}{
+		{"no filter", nil, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindUsageChild: false, envelope.KindCompleted: true}},
+		{"an empty selector", []string{""}, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindCompleted: true}},
+		{"the conversation", []string{"delta", "lifecycle"}, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindUsageChild: false}},
+		{"the family", []string{"usage"}, map[envelope.Kind]bool{envelope.KindUsageCall: true, envelope.KindUsageChild: true, envelope.KindText: false}},
+		{"one kind", []string{"usage.child"}, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindUsageChild: true}},
+		{"usage and the outcome", []string{"usage.call", "lifecycle.completed"}, map[envelope.Kind]bool{envelope.KindUsageCall: true, envelope.KindCompleted: true, envelope.KindText: false}},
+	}
+	for _, tc := range cases {
+		r := envelope.Route{Target: address.MustParse("webhook://acme/deploys"), Kinds: tc.kinds}
+		for kind, want := range tc.want {
+			if got := r.Wants(kind); got != want {
+				t.Errorf("%s: Wants(%s) = %v, want %v", tc.name, kind, got, want)
+			}
+		}
+	}
+}
