@@ -89,6 +89,13 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if err := sw.retry(s.retry); err != nil {
 		return
 	}
+	// Shutdown also closes the receive pump. Whichever select case wins,
+	// tell the client why its stream ended before releasing the connection.
+	defer func() {
+		if s.draining.Load() {
+			_ = sw.comment(": draining")
+		}
+	}()
 
 	events, failures := recvPump(ctx, stream)
 	heartbeat := time.NewTicker(s.heartbeat)
@@ -97,12 +104,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Draining is worth telling the client about: it will reconnect on
-			// its own, and the comment makes the reason visible in a browser's
-			// network log instead of looking like a dropped connection.
-			if s.draining.Load() {
-				_ = sw.comment(": draining")
-			}
 			return
 
 		case <-heartbeat.C:
