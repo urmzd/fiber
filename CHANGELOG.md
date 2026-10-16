@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.0 (2026-10-16)
+
+### Features
+
+- support host-constructed helper invocations (#17) ([799b78e](https://github.com/urmzd/mandatum/commit/799b78eb12773400f08323034e9af2c754197124))
+
+[Full Changelog](https://github.com/urmzd/mandatum/compare/v0.11.0...v0.12.0)
+
+
 ## 0.11.0 (2026-10-14)
 
 ### Breaking
