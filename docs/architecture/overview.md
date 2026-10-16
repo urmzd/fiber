@@ -272,3 +272,18 @@ Verified against the code, and honest.
   behind the `Bus` interface rather than growing a broker here.
 - **Agent specs are loaded from JSON**, not YAML, so the CLI carries no parser
   dependency.
+
+## Host-constructed invocation input
+
+A sandbox request can carry an explicit `History` of user and assistant messages
+and trusted host-generated `Instructions`. The runner preserves their roles and
+order, appends the new request, and supplements the pinned system rules with the
+invocation instruction. Neither value mutates the pinned revision or grants
+access. Hosts must freeze resolved input before durable acceptance and must not
+use arbitrary caller text as privileged instructions.
+
+`WithCallTool` lets a host replace per-target tag tools with one catalog tool
+for agents with `Access.Spawn`. The host tool must check the caller's pinned
+spawn grant. Without that option, mandatum retains its existing per-target tools.
+The runtime still owns execution, streaming and sandboxing; the host owns its
+input references, output contracts and answer delivery policy.

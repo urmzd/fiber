@@ -117,6 +117,7 @@ type Sandbox struct {
 	// delegator, when set, carries out a delegation for a turn that is a
 	// durable run, in place of the in-turn sub-task.
 	delegator Delegator
+	callTool  string
 
 	agentOpts []agentrt.Option
 	replicas  int
@@ -168,6 +169,12 @@ type Delegator func(ctx context.Context, parent Request, target, text string, re
 // delegation is a sub-task, which is what it always was.
 func WithDelegator(d Delegator) SandboxOption {
 	return func(s *Sandbox) { s.delegator = d }
+}
+
+// WithCallTool replaces per-agent tag tools with one host catalog tool for
+// agents granted Access.Spawn. The host must enforce the pinned spawn grant.
+func WithCallTool(name string) SandboxOption {
+	return func(s *Sandbox) { s.callTool = name }
 }
 
 // WithAgentOptions passes options through to every agentrt.Runner the sandbox
@@ -497,7 +504,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		return nil, err
 	}
 
-	res, err := runner.Run(ctx, agentrt.Turn{Text: req.Text, Meta: req.Meta}, func(_ context.Context, c agentrt.Chunk) error {
+	res, err := runner.Run(ctx, agentrt.Turn{Text: req.Text, Meta: req.Meta, History: req.History, Instructions: req.Instructions}, func(_ context.Context, c agentrt.Chunk) error {
 		return send(c)
 	})
 	if err != nil {
@@ -554,7 +561,12 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 	for _, target := range req.Revision.Spec.Access.Spawn {
 		name := DelegateToolName(target)
 		delegates[name] = s.delegateTool(rt, req, target, report)
-		add(name)
+		if s.callTool == "" {
+			add(name)
+		}
+	}
+	if s.callTool != "" && len(req.Revision.Spec.Access.Spawn) > 0 {
+		add(s.callTool)
 	}
 
 	var base agentrt.Tools

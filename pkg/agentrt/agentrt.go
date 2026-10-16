@@ -50,8 +50,29 @@ import (
 // it because a looping turn never fails.
 const DefaultMaxIter = 10
 
+// Role and Message describe caller-constructed conversation input. System
+// messages are reserved for the host and cannot be supplied through History.
+type Role string
+
+const (
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+)
+
+type Message struct {
+	Role Role   `json:"role"`
+	Text string `json:"text"`
+}
+
 // Turn is one request to an agent.
 type Turn struct {
+	// History is explicit, ordered input supplied by the host. It is never
+	// implicitly inherited by helper calls.
+	History []Message
+	// Instructions is a trusted host-generated return contract. It supplements
+	// the pinned system rules; callers must not supply arbitrary system text.
+	Instructions string
+
 	// Text is the request, with the agent mention already stripped.
 	Text string
 	// Meta is trigger-specific context (a pull request number, an issue
@@ -259,7 +280,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 
 	agent, err := saige.New(saige.Config{
 		Name:         r.rev.Spec.Name,
-		SystemPrompt: r.rev.Spec.SystemPrompt,
+		SystemPrompt: invocationPrompt(r.rev.Spec.SystemPrompt, t.Instructions),
 		Provider:     r.provider,
 		Tools:        r.tools,
 		MaxIter:      r.maxIter,
@@ -269,7 +290,11 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
 	}
 
-	stream := agent.Invoke(ctx, []saigetypes.Message{saigetypes.UserMsg(saigetypes.Text(prompt))})
+	input, err := conversation(t.History, prompt)
+	if err != nil {
+		return res, err
+	}
+	stream := agent.Invoke(ctx, input)
 	translator := NewTranslator()
 
 	var answer strings.Builder
@@ -365,3 +390,27 @@ func providerNames(m map[string]ProviderFunc) []string {
 }
 
 var _ Tools = ToolsFunc(nil)
+
+func invocationPrompt(system, instructions string) string {
+	if instructions == "" {
+		return system
+	}
+	return system + "\n\nInvocation return contract (subject to the agent rules above):\n" + instructions
+}
+func conversation(history []Message, prompt string) ([]saigetypes.Message, error) {
+	out := make([]saigetypes.Message, 0, len(history)+1)
+	for _, m := range history {
+		if strings.TrimSpace(m.Text) == "" {
+			return nil, fmt.Errorf("%w: empty input message", ErrInvalid)
+		}
+		switch m.Role {
+		case RoleUser:
+			out = append(out, saigetypes.UserMsg(saigetypes.Text(m.Text)))
+		case RoleAssistant:
+			out = append(out, saigetypes.AssistantMsg(saigetypes.Text(m.Text)))
+		default:
+			return nil, fmt.Errorf("%w: input role %q is not user or assistant", ErrInvalid, m.Role)
+		}
+	}
+	return append(out, saigetypes.UserMsg(saigetypes.Text(prompt))), nil
+}

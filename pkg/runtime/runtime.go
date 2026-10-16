@@ -173,6 +173,10 @@ type Output struct {
 // process, or on another machine, and "the definition to run" is not a question
 // it is allowed to answer.
 type Request struct {
+	// History and Instructions are explicit host-supplied invocation input.
+	History      []agentrt.Message `json:"history,omitempty"`
+	Instructions string            `json:"instructions,omitempty"`
+
 	// RunID is the durable run. It is also the stream key: chunks a Sandbox
 	// tool produces find their way back to this run by it.
 	RunID string `json:"run_id"`
