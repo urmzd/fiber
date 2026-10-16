@@ -315,6 +315,39 @@ func TestEventForAnUnroutedRunIsDroppedAndLogged(t *testing.T) {
 	}
 }
 
+// A request addressed to a run travels on the bus under the control namespace.
+// It is for the worker executing the run and is never delivered to a surface,
+// even when its stream's id is one this router has routes for.
+func TestAControlRequestIsNeverDeliveredToASurface(t *testing.T) {
+	slack := newSink("slack")
+	h := start(t, registry(t, slack))
+	for _, id := range []string{"stop-run_1", "run_1"} {
+		if err := h.Register(id, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tp, err := topic.Control("stop", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.publish(t, envelope.Event{Topic: tp, Tenant: "acme", Kind: envelope.KindStop, Payload: []byte(`{"run_id":"run_1"}`)})
+	// The run's own events still arrive, the stopped one included, and the
+	// request published ahead of them is not among what was delivered.
+	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindAccepted))
+	h.publish(t, event("docs-bot", "run_1", 2, envelope.KindStopped))
+
+	slack.waitFor(t, 2)
+	for _, e := range slack.events() {
+		if e.Kind == envelope.KindStop || e.Topic.IsControl() {
+			t.Fatalf("a control request was delivered to a surface: %s on %s", e.Kind, e.Topic)
+		}
+	}
+	if got := slack.count(); got != 2 {
+		t.Fatalf("delivered %d events, want the run's two", got)
+	}
+}
+
 func TestReleasedRunStopsDeliveringAndLeavesNoGoroutines(t *testing.T) {
 	slack, github := newSink("slack"), newSink("github")
 	h := start(t, registry(t, slack, github))
@@ -919,4 +952,31 @@ func equalSeqs(got, want []uint64) bool {
 		}
 	}
 	return true
+}
+
+// A route with no kind filter is delivered everything except usage, which a
+// route receives only by naming it: a receiver written before usage existed is
+// never sent an event per model call it would refuse or fail on.
+func TestUsageReachesOnlyARouteThatAskedForIt(t *testing.T) {
+	slack, hook := newSink("slack"), newSink("webhook")
+	h := start(t, registry(t, slack, hook))
+	if err := h.Register("run_1", []envelope.Route{
+		{Target: address.MustParse(slackTarget)},
+		{Target: address.MustParse(hookTarget), Kinds: []string{"usage", "lifecycle.completed"}},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	published := []envelope.Kind{envelope.KindText, envelope.KindUsageCall, envelope.KindUsageChild, envelope.KindCompleted}
+	for i, kind := range published {
+		h.publish(t, event("docs-bot", "run_1", uint64(i+1), kind))
+	}
+	slack.waitFor(t, 2)
+	hook.waitFor(t, 3)
+	time.Sleep(waitIdle)
+	if got, want := kindsOf(slack.events()), []envelope.Kind{envelope.KindText, envelope.KindCompleted}; !equalKinds(got, want) {
+		t.Errorf("the unfiltered route received %v, want %v", got, want)
+	}
+	if got, want := kindsOf(hook.events()), []envelope.Kind{envelope.KindUsageCall, envelope.KindUsageChild, envelope.KindCompleted}; !equalKinds(got, want) {
+		t.Errorf("the route that asked for usage received %v, want %v", got, want)
+	}
 }

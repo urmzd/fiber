@@ -25,3 +25,6 @@ coverage.html
 .envrc.local
 *.pem
 *.key
+
+# Local tools (buf and its plugins, installed for `make proto`)
+.bin/

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/urmzd/mandatum/pkg/connectors/internal/httpjson"
 )
@@ -119,18 +121,89 @@ type HTTPAPI struct {
 // The token goes in the Authorization header rather than in the body: Slack
 // accepts both, and a token in a body is a token in a request log.
 func NewHTTPAPI(token string, httpClient *http.Client) *HTTPAPI {
+	return NewHTTPAPIAt(SlackBaseURL, token, httpClient)
+}
+
+// NewHTTPAPIAt is NewHTTPAPI against another Web API root: a recorded
+// server in a test, or a gateway in front of Slack.
+func NewHTTPAPIAt(base, token string, httpClient *http.Client) *HTTPAPI {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+token)
 	header.Set("Accept", "application/json")
-	return &HTTPAPI{client: &httpjson.Client{HTTP: httpClient, Base: SlackBaseURL, Header: header}}
+	return &HTTPAPI{client: &httpjson.Client{HTTP: httpClient, Base: strings.TrimRight(base, "/"), Header: header}}
 }
 
 // Compile-time proof that the real implementation and the fake answer the same
 // interface, which is the only reason the fake is worth anything.
 var (
-	_ API = (*HTTPAPI)(nil)
-	_ API = (*Fake)(nil)
+	_ API        = (*HTTPAPI)(nil)
+	_ API        = (*Fake)(nil)
+	_ FileAPI    = (*HTTPAPI)(nil)
+	_ FileAPI    = (*Fake)(nil)
+	_ RepliesAPI = (*HTTPAPI)(nil)
+	_ RepliesAPI = (*Fake)(nil)
 )
+
+// maxReplyPages bounds how many pages of a thread are read. Two hundred
+// messages a page makes this a thread of twenty thousand messages, past
+// which the listing is refused rather than read forever.
+const maxReplyPages = 100
+
+// FileInfo implements FileAPI with files.info. Slack documents it as a GET
+// with query parameters; read methods do not all accept a JSON body.
+func (a *HTTPAPI) FileInfo(ctx context.Context, _ string, id string) (File, error) {
+	var out struct {
+		response
+		File File `json:"file"`
+	}
+	q := url.Values{"file": {id}}
+	if err := a.get(ctx, "/files.info", q, &out.response, &out); err != nil {
+		return File{}, err
+	}
+	return out.File, nil
+}
+
+// Replies implements RepliesAPI with conversations.replies, following the
+// cursor until the thread is read.
+func (a *HTTPAPI) Replies(ctx context.Context, _ string, channel, ts string) ([]Reply, error) {
+	var all []Reply
+	cursor := ""
+	for range maxReplyPages {
+		var out struct {
+			response
+			Messages []Reply `json:"messages"`
+			HasMore  bool    `json:"has_more"`
+			Meta     struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		q := url.Values{"channel": {channel}, "ts": {ts}, "limit": {"200"}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		if err := a.get(ctx, "/conversations.replies", q, &out.response, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.Messages...)
+		if out.Meta.NextCursor == "" {
+			return all, nil
+		}
+		cursor = out.Meta.NextCursor
+	}
+	return nil, fmt.Errorf("slack: conversations.replies: thread %s has more than %d pages", ts, maxReplyPages)
+}
+
+// get calls a read method with query parameters. status is the embedded
+// response envelope of out, checked for ok like every other call.
+func (a *HTTPAPI) get(ctx context.Context, path string, q url.Values, status *response, out any) error {
+	if err := a.client.Do(ctx, http.MethodGet, path+"?"+q.Encode(), nil, out); err != nil {
+		return fmt.Errorf("slack: %s: %w", path, err)
+	}
+	if !status.OK {
+		return &Error{Method: path, Code: status.Error}
+	}
+	return nil
+}
 
 // response is the envelope every Web API method answers with.
 //

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/topic"
 )
 
@@ -56,21 +57,49 @@ const (
 	KindResumed   Kind = "lifecycle.resumed"
 	KindCompleted Kind = "lifecycle.completed"
 	KindFailed    Kind = "lifecycle.failed"
+	// KindChildParked reports, on a parent run's stream, that a child run
+	// it delegated to and is waiting on is parked on a question for a
+	// person. The parent is not parked: its turn is waiting on the child.
+	KindChildParked Kind = "lifecycle.child.parked"
+	// KindStopped ends a run that was asked to stop before it finished. It
+	// is terminal, like completed and failed, and it is neither: the run did
+	// not finish its work and nothing went wrong. No completed or failed
+	// event follows it.
+	KindStopped Kind = "lifecycle.stopped"
 
 	// Actions the agent took on a connector's surface: a comment posted, a
 	// ticket transitioned. This is the "work got done" signal, distinct from
 	// "the agent said something".
 	KindActionTaken Kind = "action.taken"
 
+	// What a run spent. They are accounting, not conversation, and a route
+	// receives them only by asking: a route with no kind filter, or one that
+	// selects "delta" or "lifecycle", never does. Select "usage" for both,
+	// or one of them by name. A subscription with no filter sees them like
+	// any other kind.
+	//
+	// KindUsageCall reports one model call as it completes: tokens, the
+	// model, its cost where saige can price it, and its context window.
+	KindUsageCall Kind = "usage.call"
+	// KindUsageChild reports a child run's whole usage once it has ended,
+	// so the run that delegated to it can count it.
+	KindUsageChild Kind = "usage.child"
+
 	// Control-plane changes, on the same bus as the data so a dashboard sees
 	// an agent get revised in the same stream as the runs that follow it.
 	KindAgentCreated Kind = "control.created"
 	KindAgentRevised Kind = "control.revised"
 	KindAgentDeleted Kind = "control.deleted"
+
+	// KindStop asks a run to stop. It is a request, not an outcome: it is
+	// published to the run's control topic (see topic.Control), never to the
+	// run's own, and the run answers it with lifecycle.stopped only if it was
+	// still working when the request reached it.
+	KindStop Kind = "control.stop"
 )
 
 // Family returns the leading component of a kind: "delta", "lifecycle",
-// "action", or "control".
+// "action", "usage", or "control".
 func (k Kind) Family() string {
 	for i := 0; i < len(k); i++ {
 		if k[i] == '.' {
@@ -104,19 +133,33 @@ type Actor struct {
 // Route is one delivery instruction: where to send events, and which ones.
 //
 // Kinds is a set of selectors matched against Event.Kind. An empty Kinds
-// means every kind. This is what makes a single run serve both a connector
-// rendering a live stream and a webhook that only wants the outcome.
+// means every kind except the usage family (see OptIn). This is what makes a
+// single run serve both a connector rendering a live stream and a webhook
+// that only wants the outcome.
 type Route struct {
 	Target address.Address `json:"target"`
 	Kinds  []string        `json:"kinds,omitempty"`
 }
 
+// OptIn reports whether a route must name k's family or k itself to receive
+// it. The usage family is opt-in: it was added after routes with no kind
+// filter were already delivering to receivers that knew a fixed set of kinds,
+// and an event per model call that such a receiver refuses, or fails on and
+// has retried in the run's ordered delivery lane, would cost every route that
+// never asked for it. As the root topic does not cover the control namespace,
+// "everything" does not cover accounting.
+func (k Kind) OptIn() bool { return k.Family() == "usage" }
+
 // Wants reports whether an event of kind k should be delivered on this route.
+// An opt-in kind is delivered only to a route that names it or its family.
 func (r Route) Wants(k Kind) bool {
 	if len(r.Kinds) == 0 {
-		return true
+		return !k.OptIn()
 	}
 	for _, sel := range r.Kinds {
+		if sel == "" && k.OptIn() {
+			continue
+		}
 		if k.Matches(sel) {
 			return true
 		}
@@ -170,6 +213,11 @@ type Tag struct {
 	// pull request number, an issue title, a Jira status.
 	Meta map[string]string `json:"meta,omitempty"`
 
+	// Attachments are the files that arrived with the tag, as references
+	// into the blob store. They are omitted when empty so that the durable
+	// input of a run with no files is byte for byte what it always was.
+	Attachments []attachment.Attachment `json:"attachments,omitempty"`
+
 	// At is when the trigger observed the event.
 	At time.Time `json:"at"`
 }
@@ -188,6 +236,9 @@ func (t Tag) Validate() error {
 		if err := r.Validate(); err != nil {
 			return fmt.Errorf("%w (route %d)", err, i)
 		}
+	}
+	if err := attachment.ValidateAll(t.Attachments); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	return nil
 }

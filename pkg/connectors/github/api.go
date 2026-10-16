@@ -52,6 +52,10 @@ const GitHubBaseURL = "https://api.github.com"
 // HTTPAPI is the real API, over net/http.
 type HTTPAPI struct {
 	client *httpjson.Client
+	// full asks for bodies as GitHub renders them as well as their
+	// Markdown (application/vnd.github.full+json): body_html is where a
+	// private repository's files have signed URLs.
+	full *httpjson.Client
 }
 
 // NewHTTPAPI returns an API bound to a token: a fine-grained personal access
@@ -71,7 +75,12 @@ func NewHTTPAPIAt(base, token string, httpClient *http.Client) *HTTPAPI {
 	header.Set("Authorization", "Bearer "+token)
 	header.Set("Accept", "application/vnd.github+json")
 	header.Set("X-GitHub-Api-Version", "2022-11-28")
-	return &HTTPAPI{client: &httpjson.Client{HTTP: httpClient, Base: base, Header: header}}
+	full := header.Clone()
+	full.Set("Accept", "application/vnd.github.full+json")
+	return &HTTPAPI{
+		client: &httpjson.Client{HTTP: httpClient, Base: base, Header: header},
+		full:   &httpjson.Client{HTTP: httpClient, Base: base, Header: full},
+	}
 }
 
 var (

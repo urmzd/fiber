@@ -68,6 +68,7 @@ import (
 	"github.com/urmzd/legatus/pkg/metrics"
 	"github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect"
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/blob"
 	"github.com/urmzd/mandatum/pkg/bus"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/topic"
@@ -101,6 +102,14 @@ var (
 	// ErrUnavailable reports a dependency that is temporarily unable to serve,
 	// which is the one class of failure a client should retry unchanged.
 	ErrUnavailable = errors.New("server: unavailable")
+
+	// ErrClosed reports a request about something that has ended and no
+	// longer takes it: a question whose run was stopped or ended.
+	ErrClosed = errors.New("server: closed")
+
+	// ErrForbidden reports a caller of the right tenant who may still not do
+	// this: answer a question the spec keeps for other people.
+	ErrForbidden = errors.New("server: forbidden")
 )
 
 // Defaults for Config. Each is the value a deployment can leave alone.
@@ -158,8 +167,21 @@ type Config struct {
 	// ingress.
 	Invoker Invoker
 
+	// Blobs is where uploaded files are stored and where a tag's attachments
+	// are checked. Nil disables uploads, and a tag that carries attachments
+	// is then refused.
+	Blobs blob.Store
+
 	// Runs reads durable run records. Nil disables GetRun.
 	Runs RunReader
+
+	// Stopper asks runs to stop, behind POST /v1/runs/{id}/stop. Nil disables
+	// the route.
+	Stopper Stopper
+
+	// Answerer answers the questions runs are parked on, behind
+	// InvokeService.Answer. Nil disables it.
+	Answerer Answerer
 
 	// Ingress registers one inbound webhook endpoint per connector, served at
 	// POST /v1/webhooks/{connector}.
@@ -197,6 +219,7 @@ type Config struct {
 type Server struct {
 	auth    Authenticator
 	bus     bus.Bus
+	blobs   blob.Store
 	ingress map[string]Ingress
 	mux     *http.ServeMux
 
@@ -233,6 +256,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		auth:      cfg.Auth,
 		bus:       cfg.Bus,
+		blobs:     cfg.Blobs,
 		ingress:   make(map[string]Ingress, len(cfg.Ingress)),
 		mux:       http.NewServeMux(),
 		heartbeat: orDuration(cfg.Heartbeat, DefaultHeartbeat),
@@ -277,9 +301,11 @@ func New(cfg Config) (*Server, error) {
 	s.mux.Handle(mandatumv1connect.NewBusServiceHandler(
 		&busService{bus: cfg.Bus, srv: s, log: s.log}, opts))
 	s.mux.Handle(mandatumv1connect.NewInvokeServiceHandler(
-		&invokeService{invoker: cfg.Invoker, runs: cfg.Runs, bus: cfg.Bus, srv: s, log: s.log}, opts))
+		&invokeService{invoker: cfg.Invoker, runs: cfg.Runs, answerer: cfg.Answerer, bus: cfg.Bus, srv: s, log: s.log}, opts))
 
 	s.mux.HandleFunc("GET /v1/sse", s.handleSSE)
+	s.mux.HandleFunc("POST /v1/blobs", s.handleBlobPut)
+	s.mux.HandleFunc("POST /v1/runs/{id}/stop", s.handleStop(cfg.Stopper))
 	s.mux.HandleFunc("POST /v1/webhooks/{connector}", s.handleWebhook(cfg.Invoker))
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
@@ -448,6 +474,10 @@ func codeOf(err error) connect.Code {
 		return connect.CodeUnavailable
 	case errors.Is(err, ErrUnimplemented):
 		return connect.CodeUnimplemented
+	case errors.Is(err, ErrClosed):
+		return connect.CodeFailedPrecondition
+	case errors.Is(err, ErrForbidden):
+		return connect.CodePermissionDenied
 	case errors.Is(err, bus.ErrSlowConsumer):
 		return connect.CodeResourceExhausted
 	case errors.Is(err, ErrInvalid),

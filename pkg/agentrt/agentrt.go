@@ -23,6 +23,88 @@
 // a model claims to have used. saige's CitationDelta, which reports what a
 // model or tool cited, is not translated.
 //
+// # Context layout
+//
+// A provider's prompt cache reuses a request only up to the first byte that
+// differs from an earlier one, so the request is laid out from what never
+// changes to what always does:
+//
+//	tool definitions, sorted by name      identical for every run of a revision
+//	system prompt, from the pinned spec   identical for every run of a revision
+//	the thread's history, oldest first    identical for every run of a thread,
+//	                                      and only ever appended to
+//	the request: trigger metadata,        fixed for the whole turn
+//	  retrieved passages, the text
+//	the tool loop's history               only ever appended to
+//
+// Everything that varies from one run to the next (metadata, retrieval
+// results) lives in the request message, never in the system prompt, so it
+// cannot sit ahead of content that would otherwise be shared. Inside a turn
+// each model call sends the previous call's request plus what was added since.
+// The single exception is a compaction, which is off unless a budget is set;
+// see WithCompaction for what it rewrites and why it is rare, and
+// WithPromptCache for where the cache breakpoints go.
+//
+// # History across runs
+//
+// A turn may carry the conversation so far in Turn.History. It is replayed
+// into the request in the order given, one message per entry, after the
+// system prompt and before the new request, and nothing is added to it: a
+// Message is a role and a text, so there is no timestamp or run id that could
+// reach the model and differ between two runs.
+//
+// A history message with attachments is rendered as its text followed by its
+// files, resolved the way the request's files are. Resolution is a function of
+// the references, the stored bytes and the pinned model, and one budget is
+// spent across the history's files in order and then the request's, so a
+// message renders the same bytes as history that it rendered as the request:
+// the files of run k's request are spent from the same remaining budget in
+// run k and in every later run that replays it. A long thread can therefore
+// use up the per-run file budget, after which further files are notes; that
+// is the price of a prefix that never changes.
+//
+// That gives a thread the same property a tool loop has. If the caller keeps
+// history append-only and records each exchange as it happened (Result.Prompt
+// is the request message exactly as it was sent, Result.Text is the answer),
+// then the first request of run k is a byte prefix of the first request of
+// run k+1, and a prefix cache reads the whole earlier conversation. The
+// exception is the same one as inside a turn: a compaction rewrites the
+// middle of the history and keeps the tools, the system prompt, and the
+// oldest message.
+//
+// This package does not store history, and does not know what a thread is.
+// With no History a turn starts a fresh conversation, and the prefix two runs
+// of the same revision share is the tool definitions and the system prompt.
+//
+// # Stopping a turn
+//
+// A turn can be asked to stop while it runs (Turn.Stop). The model call in
+// flight is cancelled, running tools are cancelled through their context, and
+// the turn returns what it had answered so far with Result.Stopped set and no
+// error: a stopped turn is neither a completed one nor a failed one, and a
+// caller that retries failures must not retry it. This package does not decide
+// what a stopped turn means for a run or a thread; pkg/runtime does.
+//
+// # Parking a turn on a person
+//
+// A turn that may park (Turn.Park) ends at a question for a person instead of
+// waiting for one: an approval of a marked tool call, or the agent's
+// ask_person tool. Result.Parked holds the question and everything a later
+// turn (Turn.Resume) needs to continue it with the answer, sending exactly
+// what an uninterrupted turn would have sent. A turn that may not park
+// refuses approvals instead. See park.go.
+//
+// # Usage
+//
+// Every model call the turn makes is published as a usage.call event the
+// moment saige reports it: the tokens in and out, the prompt cache's share,
+// the model, the cost where saige's price catalog has a rate card for it, and
+// the model's context window. Publishing per call rather than once at the end
+// is what keeps the tokens of a turn that fails or is stopped on the record:
+// they were spent either way. Result.Usage is the same calls summed. Nothing
+// is priced from anything but saige's catalog; an unknown model reports its
+// tokens and no cost.
+//
 // # Revisions are pinned, not resolved
 //
 // New takes a Revision, never an agent name. Nothing in this package can look
@@ -39,9 +121,17 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
+
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/mandatum/pkg/envelope"
+
+	"github.com/urmzd/mandatum/pkg/attachment"
+	"github.com/urmzd/mandatum/pkg/attachment/resolve"
 )
 
 // DefaultMaxIter bounds the agent loop's tool-calling iterations per turn. It
@@ -50,35 +140,106 @@ import (
 // it because a looping turn never fails.
 const DefaultMaxIter = 10
 
-// Role and Message describe caller-constructed conversation input. System
-// messages are reserved for the host and cannot be supplied through History.
+// Role says who a history message is from.
 type Role string
 
 const (
-	RoleUser      Role = "user"
+	// RoleUser is a message said to the agent.
+	RoleUser Role = "user"
+	// RoleAssistant is an answer the agent gave.
 	RoleAssistant Role = "assistant"
 )
 
+// Message is one earlier message of the conversation a turn continues.
+//
+// It is deliberately only a role, a text and the files that came with it.
+// Whatever is rendered for the model has to be identical on every run that
+// replays it, and the simplest way to guarantee that a timestamp, a run id or
+// a sequence number never reaches the request is for the type to have nowhere
+// to put one. Attachments are content references, so they render the same
+// bytes every time: see "History across runs".
 type Message struct {
 	Role Role   `json:"role"`
 	Text string `json:"text"`
+	// Attachments are the files a user message arrived with. They are
+	// rendered after the message's text, exactly as they were when that
+	// message was the request. An assistant message carries none.
+	Attachments []attachment.Attachment `json:"attachments,omitempty"`
+}
+
+// DefaultStopReason is the reason a stop given none is reported with, on
+// every path: saige's own default, so a turn that saige wraps up and a turn
+// stopped before it began say the same thing.
+const DefaultStopReason = saige.DefaultStopReason
+
+// RequestText is the request message a turn of text and meta sends before any
+// retrieved passages are added: the trigger metadata, in sorted key order,
+// then the text. It is what a turn that was stopped before it began records as
+// its request, and what a caller can record when it never learned the prompt.
+func RequestText(text string, meta map[string]string) string {
+	if m := renderMeta(meta); m != "" {
+		return m + "\n\n" + text
+	}
+	return text
+}
+
+// Stop asks a turn to wrap up before it has finished.
+type Stop struct {
+	// Reason is why, in the words of whoever asked. Empty takes saige's
+	// default.
+	Reason string `json:"reason,omitempty"`
+	// By is who asked. It is recorded and never sent to the model.
+	By string `json:"by,omitempty"`
 }
 
 // Turn is one request to an agent.
 type Turn struct {
-	// History is explicit, ordered input supplied by the host. It is never
-	// implicitly inherited by helper calls.
-	History []Message
 	// Instructions is a trusted host-generated return contract. It supplements
 	// the pinned system rules; callers must not supply arbitrary system text.
 	Instructions string
 
+	// Stop, when set, is how the turn is asked to wrap up early: the first
+	// value received on it stops the turn (see "Stopping a turn" in the
+	// package documentation). A nil channel is a turn that cannot be stopped,
+	// only cancelled through its context. Nothing is read from it once the
+	// turn has returned.
+	Stop <-chan Stop
+	// Attachments are the files that arrived with the request. They need
+	// WithAttachments, and Tenant, which scopes every read of them.
+	Attachments []attachment.Attachment
+	// Tenant is the authorization scope the turn runs under. It is only read
+	// to resolve attachments.
+	Tenant string
+	// History is the conversation so far, oldest first. It is replayed
+	// verbatim ahead of the request. The caller owns its order and its
+	// stability: see "History across runs" in the package documentation.
+	History []Message
 	// Text is the request, with the agent mention already stripped.
 	Text string
 	// Meta is trigger-specific context (a pull request number, an issue
 	// title). It is rendered into the prompt in sorted key order so the same
 	// tag produces the same prompt on every attempt.
 	Meta map[string]string
+	// Accounting is the prefix a model call's usage is keyed under:
+	// "<prefix>/<n>" for the turn's nth call. saige's own AccountingID, when
+	// it reports one, is carried beside it and not used as the key. The caller makes it unique to this execution (pkg/runtime
+	// uses the run, the attempt and the delegation path), which makes every
+	// call's key unique. Empty is DefaultAccounting.
+	Accounting string
+	// Park lets the turn end at a question for a person instead of waiting
+	// for the answer: see "Parking a turn on a person" in park.go. A turn
+	// that may not park (a delegated sub-task, a caller with nobody to ask)
+	// refuses every approval and tells the model that ask_person cannot be
+	// answered, so it can carry on.
+	Park bool
+	// QuestionTTL is how long a question the turn parks on waits before its
+	// default applies. Zero is DefaultQuestionTTL.
+	QuestionTTL time.Duration
+	// Resume continues a turn that parked, with the answers its pending tool
+	// calls have. History, Text, Meta and Attachments must be the parked
+	// turn's; the request is the parked turn's recorded prompt, not Text
+	// rendered again.
+	Resume *Parked
 }
 
 // Result is what a turn produced.
@@ -86,10 +247,34 @@ type Result struct {
 	// Text is the agent's final answer, the concatenation of its text
 	// deltas.
 	Text string
+	// Prompt is the request message exactly as it was sent to the model:
+	// trigger metadata, retrieved passages, and the turn's text. A caller
+	// that keeps history records this, not Turn.Text, as what the user said,
+	// because a later run only shares a request prefix with this one if it
+	// replays the same bytes.
+	Prompt string
 	// Chunks counts the event bodies the turn emitted, citations included.
 	Chunks int
 	// Citations counts the retrieved passages the turn was grounded in.
 	Citations int
+	// Usage is what the turn's own model calls spent, with the share read
+	// from and written to the prompt cache and the cost where saige can
+	// price the model. It is reported for a failed turn too, since the
+	// tokens were spent either way. Calls made by agents this turn delegated
+	// to are not in it; they are reported as usage.call events of their own.
+	Usage payload.Usage
+	// Compactions lists each time the turn's history was summarized, in
+	// order. It is empty unless WithCompaction set a budget and the turn
+	// crossed it.
+	Compactions []payload.Compaction
+	// Stopped is set when the turn ended because it was asked to stop, and
+	// says why and by whom. Text is then what had been answered so far, which
+	// may be nothing. It is nil for a turn that finished before the request
+	// took effect: that turn completed, and its Text is the whole answer.
+	Stopped *Stop
+	// Parked is set when the turn ended at a question for a person: Text is
+	// what it had said so far, and a turn with Turn.Resume continues it.
+	Parked *Parked
 }
 
 // Runner runs turns of one pinned revision.
@@ -104,8 +289,11 @@ type Runner struct {
 	provider  saigetypes.Provider
 	tools     *saigetypes.ToolRegistry
 	retriever Retriever
+	files     *resolve.Resolver
 	maxIter   int
 	logger    *slog.Logger
+	// compaction is the history budget; its zero value never compacts.
+	compaction Compaction
 }
 
 // Option configures a Runner.
@@ -118,6 +306,22 @@ type config struct {
 	retriever Retriever
 	maxIter   int
 	logger    *slog.Logger
+	// compaction and promptCache are the context policy; see context.go.
+	compaction  Compaction
+	promptCache string
+	files       *resolve.Resolver
+}
+
+// WithAttachments lets turns carry files. The resolver reads each attachment
+// from the blob store and turns it into what the pinned model can take: the
+// bytes themselves where the model has that modality, derived text where it
+// does not, and a note saying a file was attached where neither is possible.
+//
+// Without it a turn that carries attachments is refused. Running it anyway
+// would answer a question about a file as though no file had been sent, and a
+// confident answer to the wrong question is worse than an error.
+func WithAttachments(r *resolve.Resolver) Option {
+	return func(c *config) { c.files = r }
 }
 
 // WithProvider registers or replaces a provider factory under name. A
@@ -179,15 +383,26 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		providers: defaultProviders(),
 		maxIter:   DefaultMaxIter,
 		logger:    slog.Default(),
+		// Caching is on by default because it is free to be wrong about: a
+		// prefix nobody reads again costs a quarter more to write once, and
+		// a tool loop of three calls has already earned that back.
+		promptCache: PromptCacheShort,
 	}
 	for _, o := range opts {
 		o(&cfg)
 	}
-	// The offline provider is resolved last because it needs the script,
-	// which an option may have supplied. An explicit WithProvider for the
-	// same name wins: overriding a built-in is the documented escape hatch.
+	if err := validPromptCache(cfg.promptCache); err != nil {
+		return nil, err
+	}
+	// The offline and Anthropic providers are resolved last because they
+	// need what an option may have supplied: the script, the cache lifetime.
+	// An explicit WithProvider for the same name wins: overriding a built-in
+	// is the documented escape hatch.
 	if cfg.providers[ProviderOffline] == nil {
 		cfg.providers[ProviderOffline] = offlineProvider(cfg.script)
+	}
+	if cfg.providers[ProviderAnthropic] == nil {
+		cfg.providers[ProviderAnthropic] = anthropicProvider(cfg.promptCache)
 	}
 
 	newProvider, ok := cfg.providers[rev.Spec.Provider]
@@ -200,8 +415,19 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		return nil, err
 	}
 
+	// The registry hands tool definitions to the provider sorted by name, so
+	// the order a spec lists its tools in never reaches the request. That
+	// matters beyond tidiness: tool definitions are the first bytes of the
+	// cached prefix, and an order that followed the spec would invalidate
+	// the cache for an edit that only reordered a list.
 	tools := saigetypes.NewToolRegistry()
 	for _, name := range rev.Spec.Tools {
+		if name == AskPersonToolName {
+			// Built in: its answer comes from the turn, which no catalog
+			// can know.
+			tools.Register(AskPersonTool())
+			continue
+		}
 		if cfg.tools == nil {
 			return nil, fmt.Errorf("%w: agent %q revision %d grants tool %q but no tool catalog is configured",
 				ErrInvalid, rev.Spec.Name, rev.Rev, name)
@@ -212,14 +438,32 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		}
 		tools.Register(t)
 	}
+	// A tool the spec requires approval for carries a saige marker, which is
+	// what makes saige stop at its calls and ask.
+	for _, name := range rev.Spec.Approvals {
+		t, ok := tools.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("%w: agent %q revision %d requires approval for %q, which it is not granted",
+				ErrInvalid, rev.Spec.Name, rev.Rev, name)
+		}
+		if _, marked := t.(*saigetypes.MarkedTool); marked {
+			continue
+		}
+		tools.Register(saigetypes.WithMarkers(t, saigetypes.Marker{
+			Kind:    MarkerApproval,
+			Message: fmt.Sprintf("Allow %s to call %s?", rev.Spec.Name, name),
+		}))
+	}
 
 	return &Runner{
-		rev:       rev,
-		provider:  provider,
-		tools:     tools,
-		retriever: cfg.retriever,
-		maxIter:   cfg.maxIter,
-		logger:    cfg.logger,
+		rev:        rev,
+		provider:   provider,
+		tools:      tools,
+		retriever:  cfg.retriever,
+		files:      cfg.files,
+		maxIter:    cfg.maxIter,
+		logger:     cfg.logger,
+		compaction: cfg.compaction,
 	}, nil
 }
 
@@ -243,8 +487,21 @@ func (r *Runner) SystemPrompt() string { return r.rev.Spec.SystemPrompt }
 // A failed turn returns an error and whatever text was produced before it
 // failed, because a partially-answered turn is what a sink has already rendered
 // and pretending otherwise would make the thread inconsistent with the run.
+//
+// A stopped turn returns no error: see Turn.Stop and Result.Stopped.
 func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chunk) error) (Result, error) {
 	var res Result
+
+	// A stop that was already waiting when the turn began ends it here,
+	// before retrieval and before any model call. The request is recorded as
+	// it would have been sent, without retrieved passages, since none were
+	// fetched.
+	if stop, ok := pendingStop(t.Stop); ok {
+		res.Prompt = RequestText(t.Text, t.Meta)
+		res.Stopped = stopOf(stop)
+		return res, nil
+	}
+
 	send := func(c Chunk) error {
 		if emit == nil {
 			res.Chunks++
@@ -258,7 +515,12 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	}
 
 	prompt := t.Text
-	if r.retriever != nil && len(r.rev.Spec.Sources) > 0 {
+	if t.Resume != nil {
+		// A continuation sends the request the parked turn sent, retrieved
+		// passages and all, and does not retrieve again: its citations were
+		// published by that turn, and a second retrieval could differ.
+		prompt = t.Resume.Prompt
+	} else if r.retriever != nil && len(r.rev.Spec.Sources) > 0 {
 		ac, err := r.retriever.Retrieve(ctx, t.Text)
 		if err != nil {
 			return res, fmt.Errorf("agentrt: agent %q revision %d: retrieve: %w", r.rev.Spec.Name, r.rev.Rev, err)
@@ -274,32 +536,98 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			prompt = ac.Prompt + "\n\n" + prompt
 		}
 	}
-	if meta := renderMeta(t.Meta); meta != "" {
+	if meta := renderMeta(t.Meta); meta != "" && t.Resume == nil {
 		prompt = meta + "\n\n" + prompt
 	}
+	res.Prompt = prompt
 
-	agent, err := saige.New(saige.Config{
-		Name:         r.rev.Spec.Name,
-		SystemPrompt: invocationPrompt(r.rev.Spec.SystemPrompt, t.Instructions),
-		Provider:     r.provider,
-		Tools:        r.tools,
-		MaxIter:      r.maxIter,
-		Logger:       r.logger,
-	})
+	// Files ride on the message they arrived with: a history message's after
+	// its text, and the request's on the last message. They are the most
+	// volatile thing a turn sends, so they go after everything a later turn
+	// could share a cached prefix with.
+	input, provider, pending, err := r.continuation(ctx, t, prompt)
 	if err != nil {
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
 	}
 
-	input, err := conversation(t.History, prompt)
-	if err != nil {
-		return res, err
+	park := &parker{
+		enabled: t.Park,
+		tools:   r.tools,
+		agent:   r.rev.Spec.Name,
+		scope:   firstOf(t.Accounting, DefaultAccounting),
+		ttl:     t.QuestionTTL,
+		now:     time.Now,
 	}
+	if park.ttl <= 0 {
+		park.ttl = DefaultQuestionTTL
+	}
+	if t.Resume != nil {
+		park.answers = t.Resume.Answers
+	}
+	// ask_person reads its answer from the context its call runs under.
+	ctx = context.WithValue(ctx, answersKey{}, park.answers)
+
+	agentCfg := saige.Config{
+		Name:         r.rev.Spec.Name,
+		SystemPrompt: invocationPrompt(r.rev.Spec.SystemPrompt, t.Instructions),
+		Provider:     provider,
+		Tools:        r.tools,
+		MaxIter:      r.maxIter,
+		Logger:       r.logger,
+		Hooks:        []saige.Hooks{park.hooks()},
+	}
+	if cc := r.compaction.config(); cc != nil {
+		agentCfg.CompactCfg = cc
+		agentCfg.Hooks = append(agentCfg.Hooks, newCompactionGuard(r.compaction.keepTurns()).hooks())
+	}
+	agent, err := saige.New(agentCfg)
+	if err != nil {
+		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
+	}
+
 	stream := agent.Invoke(ctx, input)
 	translator := NewTranslator()
+	accounts := newAccountant(t.Accounting, r.rev.Spec.Name, r.rev.Spec.Model, r.provider)
+
+	// The stop request is applied from its own goroutine, because this one is
+	// busy draining the stream and saige's Stop is safe to call from anywhere.
+	// The goroutine ends with the turn: settle runs on every return path
+	// below, which is what makes "nothing is read from Turn.Stop once the
+	// turn has returned" true rather than likely.
+	stopping := newStopper(stream)
+	finished := make(chan struct{})
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		select {
+		case stop := <-t.Stop:
+			stopping.apply(stop)
+		case <-finished:
+		}
+	}()
+	// settle is deferred as well as called: a panic anywhere below (an emit
+	// that panics, say) must not leave the watcher waiting forever.
+	var settled sync.Once
+	settle := func() {
+		settled.Do(func() {
+			close(finished)
+			<-watched
+		})
+	}
+	defer settle()
 
 	var answer strings.Builder
 	var streamErr error
+	replay := newReplaying(pending)
 	for d := range stream.Deltas() {
+		if replay.drop(d) {
+			continue
+		}
+		if id, ok := batchDelta(d); ok && park.holds(id) {
+			// The batch the turn parked on never ran; saige's account of
+			// cancelling it is not news.
+			continue
+		}
 		switch v := d.(type) {
 		case saigetypes.PartDelta:
 			answer.WriteString(v.Text)
@@ -310,19 +638,40 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			if streamErr == nil && v.Error != nil {
 				streamErr = v.Error
 			}
+		case saigetypes.StoppedDelta:
+			// The turn wrapped up on request. Like failure it is a
+			// lifecycle fact and not an event of its own; the request it
+			// answers is read off the stream once it has drained.
+		case saigetypes.UsageDelta:
+			// One model call, reported as it completes so that a call the
+			// turn never finishes (a failure, a stop) is still on the
+			// record. See "Usage" in the package documentation.
+			call := accounts.call(v)
+			res.Usage = res.Usage.AddCall(call)
+			c, ok := chunk(envelope.KindUsageCall, call)
+			if !ok {
+				continue
+			}
+			if err := send(c); err != nil {
+				stream.Cancel()
+				drain(stream)
+				settle()
+				return res, err
+			}
+			continue
+		case saigetypes.CompactionDelta:
+			res.Compactions = append(res.Compactions, compactionRecord(v))
 		case saigetypes.MarkerDelta:
-			// A tool asked for human approval mid-turn. Nothing in a durable
-			// turn can answer that question — the caller is a queue, not a
-			// person — and leaving it unresolved would block the stream
-			// forever, so it is refused explicitly. The right shape for
-			// approval is to park the run on an external event; see
-			// pkg/runtime.
+			// A tool call waits for approval. A call this turn was given the
+			// answer to is answered with it. Any other is refused: the turn is
+			// ending at its question (see park.go) and the call will be asked
+			// again, with the answer, when the turn is continued, or the turn
+			// cannot park at all and the model is told nobody can approve it.
+			// A refusal never runs the tool, and nothing is left waiting.
 			//
 			// A refusal that cannot be delivered would leave the tool
 			// waiting, so it fails the turn and stops the stream instead.
-			err := stream.ResolveMarkerErr(v.ToolCallID, saige.Resolution{
-				Message: "mandatum: interactive approval is not available inside a durable run",
-			})
+			err := stream.ResolveMarkerErr(v.ToolCallID, park.decide(v.ToolCallID))
 			if err != nil {
 				streamErr = errors.Join(streamErr, fmt.Errorf("refuse approval for tool call %s: %w", v.ToolCallID, err))
 				stream.Cancel()
@@ -335,13 +684,41 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		if err := send(c); err != nil {
 			stream.Cancel()
 			drain(stream)
+			settle()
 			return res, err
 		}
 	}
 
 	res.Text = answer.String()
-	if err := stream.Wait(); err != nil {
-		streamErr = errors.Join(streamErr, err)
+	waitErr := stream.Wait()
+	settle()
+	if _, stopped := stream.Stopped(); !stopped && park.isParking() {
+		if _, cancelled := stopping.cancelled(); !cancelled {
+			parked, err := r.parkedOf(agent, park, t, len(res.Compactions) > 0)
+			if err != nil {
+				return res, fmt.Errorf("agentrt: agent %q revision %d: park: %w", r.rev.Spec.Name, r.rev.Rev, err)
+			}
+			parked.Prompt = res.Prompt
+			res.Parked = parked
+			return res, nil
+		}
+	}
+	if req, ok := stream.Stopped(); ok {
+		// saige wrapped the turn up: the partial text is kept and the stream
+		// ended cleanly.
+		res.Stopped = &Stop{Reason: req.Reason, By: req.By}
+		return res, nil
+	}
+	if stop, ok := stopping.cancelled(); ok {
+		// The stream could not wrap up on request and was cancelled instead.
+		// What the caller asked for still happened, with whatever text had
+		// arrived, so it is reported as a stop and not as the cancellation
+		// it was implemented with.
+		res.Stopped = stopOf(stop)
+		return res, nil
+	}
+	if waitErr != nil {
+		streamErr = errors.Join(streamErr, waitErr)
 	}
 	if streamErr != nil {
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, streamErr)
@@ -349,10 +726,161 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	return res, nil
 }
 
+// conversation builds the turn's input: the history, then the request, with
+// every message's attachments resolved for the model this revision pins.
+//
+// One budget is spent across every file in the order the messages are sent,
+// history first. That is what makes a message render the same bytes in
+// every run that replays it (see "History across runs").
+func (r *Runner) conversation(ctx context.Context, t Turn, prompt string) ([]saigetypes.Message, error) {
+	input, err := conversation(t.History, prompt)
+	if err != nil {
+		return nil, err
+	}
+	var budget *resolve.Budget
+	for i, m := range t.History {
+		if len(m.Attachments) == 0 {
+			continue
+		}
+		if budget == nil {
+			budget = resolve.NewBudget()
+		}
+		msg, err := r.withFiles(ctx, t.Tenant, m.Attachments, m.Text, budget)
+		if err != nil {
+			return nil, fmt.Errorf("history message %d of %d: %w", i+1, len(t.History), err)
+		}
+		input[i] = msg
+	}
+	if len(t.Attachments) > 0 {
+		if budget == nil {
+			budget = resolve.NewBudget()
+		}
+		msg, err := r.withFiles(ctx, t.Tenant, t.Attachments, prompt, budget)
+		if err != nil {
+			return nil, err
+		}
+		input[len(input)-1] = msg
+	}
+	return input, nil
+}
+
+// withFiles builds a user message of text followed by its attachments,
+// resolved for the model this revision pins. A provider that does not report
+// what it accepts is treated as text only: showing a model bytes it cannot
+// read fails the call, while derived text always works.
+func (r *Runner) withFiles(ctx context.Context, tenant string, files []attachment.Attachment, text string, budget *resolve.Budget) (saigetypes.Message, error) {
+	if r.files == nil {
+		return nil, fmt.Errorf("%w: the turn carries %d attachments and this deployment has no attachment resolver", ErrInvalid, len(files))
+	}
+	var media saigetypes.ContentSupport
+	if caps, ok := saigetypes.ProviderCapabilities(r.provider); ok {
+		media = caps.Media
+	}
+	out, err := r.files.Resolve(ctx, resolve.Request{Tenant: tenant, Attachments: files, Model: media, Budget: budget})
+	if err != nil {
+		return nil, fmt.Errorf("attachments: %w", err)
+	}
+	return out.Message(text), nil
+}
+
+// stopOf normalizes a stop the way saige does, so every path reports the same
+// reason for a request that gave none.
+func stopOf(s Stop) *Stop {
+	s.Reason = strings.TrimSpace(s.Reason)
+	if s.Reason == "" {
+		s.Reason = DefaultStopReason
+	}
+	return &s
+}
+
+// pendingStop reports a stop request that is already waiting, without
+// blocking.
+func pendingStop(ch <-chan Stop) (Stop, bool) {
+	select {
+	case stop := <-ch:
+		return stop, true
+	default:
+		return Stop{}, false
+	}
+}
+
+// stopper applies one stop request to a stream and remembers whether it had to
+// fall back to cancelling it.
+type stopper struct {
+	stream *saige.EventStream
+
+	mu       sync.Mutex
+	fallback *Stop
+}
+
+func newStopper(stream *saige.EventStream) *stopper { return &stopper{stream: stream} }
+
+// apply asks the stream to wrap up. A stream that cannot (saige refuses it for
+// a replayed or remote stream and under a durable step runner) is cancelled,
+// which ends it as surely and keeps less.
+//
+// A stream that has already ended is left alone: the turn finished before the
+// request arrived and its outcome stands.
+func (s *stopper) apply(stop Stop) {
+	err := s.stream.Stop(saige.StopRequest{Reason: stop.Reason, By: stop.By})
+	if err == nil || errors.Is(err, saige.ErrRunFinished) {
+		return
+	}
+	s.mu.Lock()
+	s.fallback = &stop
+	s.mu.Unlock()
+	s.stream.Cancel()
+}
+
+// cancelled reports the stop that was carried out by cancelling the stream.
+func (s *stopper) cancelled() (Stop, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fallback == nil {
+		return Stop{}, false
+	}
+	return *s.fallback, true
+}
+
 // drain empties a cancelled stream so its producing goroutine can exit.
 func drain(s *saige.EventStream) {
 	for range s.Deltas() {
 	}
+}
+
+// conversation lays out what a turn sends after the system prompt: the
+// history, then the request.
+//
+// Each history entry becomes exactly one message, in the order given, and
+// entries are never merged, reordered or decorated. Merging two consecutive
+// messages of one role would look tidier and would break the property this
+// exists for: the message a run sent last would change shape once a later
+// message joined it, and the next run's request would stop being an extension
+// of this one.
+//
+// An entry this package cannot render is refused rather than skipped. A
+// history with a hole in it is a different conversation, and an agent that
+// answers a different conversation is worse than a turn that fails.
+func conversation(history []Message, prompt string) ([]saigetypes.Message, error) {
+	out := make([]saigetypes.Message, 0, len(history)+1)
+	for i, m := range history {
+		if strings.TrimSpace(m.Text) == "" && (m.Role != RoleUser || len(m.Attachments) == 0) {
+			return nil, fmt.Errorf("%w: history message %d of %d has no text", ErrInvalid, i+1, len(history))
+		}
+		switch m.Role {
+		case RoleUser:
+			out = append(out, saigetypes.UserMsg(saigetypes.Text(m.Text)))
+		case RoleAssistant:
+			if len(m.Attachments) > 0 {
+				return nil, fmt.Errorf("%w: history message %d of %d is the agent's answer and carries attachments", ErrInvalid, i+1, len(history))
+			}
+			out = append(out, saigetypes.AssistantMsg(saigetypes.Text(m.Text)))
+		default:
+			return nil, fmt.Errorf("%w: history message %d of %d has role %q, want %q or %q",
+				ErrInvalid, i+1, len(history), m.Role, RoleUser, RoleAssistant)
+		}
+	}
+	return append(out, saigetypes.UserMsg(saigetypes.Text(prompt))), nil
 }
 
 // renderMeta formats a tag's metadata as a context block, in sorted key order.
@@ -391,26 +919,64 @@ func providerNames(m map[string]ProviderFunc) []string {
 
 var _ Tools = ToolsFunc(nil)
 
+// continuation builds a turn's input and the provider it calls. A fresh turn
+// sends its history and request to the revision's provider. A continuation
+// sends the conversation its parked turn had, and its first call is answered
+// with the message that turn parked on (see replayFirst).
+func (r *Runner) continuation(ctx context.Context, t Turn, prompt string) ([]saigetypes.Message, saigetypes.Provider, *saigetypes.AssistantMessage, error) {
+	if t.Resume == nil {
+		input, err := r.conversation(ctx, t, prompt)
+		return input, r.provider, nil, err
+	}
+	var input []saigetypes.Message
+	if !t.Resume.Whole {
+		base, err := r.conversation(ctx, t, prompt)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		input = base
+	}
+	for i, raw := range t.Resume.Transcript {
+		m, err := DecodeMessage(raw)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("parked transcript message %d: %w", i+1, err)
+		}
+		input = append(input, m)
+	}
+	m, err := DecodeMessage(t.Resume.Pending)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parked message: %w", err)
+	}
+	pending, ok := m.(saigetypes.AssistantMessage)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("%w: the parked message is a %s message, want assistant", ErrInvalid, m.Role())
+	}
+	return input, newReplayFirst(r.provider, pending), &pending, nil
+}
+
+// parkedOf records where a turn that parked stopped.
+func (r *Runner) parkedOf(agent *saige.Agent, park *parker, t Turn, compacted bool) (*Parked, error) {
+	tr := agent.Tree()
+	branch, err := tr.FlattenBranch(tr.Active())
+	if err != nil {
+		return nil, err
+	}
+	whole := compacted || (t.Resume != nil && t.Resume.Whole)
+	return park.parked(branch, len(t.History)+1, whole)
+}
+
+func firstOf(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func invocationPrompt(system, instructions string) string {
 	if instructions == "" {
 		return system
 	}
 	return system + "\n\nInvocation return contract (subject to the agent rules above):\n" + instructions
-}
-func conversation(history []Message, prompt string) ([]saigetypes.Message, error) {
-	out := make([]saigetypes.Message, 0, len(history)+1)
-	for _, m := range history {
-		if strings.TrimSpace(m.Text) == "" {
-			return nil, fmt.Errorf("%w: empty input message", ErrInvalid)
-		}
-		switch m.Role {
-		case RoleUser:
-			out = append(out, saigetypes.UserMsg(saigetypes.Text(m.Text)))
-		case RoleAssistant:
-			out = append(out, saigetypes.AssistantMsg(saigetypes.Text(m.Text)))
-		default:
-			return nil, fmt.Errorf("%w: input role %q is not user or assistant", ErrInvalid, m.Role)
-		}
-	}
-	return append(out, saigetypes.UserMsg(saigetypes.Text(prompt))), nil
 }

@@ -89,6 +89,13 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if err := sw.retry(s.retry); err != nil {
 		return
 	}
+	// Shutdown also closes the receive pump. Whichever select case wins,
+	// tell the client why its stream ended before releasing the connection.
+	defer func() {
+		if s.draining.Load() {
+			_ = sw.comment(": draining")
+		}
+	}()
 
 	events, failures := recvPump(ctx, stream)
 	heartbeat := time.NewTicker(s.heartbeat)
@@ -97,12 +104,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Draining is worth telling the client about: it will reconnect on
-			// its own, and the comment makes the reason visible in a browser's
-			// network log instead of looking like a dropped connection.
-			if s.draining.Load() {
-				_ = sw.comment(": draining")
-			}
 			return
 
 		case <-heartbeat.C:
@@ -119,10 +120,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 
-		case e, ok := <-events:
-			if !ok {
-				return
-			}
+		case e := <-events:
 			// The bus addresses; it does not authorize. This is the check that
 			// keeps one tenant's stream out of another's browser.
 			if e.Tenant != id.Tenant {
@@ -151,7 +149,9 @@ func recvPump(ctx context.Context, stream bus.Stream) (<-chan envelope.Event, <-
 	events := make(chan envelope.Event)
 	failures := make(chan error, 1)
 	go func() {
-		defer close(events)
+		// Completion is signalled only by failures or ctx.Done. Closing
+		// events too would let the handler miss a queued failure and its
+		// reconnect hint when select chooses the closed channel first.
 		for {
 			e, err := stream.Recv(ctx)
 			if err != nil {

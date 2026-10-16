@@ -122,6 +122,25 @@ type AgentSpec struct {
 	Tools        []string `json:"tools,omitempty"`
 	Sources      []Source `json:"sources,omitempty"`
 	Access       Access   `json:"access,omitzero"`
+	// Approvals names the tools whose every call waits for a person to
+	// approve it. Each must be a tool the agent is granted: one in Tools, or
+	// the delegation tool "tag_<agent>" of an agent in Access.Spawn. A run
+	// parks on the call and resumes with the person's decision; see the
+	// runtime's "Parking a run on a person".
+	Approvals []string `json:"approvals,omitempty"`
+	// Approvers, when set, are the only people who may answer an approval:
+	// principals as the host names them ("ana", "slack:U1"), or roles as
+	// "role:<name>", which the host resolves (the runtime's WithRoles).
+	// Empty lets anyone in the tenant approve, except the person whose
+	// request raised the call.
+	Approvers []string `json:"approvers,omitempty"`
+	// SelfApproval lets the person whose request raised a call approve it.
+	// Off by default: an approval is a second pair of eyes.
+	SelfApproval bool `json:"self_approval,omitempty"`
+	// Answerers, when set, are the only people who may answer a choice or
+	// a reply the agent asks with ask_person, named as Approvers are. Empty
+	// lets anyone in the tenant answer, the requester included.
+	Answerers []string `json:"answerers,omitempty"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in. Options are
@@ -216,6 +235,9 @@ func (r Revision) Clone() Revision {
 // Clone returns a deep copy of the definition.
 func (s AgentSpec) Clone() AgentSpec {
 	s.Tools = slices.Clone(s.Tools)
+	s.Approvals = slices.Clone(s.Approvals)
+	s.Approvers = slices.Clone(s.Approvers)
+	s.Answerers = slices.Clone(s.Answerers)
 	s.Access.Spawn = slices.Clone(s.Access.Spawn)
 	s.Access.WorkspaceAreas = slices.Clone(s.Access.WorkspaceAreas)
 	if s.Sources != nil {
@@ -254,6 +276,10 @@ func (s AgentSpec) Normalize() AgentSpec {
 		Provider:     NormalizeName(s.Provider),
 		SystemPrompt: strings.TrimSpace(s.SystemPrompt),
 		Tools:        normalizeSet(s.Tools, false),
+		Approvals:    normalizeSet(s.Approvals, false),
+		Approvers:    normalizeSet(s.Approvers, false),
+		SelfApproval: s.SelfApproval,
+		Answerers:    normalizeSet(s.Answerers, false),
 		Access: Access{
 			Spawn:          normalizeSet(s.Access.Spawn, true),
 			WorkspaceAreas: normalizeSet(s.Access.WorkspaceAreas, false),
@@ -317,6 +343,11 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	if _, err := topic.Agent(c.Name); err != nil {
 		return fmt.Errorf("%w: agent name %q is not addressable: %w", ErrInvalid, c.Name, err)
 	}
+	// One name is the bus's own. Requests addressed to a run travel under it,
+	// and an agent by that name would publish its events into them.
+	if c.Name == topic.ControlName {
+		return fmt.Errorf("%w: agent name %q is reserved for control topics", ErrInvalid, c.Name)
+	}
 	if !slices.ContainsFunc(providers, func(p string) bool { return strings.EqualFold(p, c.Provider) }) {
 		return fmt.Errorf("%w: agent %q names provider %q; this deployment knows %s", ErrInvalid, c.Name, c.Provider, list(providers))
 	}
@@ -325,6 +356,30 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	}
 	if err := uniqueNonEmpty("spawn grant", c.Name, c.Access.Spawn); err != nil {
 		return err
+	}
+	if err := uniqueNonEmpty("approval", c.Name, c.Approvals); err != nil {
+		return err
+	}
+	if err := uniqueNonEmpty("approver", c.Name, c.Approvers); err != nil {
+		return err
+	}
+	if err := uniqueNonEmpty("answerer", c.Name, c.Answerers); err != nil {
+		return err
+	}
+	if len(c.Approvals) == 0 && (len(c.Approvers) > 0 || c.SelfApproval) {
+		return fmt.Errorf("%w: agent %q names who may approve but requires no approvals", ErrInvalid, c.Name)
+	}
+	for _, name := range c.Approvals {
+		// An approval for a tool the agent cannot call would never be asked,
+		// and a definition that reads as guarded and is not is worse than one
+		// that is refused.
+		granted := slices.Contains(c.Tools, name)
+		if target, ok := strings.CutPrefix(name, "tag_"); ok && slices.Contains(c.Access.Spawn, target) {
+			granted = true
+		}
+		if !granted {
+			return fmt.Errorf("%w: agent %q requires approval for %q, which is not a tool it is granted", ErrInvalid, c.Name, name)
+		}
 	}
 	if err := uniqueNonEmpty("workspace area", c.Name, c.Access.WorkspaceAreas); err != nil {
 		return err

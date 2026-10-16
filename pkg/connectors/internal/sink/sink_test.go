@@ -463,3 +463,65 @@ func isValidUTF8(s string) bool {
 	}
 	return true
 }
+
+// A stopped run is written at once, like any terminal event, and the message
+// says it was stopped: in the header, and again under the partial answer with
+// the reason, so nobody reads half an answer as a whole one or as an error.
+func TestAStoppedRunIsFlushedAndRenderedAsStopped(t *testing.T) {
+	surface := newFakeSurface()
+	now := time.Unix(1700000000, 0)
+	eng := sink.New(surface, layout,
+		sink.WithInterval(time.Hour),
+		sink.WithClock(func() time.Time { return now }),
+	)
+	ctx := context.Background()
+	if err := eng.Deliver(ctx, target, ev(1, envelope.KindStarted, "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Deliver(ctx, target, text(2, "Half an answer")); err != nil {
+		t.Fatal(err)
+	}
+	stopped := ev(3, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped\nby a user","by":"slack:U1"}`)
+	if err := eng.Deliver(ctx, target, stopped); err != nil {
+		t.Fatal(err)
+	}
+	// Redelivery edits nothing and posts nothing.
+	if err := eng.Deliver(ctx, target, stopped); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := surface.count(); got != 1 {
+		t.Fatalf("%d messages, want the one the run owns", got)
+	}
+	if got := len(surface.calls()); got != 2 {
+		t.Fatalf("%d writes, want the first event and the stop: %v", got, surface.calls())
+	}
+	handle, _ := eng.Handle("run_1", target)
+	want := "docs-bot (stopped)\n\nHalf an answer\n\nstopped: Stopped by a user"
+	if body := surface.body(handle); body != want {
+		t.Fatalf("body = %q\nwant   %q", body, want)
+	}
+	for _, wrong := range []string{"(done)", "(working)", "failed", "slack:U1"} {
+		if strings.Contains(surface.body(handle), wrong) {
+			t.Errorf("a stopped run's message contains %q", wrong)
+		}
+	}
+}
+
+// With nothing said and no reason given, a stopped run still renders as
+// stopped rather than as an empty message or one that looks unfinished.
+func TestAStoppedRunWithNothingToShowStillSaysItStopped(t *testing.T) {
+	d := render.New()
+	d.Apply(ev(1, envelope.KindStarted, ""))
+	d.Apply(ev(2, envelope.KindStopped, `{}`))
+	if got, want := layout(d.View()), "docs-bot (stopped)\n\nstopped"; got != want {
+		t.Fatalf("layout = %q, want %q", got, want)
+	}
+	if got := sink.StatusLabel(render.StatusStopped); got != "stopped" {
+		t.Errorf("StatusLabel = %q", got)
+	}
+	escaped := sink.MapText(render.View{Reason: "a<b"}, func(s string) string { return strings.ReplaceAll(s, "<", "&lt;") })
+	if escaped.Reason != "a&lt;b" {
+		t.Errorf("the reason is not escaped with the rest of the prose: %q", escaped.Reason)
+	}
+}

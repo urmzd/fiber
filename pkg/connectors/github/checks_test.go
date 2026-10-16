@@ -171,3 +171,31 @@ func TestCompletedChecksUseApplicationConclusionOrDefaultToNeutral(t *testing.T)
 		})
 	}
 }
+
+// A stopped run finishes its check as cancelled: over, on purpose, and neither
+// a pass nor a failure. The application's conclusion is not asked, because
+// there is no finished answer for it to judge.
+func TestAStoppedRunFinishesItsCheckAsCancelled(t *testing.T) {
+	fake := github.NewFake()
+	c, err := github.New(github.Config{API: fake, Checks: true, Interval: -1, Conclusion: func(github.View) string {
+		t.Error("the conclusion callback ran for a stopped run")
+		return "success"
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := address.MustParse("github://acme/repo/pull/42").WithParam("head_sha", commitSHA)
+	if err := c.Deliver(context.Background(), target, event(1, envelope.KindStarted, `{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Deliver(context.Background(), target, event(2, envelope.KindStopped, `{"text":"Half a review","reason":"Stopped by a user"}`)); err != nil {
+		t.Fatal(err)
+	}
+	checks := fake.Checks()
+	if len(checks) != 1 || checks[0].Check.Status != "completed" || checks[0].Check.Conclusion != "cancelled" {
+		t.Fatalf("checks = %+v; want completed/cancelled", checks)
+	}
+	if title := checks[0].Check.Output.Title; title != "stopped" {
+		t.Errorf("check title = %q, want stopped", title)
+	}
+}

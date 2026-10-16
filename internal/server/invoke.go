@@ -10,6 +10,7 @@ import (
 	"github.com/urmzd/legatus/pkg/metrics"
 
 	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/bus"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/topic"
@@ -66,6 +67,9 @@ const (
 	StatusParked    Status = "parked"
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
+	// StatusStopped is a run that ended because it was asked to. It is
+	// terminal, and it is neither completed nor failed.
+	StatusStopped Status = "stopped"
 )
 
 // Run is the durable record of one invocation, as the edge renders it. It is a
@@ -81,6 +85,16 @@ type Run struct {
 	Tag     envelope.Tag
 	LastSeq uint64
 	Error   string
+	// StopReason and StoppedBy say why a stopped run was stopped and who
+	// asked. Empty unless Status is StatusStopped.
+	StopReason string
+	StoppedBy  string
+	// Usage is what the run spent, nil when nothing is recorded yet: while
+	// it executes, or for a run recorded before usage was.
+	Usage *payload.RunUsage
+	// Question is what the run is waiting on a person for, set while
+	// Status is StatusParked on a question.
+	Question *payload.Question
 
 	CreatedAt time.Time
 	StartedAt time.Time
@@ -100,11 +114,12 @@ type RunReader interface {
 
 // invokeService serves mandatum.v1.InvokeService: the write path.
 type invokeService struct {
-	invoker Invoker
-	runs    RunReader
-	bus     bus.Bus
-	srv     *Server
-	log     *slog.Logger
+	invoker  Invoker
+	runs     RunReader
+	answerer Answerer
+	bus      bus.Bus
+	srv      *Server
+	log      *slog.Logger
 }
 
 // Invoke accepts a tag and returns as soon as the run is durable.
@@ -117,7 +132,7 @@ func (s *invokeService) Invoke(ctx context.Context, req *connect.Request[mandatu
 		return nil, connect.NewError(connect.CodeUnimplemented,
 			fmt.Errorf("invoke: %w: no runtime is configured", ErrUnimplemented))
 	}
-	tag, err := s.tag(req.Msg, id)
+	tag, err := s.tag(ctx, req.Msg, id)
 	if err != nil {
 		return nil, fail(s.log, "invoke", err)
 	}
@@ -150,7 +165,7 @@ func (s *invokeService) InvokeStream(ctx context.Context, req *connect.Request[m
 		return connect.NewError(connect.CodeUnimplemented,
 			fmt.Errorf("invoke stream: %w: it needs both a runtime and a bus", ErrUnimplemented))
 	}
-	tag, err := s.tag(req.Msg, id)
+	tag, err := s.tag(ctx, req.Msg, id)
 	if err != nil {
 		return fail(s.log, "invoke stream", err)
 	}
@@ -199,16 +214,25 @@ func (s *invokeService) GetRun(ctx context.Context, req *connect.Request[mandatu
 // so there is nothing to merge on the protobuf path, but a hand-rolled JSON body
 // can still carry one — Connect's JSON codec discards unknown fields — and an
 // assignment makes the outcome the same either way.
-func (s *invokeService) tag(p *mandatumv1.Tag, id Identity) (envelope.Tag, error) {
+func (s *invokeService) tag(ctx context.Context, p *mandatumv1.Tag, id Identity) (envelope.Tag, error) {
 	tag, err := tagFromProto(p)
 	if err != nil {
 		return envelope.Tag{}, err
 	}
 	tag.Tenant = id.Tenant
+	// The actor is assigned for the same reason the tenant is. Only a
+	// credential trusted to act for others keeps the actor it named, and one
+	// that named nobody is still accountable as itself.
+	if !id.ActAs || tag.Actor.ID == "" {
+		tag.Actor = envelope.Actor{ID: id.Subject}
+	}
 	if tag.At.IsZero() {
 		tag.At = s.srv.now()
 	}
 	if err := tag.Validate(); err != nil {
+		return envelope.Tag{}, err
+	}
+	if err := s.srv.checkAttachments(ctx, id.Tenant, tag.Attachments); err != nil {
 		return envelope.Tag{}, err
 	}
 	return tag, nil

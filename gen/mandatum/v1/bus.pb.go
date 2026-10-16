@@ -105,16 +105,20 @@ type Event struct {
 	// on. Kinds are dotted so a selector can name a whole family ("delta") or one
 	// member ("delta.citation"):
 	//
-	//	delta.text, delta.thinking, delta.tool.call, delta.tool.done,
-	//	delta.citation             streaming output as the agent works
-	//	lifecycle.accepted, lifecycle.started, lifecycle.parked,
-	//	lifecycle.resumed, lifecycle.completed, lifecycle.failed
-	//	                           run lifecycle
-	//	action.taken               the agent changed something on a real surface
-	//	control.created, control.revised, control.deleted
-	//	                           control-plane changes, on the same bus as the
-	//	                           data so a dashboard sees an agent get revised
-	//	                           in the same stream as the runs that follow it
+	//   delta.text, delta.thinking, delta.tool.call, delta.tool.done,
+	//   delta.citation             streaming output as the agent works
+	//   lifecycle.accepted, lifecycle.started, lifecycle.parked,
+	//   lifecycle.resumed, lifecycle.completed, lifecycle.failed,
+	//   lifecycle.stopped          run lifecycle
+	//   control.stop               a request that one run stop, published to
+	//                              agent:_control:stop-<key>, the key a hash of
+	//                              the asker's tenant and the run id, and not
+	//                              to the run's own topic
+	//   action.taken               the agent changed something on a real surface
+	//   control.created, control.revised, control.deleted
+	//                              control-plane changes, on the same bus as the
+	//                              data so a dashboard sees an agent get revised
+	//                              in the same stream as the runs that follow it
 	//
 	// Kind is an open string rather than an enum so that a connector can emit a
 	// kind this contract has not been regenerated for, and so that an unknown

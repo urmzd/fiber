@@ -158,6 +158,7 @@ func TestValidateRejects(t *testing.T) {
 		edit func(*agentspec.AgentSpec)
 	}{
 		{"no model", func(s *agentspec.AgentSpec) { s.Model = "" }},
+		{"the control namespace as a name", func(s *agentspec.AgentSpec) { s.Name = "_control" }},
 		{"no provider", func(s *agentspec.AgentSpec) { s.Provider = "" }},
 		{"unknown provider", func(s *agentspec.AgentSpec) { s.Provider = "gpt-9" }},
 		{"empty system prompt", func(s *agentspec.AgentSpec) { s.SystemPrompt = "  " }},

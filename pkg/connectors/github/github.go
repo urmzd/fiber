@@ -44,7 +44,11 @@ import (
 	"time"
 
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/attachment/intake"
 	"github.com/urmzd/mandatum/pkg/connector"
+	"github.com/urmzd/mandatum/pkg/connectors"
+	"github.com/urmzd/mandatum/pkg/connectors/internal/files"
+	"github.com/urmzd/mandatum/pkg/connectors/internal/httpjson"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/inbound"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
 	"github.com/urmzd/mandatum/pkg/connectors/internal/sink"
@@ -123,6 +127,18 @@ type Config struct {
 
 	// MaxBody bounds an inbound request body. Zero means inbound.DefaultMaxBody.
 	MaxBody int64
+
+	// Tenant is the authorization scope this connector's tags belong to. It
+	// is stamped on every tag it raises, files are stored under it, and a
+	// thread listing (Messages) for any other tenant is refused.
+	Tenant string
+
+	// Files brings in the images and videos referenced in the body that
+	// raised a tag as the tag's attachments (see attachments.go). Needs
+	// Tenant. No credential is sent to a file host: public files need none,
+	// and a private repository's are fetched through signed URLs read from
+	// the API.
+	Files connectors.Files
 }
 
 // Connector is the GitHub peer.
@@ -135,6 +151,11 @@ type Connector struct {
 	engine    *sink.Engine
 	checks    *sink.Engine
 	readRepos map[string]bool
+	// fetcher downloads attached files; nil when file intake is off.
+	fetcher *intake.Fetcher
+	// redirectForTest, set only by tests, points a GitHub file URL at a
+	// local server. It is nil in every deployment.
+	redirectForTest func(string) string
 }
 
 var (
@@ -179,6 +200,14 @@ func New(cfg Config) (*Connector, error) {
 		}
 	}
 
+	if cfg.Files.Enabled() {
+		if cfg.Tenant == "" {
+			return nil, fmt.Errorf("github: file intake needs a tenant to store files under")
+		}
+		c.fetcher = intake.NewFetcher(cfg.Files.Store, fileAllowed,
+			intake.WithHeaders(noHeaders),
+			intake.WithMaxBytes(cfg.Files.Caps.MaxFileBytes))
+	}
 	c.gate = inbound.Gate{Verifier: cfg.Verifier, MaxBody: cfg.MaxBody}
 	interval := cfg.Interval
 	if interval == 0 {
@@ -254,13 +283,25 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tag.Source = tag.Source.WithParam("head_sha", ctx.Subject.Head.SHA)
 		tag.Meta["github_head_sha"] = ctx.Subject.Head.SHA
 	}
+	if c.cfg.Tenant != "" {
+		tag.Tenant = c.cfg.Tenant
+	}
 	if c.cfg.Prepare != nil {
 		if err := c.cfg.Prepare(r.Context(), &tag); err != nil {
 			http.Error(w, "could not prepare GitHub request", http.StatusBadGateway)
 			return
 		}
 	}
-	if err := c.pipe.Send(r.Context(), tag); err != nil {
+	var candidates []intake.Candidate
+	if ref, err := c.ref(tag.Source); err == nil && c.fetcher != nil {
+		kind, id, markdown := bodyOf(event, h)
+		bodyCtx, cancelBody := context.WithTimeout(context.WithoutCancel(r.Context()), httpjson.DefaultTimeout)
+		candidates = c.candidates(bodyCtx, ref, h.Repository.Private, kind, id, markdown)
+		cancelBody()
+	}
+	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, tag.Tenant, &tag, candidates)
+	defer cancel()
+	if err := c.pipe.Send(ctx, tag); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
 		return
 	}

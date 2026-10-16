@@ -22,6 +22,7 @@ type Fake struct {
 	labels    map[string][]string
 	reviews   map[string][]string
 	nextID    int64
+	bodies    map[string]string
 	// Err, when set, fails every call, which is how a test drives the retry path.
 	Err error
 }
@@ -38,6 +39,11 @@ type FakeComment struct {
 	// Edits counts body replacements, which is what "one comment, edited" is
 	// asserted on.
 	Edits int
+	// Login and UserType say who posted it; empty is the app itself. BodyHTML
+	// is the rendered body Comments reports.
+	Login    string
+	UserType string
+	BodyHTML string
 }
 
 // NewFake returns an empty fake GitHub.

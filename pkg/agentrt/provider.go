@@ -53,25 +53,56 @@ type ProviderFunc func(spec Spec) (saigetypes.Provider, error)
 // zero configuration is not process-global state.
 func defaultProviders() map[string]ProviderFunc {
 	return map[string]ProviderFunc{
-		ProviderAnthropic: anthropicProvider,
+		ProviderAnthropic: nil, // resolved per Runner: it needs the cache lifetime
 		ProviderOllama:    ollamaProvider,
 		ProviderOffline:   nil, // resolved per Runner: it needs the script
 	}
 }
 
-func anthropicProvider(spec Spec) (saigetypes.Provider, error) {
-	key := os.Getenv(EnvAnthropicKey)
-	if key == "" {
-		return nil, fmt.Errorf("%w: agent %q asks for the %s provider but %s is unset", ErrInvalid, spec.Name, ProviderAnthropic, EnvAnthropicKey)
+// anthropicProvider builds the Anthropic provider with prompt caching at the
+// given lifetime (see WithPromptCache).
+func anthropicProvider(cacheTTL string) ProviderFunc {
+	return func(spec Spec) (saigetypes.Provider, error) {
+		key := os.Getenv(EnvAnthropicKey)
+		if key == "" {
+			return nil, fmt.Errorf("%w: agent %q asks for the %s provider but %s is unset", ErrInvalid, spec.Name, ProviderAnthropic, EnvAnthropicKey)
+		}
+		if spec.Model == "" {
+			return nil, fmt.Errorf("%w: agent %q asks for the %s provider with no model", ErrInvalid, spec.Name, ProviderAnthropic)
+		}
+		a, err := newAnthropic(key, spec.Model, cacheTTL)
+		if err != nil {
+			return nil, fmt.Errorf("%w: agent %q: %v", ErrInvalid, spec.Name, err)
+		}
+		return withRetry(a)
 	}
-	if spec.Model == "" {
-		return nil, fmt.Errorf("%w: agent %q asks for the %s provider with no model", ErrInvalid, spec.Name, ProviderAnthropic)
-	}
-	a, err := anthropic.New(anthropic.Config{APIKey: key, Model: saigetypes.ModelID(spec.Model)})
+}
+
+// newAnthropic builds the adapter, with cache breakpoints when the model
+// supports them.
+//
+// The capability is checked here rather than left to the adapter because the
+// adapter checks it per request and fails the request: an agent pinned to a
+// model without cache breakpoints would build cleanly and then fail every
+// call. Caching is an optimization, so a model that cannot do it runs
+// uncached instead.
+//
+// The policy is saige's default: a breakpoint after the tools, after the
+// system prompt, and on the trailing message. Anthropic orders a request
+// tools, system, messages, which is the stable-to-volatile order this package
+// lays a turn out in, so each breakpoint ends a longer stable prefix than the
+// one before it.
+func newAnthropic(key, model, cacheTTL string, opts ...anthropic.Option) (*anthropic.Adapter, error) {
+	cfg := anthropic.Config{APIKey: key, Model: saigetypes.ModelID(model)}
+	a, err := anthropic.New(cfg, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("%w: agent %q: %v", ErrInvalid, spec.Name, err)
+		return nil, err
 	}
-	return withRetry(a)
+	if cacheTTL == PromptCacheOff || !a.Capabilities().Supports(saigetypes.CapPromptCacheMarkers) {
+		return a, nil
+	}
+	return anthropic.New(cfg, append(opts[:len(opts):len(opts)],
+		anthropic.WithPromptCachePolicy(anthropic.DefaultPromptCachePolicy(cacheTTL)))...)
 }
 
 func ollamaProvider(spec Spec) (saigetypes.Provider, error) {

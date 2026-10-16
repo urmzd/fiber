@@ -26,6 +26,7 @@ func newTagCmd() *cobra.Command {
 		deliver []string
 		kinds   []string
 		meta    []string
+		attach  []string
 		origin  string
 		detach  bool
 	)
@@ -75,6 +76,14 @@ func newTagCmd() *cobra.Command {
 				Deliver: routes,
 				Meta:    metaMap,
 				At:      timestamppb.New(time.Now()),
+			}
+
+			for _, path := range attach {
+				att, err := cl.upload(cmd.Context(), path)
+				if err != nil {
+					return err
+				}
+				tag.Attachments = append(tag.Attachments, att)
 			}
 
 			if detach {
@@ -146,6 +155,8 @@ func newTagCmd() *cobra.Command {
 		"Deliver to an address, optionally '|kind[,kind]' filtered (repeatable)")
 	cmd.Flags().StringSliceVar(&kinds, "kinds", nil,
 		"Only print these event kinds; families match, e.g. 'delta'")
+	cmd.Flags().StringArrayVar(&attach, "attach", nil,
+		"File to send with the request (repeatable)")
 	cmd.Flags().StringArrayVar(&meta, "meta", nil,
 		"Context for the agent's tools as key=value (repeatable)")
 	cmd.Flags().StringVar(&origin, "origin", "cli",

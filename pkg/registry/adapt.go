@@ -92,7 +92,7 @@ func (a serverStore) History(ctx context.Context, tenant, name string) ([]server
 }
 
 func (a serverStore) Delete(ctx context.Context, tenant, name string) error {
-	return serverError(a.store.Delete(ctx, tenant, name))
+	return serverError(a.store.Delete(ctx, tenant, name, 0))
 }
 
 // serverError maps a registry sentinel onto the server's. An error that matches
@@ -123,6 +123,10 @@ func fromServerSpec(s server.Spec) agentspec.AgentSpec {
 		Provider:     s.Provider,
 		SystemPrompt: s.SystemPrompt,
 		Tools:        s.Tools,
+		Approvals:    s.Approvals,
+		Approvers:    s.Approvers,
+		SelfApproval: s.SelfApproval,
+		Answerers:    s.Answerers,
 		Access: agentspec.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -149,6 +153,10 @@ func toServerSpec(s agentspec.AgentSpec) server.Spec {
 		Provider:     s.Provider,
 		SystemPrompt: s.SystemPrompt,
 		Tools:        s.Tools,
+		Approvals:    s.Approvals,
+		Approvers:    s.Approvers,
+		SelfApproval: s.SelfApproval,
+		Answerers:    s.Answerers,
 		Access: server.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -218,6 +226,10 @@ func toRuntimeRevision(r agentspec.Revision) agentrt.Revision {
 		Provider:     r.Spec.Provider,
 		SystemPrompt: r.Spec.SystemPrompt,
 		Tools:        r.Spec.Tools,
+		Approvals:    r.Spec.Approvals,
+		Approvers:    r.Spec.Approvers,
+		SelfApproval: r.Spec.SelfApproval,
+		Answerers:    r.Spec.Answerers,
 		Access: agentrt.Access{
 			Spawn:          r.Spec.Access.Spawn,
 			WorkspaceAreas: r.Spec.Access.WorkspaceAreas,

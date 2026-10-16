@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -83,6 +84,46 @@ func TestInvokeForwardsTheTagWithTheServersTenant(t *testing.T) {
 }
 
 // A redelivery is answered with the run the first delivery created.
+// The actor decides who approved a change and whose name a revision carries,
+// so it comes from the credential. A caller that fills in someone else's id is
+// recorded as itself; only a credential trusted to act for others keeps the
+// actor it named, and even that one is accountable as itself when it names
+// nobody.
+func TestTheActorComesFromTheCredentialUnlessItMayActForOthers(t *testing.T) {
+	cases := []struct {
+		name, token string
+		claimed     *mandatumv1.Actor
+		want        envelope.Actor
+	}{
+		{"a plain credential cannot claim another actor", tokenAcme,
+			&mandatumv1.Actor{Id: "U1", Display: "Alice"}, envelope.Actor{ID: subjectAcme}},
+		{"a plain credential that names nobody is itself", tokenAcme,
+			nil, envelope.Actor{ID: subjectAcme}},
+		{"a surface credential keeps the actor it names", tokenSurface,
+			&mandatumv1.Actor{Id: "U1", Display: "Alice"}, envelope.Actor{ID: "U1", Display: "Alice"}},
+		{"a surface credential that names nobody is itself", tokenSurface,
+			nil, envelope.Actor{ID: "slack-surface"}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			msg := tagMsg()
+			msg.Id = fmt.Sprintf("actor-%d", i)
+			msg.Actor = tc.claimed
+			if _, err := h.invokeClient(tc.token).Invoke(context.Background(), connect.NewRequest(msg)); err != nil {
+				t.Fatalf("invoke: %v", err)
+			}
+			accepted := h.invoker.accepted()
+			if len(accepted) != 1 {
+				t.Fatalf("want one accepted tag, got %d", len(accepted))
+			}
+			if got := accepted[0].Actor; got != tc.want {
+				t.Errorf("actor: got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInvokeIsAnsweredIdempotentlyForARedeliveredTag(t *testing.T) {
 	h := newHarness(t, nil)
 	ctx := context.Background()
@@ -130,6 +171,7 @@ func TestInvokeStreamEndsOnTheTerminalLifecycleEvent(t *testing.T) {
 	tests := map[string]envelope.Kind{
 		"completed": envelope.KindCompleted,
 		"failed":    envelope.KindFailed,
+		"stopped":   envelope.KindStopped,
 	}
 	for name, terminal := range tests {
 		t.Run(name, func(t *testing.T) {

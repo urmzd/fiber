@@ -1,0 +1,74 @@
+# The whole system on one machine: mandatum, the Postgres its agent registry
+# lives in, and the Redis its bus runs on.
+#
+#   docker compose up --build --wait
+#   make e2e
+#
+# Everything that has to outlive the process does: agent definitions and the
+# run ledger and queue are in Postgres, and the bus is on Redis. A run in flight
+# when mandatum stops is reclaimed when its lease expires.
+
+name: mandatum
+
+services:
+  postgres:
+    # Postgres 17 with the pgvector extension available. The registry uses plain
+    # tables; the extension is there for retrieval work and costs nothing unused.
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: mandatum
+      POSTGRES_PASSWORD: mandatum
+      POSTGRES_DB: mandatum
+    ports:
+      - "127.0.0.1:${MANDATUM_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mandatum -d mandatum"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${MANDATUM_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mandatum:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MANDATUM_POSTGRES_URL: postgres://mandatum:mandatum@postgres:5432/mandatum
+      MANDATUM_REDIS_URL: redis://redis:6379/0
+      # A fixed development credential so the CLI and the server agree. Set a
+      # real one in the environment for anything that is not a laptop.
+      MANDATUM_TOKEN: ${MANDATUM_TOKEN:-mandatum-dev-token}
+      MANDATUM_TENANT: ${MANDATUM_TENANT:-default}
+      # Optional. Without it, agents on the "offline" provider still run.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "127.0.0.1:${MANDATUM_PORT:-8383}:8383"
+    volumes:
+      - workspace:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8383/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres:
+  redis:
+  workspace:

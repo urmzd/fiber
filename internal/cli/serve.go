@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +47,8 @@ func newServeCmd() *cobra.Command {
 			"configures. It is the composition root, and the only command that owns state.\n\n" +
 			"With no configuration it uses the in-memory registry, bus, ledger and queue.\n" +
 			"Those are complete implementations, not stubs; they simply do not outlive the\n" +
-			"process. Set $" + EnvRedis + " to put the bus on Redis Streams.",
+			"process. Set $" + EnvPostgres + " to keep agent definitions in Postgres and\n" +
+			"$" + EnvRedis + " to put the bus on Redis Streams.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -100,14 +102,30 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		return err
 	}
 
+	emb, err := embeddingsFromEnv()
+	if err != nil {
+		return err
+	}
+
+	compact, err := intFromEnv(EnvCompactTokens)
+	if err != nil {
+		return err
+	}
+
 	c, err := newCore(coreConfig{
-		Tenant:      opts.tenant,
-		Redis:       os.Getenv(EnvRedis),
-		Workspace:   os.Getenv(EnvWorkspace),
-		Schedules:   scheds,
-		Concurrency: opts.concurrency,
-		Log:         log,
-		Metrics:     rec,
+		Tenant:     opts.tenant,
+		Redis:      os.Getenv(EnvRedis),
+		Postgres:   os.Getenv(EnvPostgres),
+		Embeddings: emb,
+
+		AuthorProvider: strings.TrimSpace(os.Getenv(EnvAuthorProvider)),
+		AuthorModel:    strings.TrimSpace(os.Getenv(EnvAuthorModel)),
+		CompactTokens:  compact,
+		Workspace:      os.Getenv(EnvWorkspace),
+		Schedules:      scheds,
+		Concurrency:    opts.concurrency,
+		Log:            log,
+		Metrics:        rec,
 	})
 	if err != nil {
 		return err
@@ -140,10 +158,14 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		// grows a dependency on the other's vocabulary.
 		Store:   registry.ServerStore(c.store),
 		Bus:     c.broker,
+		Blobs:   c.blobs,
 		Invoker: c,
 		Runs:    c,
-		Metrics: rec,
-		Logger:  log,
+		Stopper: c,
+		// The questions runs park on are answered through the runtime too.
+		Answerer: c,
+		Metrics:  rec,
+		Logger:   log,
 	})
 	if err != nil {
 		return fmt.Errorf("cli: server: %w", err)
@@ -215,6 +237,12 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 func announce(ui *ui, c *core, opts serveOptions, addr, token string, generated bool) {
 	ui.logf("%s listening on %s\n", ui.bold("mandatum"), ui.cyan("http://"+addr))
 	ui.logf("  tenant     %s\n", opts.tenant)
+	reg := "memory"
+	if os.Getenv(EnvPostgres) != "" {
+		reg = "postgres"
+	}
+	ui.logf("  registry   %s\n", reg)
+	ui.logf("  runs       %s\n", reg)
 	bus := "memory"
 	if os.Getenv(EnvRedis) != "" {
 		bus = "redis"
@@ -235,6 +263,19 @@ func announce(ui *ui, c *core, opts serveOptions, addr, token string, generated 
 		ui.logf("    export %s=%s\n", EnvToken, token)
 	}
 	ui.logf("\n")
+}
+
+// intFromEnv reads a non-negative integer, treating unset as zero.
+func intFromEnv(key string) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, usagef("$%s must be a non-negative integer, got %q", key, raw)
+	}
+	return n, nil
 }
 
 func onOff(on bool) string {

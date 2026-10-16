@@ -163,9 +163,45 @@ message Tag {
   // and is worth being able to measure.
   google.protobuf.Timestamp at = 9;
 
+  // Attachments are the files that arrived with the tag, in the order the
+  // surface listed them. Each is a reference to content already in the
+  // server's blob store under the caller's tenant, never the bytes: a tag is
+  // the durable input of a run and is replayed on every attempt, so it has to
+  // stay small. A reference to a blob the tenant does not hold is rejected.
+  repeated Attachment attachments = 10;
+
   // Reserved for growth. Note that tenant will never be carved from this range:
   // see the message comment.
-  reserved 10 to 24;
+  reserved 11 to 24;
+}
+
+// Attachment is a reference to one stored file. The digest is the identity:
+// the same bytes uploaded twice are one blob, and a run that is replayed reads
+// exactly the bytes its first attempt read.
+message Attachment {
+  // Digest is the lowercase hex SHA-256 of the content.
+  string digest = 1;
+
+  // MediaType is the type detected from the content when it was stored. It is
+  // a hint for display: the server sniffs the stored bytes again before a
+  // model sees them and does not trust this field.
+  string media_type = 2;
+
+  // Name is the file name the surface gave, for display.
+  string name = 3;
+
+  // Size is the content length in bytes.
+  int64 size = 4;
+
+  // Origin is where the file was attached, when that differs from the tag's
+  // source or is worth citing.
+  Address origin = 5;
+
+  // Alt is the uploader's description of the file, if the surface has one.
+  string alt = 6;
+
+  // Reserved for growth.
+  reserved 7 to 15;
 }
 
 // InvokeResponse acknowledges an accepted tag. It returns as soon as the run is
@@ -227,8 +263,14 @@ enum RunStatus {
   // Terminal, and error carries why.
   RUN_STATUS_FAILED = 5;
 
+  // Stopped means the run was asked to stop and wrapped its turn up before it
+  // finished. Terminal, and neither a completion nor a failure: what the agent
+  // had said so far was kept, and it is never retried. stop_reason and
+  // stopped_by say why and who asked.
+  RUN_STATUS_STOPPED = 6;
+
   // Reserved for growth.
-  reserved 6 to 15;
+  reserved 7 to 15;
 }
 
 // Run is the durable record of one invocation: what was asked, which definition
@@ -290,8 +332,254 @@ message Run {
   // EndedAt is when the run reached a terminal state. Unset until then.
   google.protobuf.Timestamp ended_at = 13;
 
+  // StopReason is why the run was stopped, in the words of whoever asked,
+  // empty unless status is RUN_STATUS_STOPPED. It may be empty then too: a
+  // reason is optional.
+  string stop_reason = 14;
+
+  // StoppedBy is who asked the run to stop, empty unless status is
+  // RUN_STATUS_STOPPED. It is the asking credential's subject, or the person a
+  // surface trusted to act for others named.
+  string stopped_by = 15;
+
+  // Usage is what the run spent: every model call of every attempt, and every
+  // sub-task and child run it delegated to, each counted once. Unset while
+  // the run is executing, and for a run recorded before usage was. For a
+  // failed run it is what its attempts spent before they failed.
+  RunUsage usage = 16;
+
+  // PendingQuestion is what the run is waiting on a person for, set while
+  // status is RUN_STATUS_PARKED on a question. Answer it with
+  // InvokeService.Answer.
+  Question pending_question = 17;
+
   // Reserved for growth.
-  reserved 14 to 31;
+  reserved 18 to 31;
+}
+
+// Question is what a parked run is waiting on a person for: an approval of a
+// tool call, a choice among options, or a free-text reply. It is published on
+// lifecycle.parked when the run parks and kept on the run until it is
+// resolved.
+message Question {
+  // Id identifies the question within its run. An answer names it.
+  string id = 1;
+
+  // Kind is "approval", "choice" or "reply".
+  string kind = 2;
+
+  // Agent is the agent that asked.
+  string agent = 3;
+
+  // Prompt is the question, for a person.
+  string prompt = 4;
+
+  // Options are the answers a choice offers. An answer must be one of them.
+  repeated string options = 5;
+
+  // Tool is the call an approval is about.
+  QuestionTool tool = 6;
+
+  // AskedOf is a hint at who should answer, as a role or a principal. It is
+  // not an authorization: the host decides who may answer.
+  string asked_of = 7;
+
+  // ExpiresAt is when an unanswered question takes its default.
+  google.protobuf.Timestamp expires_at = 8;
+
+  // DefaultAnswer is what an unanswered question resolves to when it
+  // expires: a denial for an approval, the stated default for a choice or a
+  // reply. Unset when there is none, and the agent is then told nobody
+  // answered.
+  Answer default_answer = 9;
+
+  // AskedAt is when the run asked.
+  google.protobuf.Timestamp asked_at = 10;
+
+  // Reserved for growth.
+  reserved 11 to 19;
+}
+
+// QuestionTool is the tool call an approval asks about.
+message QuestionTool {
+  // Name is the tool.
+  string name = 1;
+
+  // CallId is the model's id for the call.
+  string call_id = 2;
+
+  // ArgumentsJson is the arguments the model asked for, as a JSON object.
+  string arguments_json = 3;
+
+  // SchemaJson is the tool's parameter schema, as JSON Schema. Edited
+  // arguments must satisfy it.
+  string schema_json = 4;
+
+  // Reserved for growth.
+  reserved 5 to 9;
+}
+
+// Answer is a person's answer to a Question, or the question's default.
+message Answer {
+  // QuestionId is the question answered. Set by the server.
+  string question_id = 1;
+
+  // Decision is "approve" or "deny", for an approval.
+  string decision = 2;
+
+  // ArgumentsJson replaces the model's arguments on an approval, as a JSON
+  // object that satisfies the tool's schema. Empty keeps the model's.
+  string arguments_json = 3;
+
+  // Choice is the option chosen, for a choice.
+  string choice = 4;
+
+  // Text is the reply, for a reply.
+  string text = 5;
+
+  // Note is anything the person added. The model is shown a denial's note.
+  string note = 6;
+
+  // By is who answered. Set by the server from the caller's credential.
+  string by = 7;
+
+  // AnsweredAt is when the answer was recorded. Set by the server.
+  google.protobuf.Timestamp answered_at = 8;
+
+  // Expired is set when nobody answered in time and this is the question's
+  // default.
+  bool expired = 9;
+
+  // Reserved for growth.
+  reserved 10 to 19;
+}
+
+// AnswerRequest answers a question a run is parked on.
+message AnswerRequest {
+  // RunId is the run. Required.
+  string run_id = 1;
+
+  // QuestionId is the question, as Question.id reported it. Required.
+  string question_id = 2;
+
+  // Answer is the answer. Its question_id, answered_at and expired are
+  // ignored, and so is by unless the credential may act for others.
+  Answer answer = 3;
+
+  // Reserved for growth.
+  reserved 4 to 9;
+}
+
+// AnswerResponse is the answer the question has: this request's, or the one
+// recorded first.
+message AnswerResponse {
+  // Answer is the recorded answer.
+  Answer answer = 1;
+
+  // First reports whether this request's answer is the one recorded. A
+  // second answer to a question is told the first and gets false.
+  bool first = 2;
+
+  // Reserved for growth.
+  reserved 3 to 9;
+}
+
+// RunUsage is what a run spent, split by who spent it. Each model call and
+// each child run is in exactly one of own and children.
+message RunUsage {
+  // Own is the run's own agent's model calls.
+  Usage own = 1;
+
+  // Children is everything the run delegated, at every depth: in-turn
+  // sub-tasks, and child runs a host carried out and reported.
+  Usage children = 2;
+
+  // Total is own and children added: the figure to hold against a limit.
+  Usage total = 3;
+
+  // Context is how full the run's own agent's context was at its latest
+  // model call. Unset when it made none.
+  ContextUsage context = 4;
+
+  // Reserved for growth.
+  reserved 5 to 15;
+}
+
+// Usage is what some model calls cost, summed.
+message Usage {
+  // ModelCalls is the number of model calls counted.
+  int64 model_calls = 1;
+
+  // Requests is the billable provider requests those calls made.
+  int64 requests = 2;
+
+  // PromptTokens is all input: uncached, read from the prompt cache, and
+  // written to it.
+  int64 prompt_tokens = 3;
+
+  // CachedPromptTokens is the part of prompt_tokens read from the prompt
+  // cache.
+  int64 cached_prompt_tokens = 4;
+
+  // CacheWriteTokens is the part of prompt_tokens written to the prompt
+  // cache.
+  int64 cache_write_tokens = 5;
+
+  // CompletionTokens is all output.
+  int64 completion_tokens = 6;
+
+  // Cost is what the calls priced in its currency cost, from saige's price
+  // catalog: the currency of the first priced call counted. Unset when no
+  // call could be priced. A lower bound whenever unpriced_calls is not zero,
+  // and it does not include other_costs.
+  Cost cost = 7;
+
+  // UnpricedCalls counts calls whose tokens are counted above and that have
+  // no cost: no rate card for the model, an unpriced modality, or no tokens
+  // reported. Nothing is estimated for them.
+  int64 unpriced_calls = 8;
+
+  // OtherCosts is what calls priced in currencies other than cost's cost,
+  // one entry per currency in the order first counted. Nothing is converted.
+  repeated Cost other_costs = 9;
+
+  // Reserved for growth.
+  reserved 10 to 15;
+}
+
+// Cost is an amount of money in integer micro-units of a currency: one US
+// dollar is micros 1000000 with currency "USD". Integers, because costs are
+// summed across many calls and compared against limits.
+message Cost {
+  // Micros is the amount in millionths of currency.
+  int64 micros = 1;
+
+  // Currency is an ISO 4217 code.
+  string currency = 2;
+
+  // AsOf is the date the rates were recorded, such as "2026-07-24": the
+  // oldest among the calls summed, and empty when any was priced from a card
+  // with no date.
+  string as_of = 3;
+
+  // Reserved for growth.
+  reserved 4 to 9;
+}
+
+// ContextUsage is how full a context was at one model call.
+message ContextUsage {
+  // Model is the model of that call.
+  string model = 1;
+
+  // Window is the model's input token limit from saige's model catalog, 0
+  // when the catalog does not declare one.
+  int64 window = 2;
+
+  // Tokens is the prompt that call sent, in tokens.
+  int64 tokens = 3;
+
+  // Reserved for growth.
+  reserved 4 to 9;
 }
 
 // GetRunRequest reads one run.
@@ -334,4 +622,15 @@ service InvokeService {
   // tag it was accepted from, and its last event sequence number. It reads the
   // ledger and never touches a worker, so it is safe to poll.
   rpc GetRun(GetRunRequest) returns (Run) {}
+
+  // Answer answers a question a run is parked on and wakes the run. The first
+  // answer recorded is the answer: a second one is told it, with first false.
+  // An answer is checked against its question (a decision is approve or deny,
+  // edited arguments fit the tool's schema, a choice is one offered, a reply
+  // is not empty) and refused with INVALID_ARGUMENT when it does not fit. A
+  // question of another tenant's run is NOT_FOUND, like one that does not
+  // exist; a question whose run was stopped or ended is FAILED_PRECONDITION.
+  // An answer after the question expired records its default, and returns
+  // that.
+  rpc Answer(AnswerRequest) returns (AnswerResponse) {}
 }

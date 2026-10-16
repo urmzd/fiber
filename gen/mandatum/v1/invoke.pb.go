@@ -70,6 +70,11 @@ const (
 	// Failed means the run finished unsuccessfully and will not be retried.
 	// Terminal, and error carries why.
 	RunStatus_RUN_STATUS_FAILED RunStatus = 5
+	// Stopped means the run was asked to stop and wrapped its turn up before it
+	// finished. Terminal, and neither a completion nor a failure: what the agent
+	// had said so far was kept, and it is never retried. stop_reason and
+	// stopped_by say why and who asked.
+	RunStatus_RUN_STATUS_STOPPED RunStatus = 6
 )
 
 // Enum value maps for RunStatus.
@@ -81,6 +86,7 @@ var (
 		3: "RUN_STATUS_PARKED",
 		4: "RUN_STATUS_COMPLETED",
 		5: "RUN_STATUS_FAILED",
+		6: "RUN_STATUS_STOPPED",
 	}
 	RunStatus_value = map[string]int32{
 		"RUN_STATUS_UNSPECIFIED": 0,
@@ -89,6 +95,7 @@ var (
 		"RUN_STATUS_PARKED":      3,
 		"RUN_STATUS_COMPLETED":   4,
 		"RUN_STATUS_FAILED":      5,
+		"RUN_STATUS_STOPPED":     6,
 	}
 )
 
@@ -393,7 +400,13 @@ type Tag struct {
 	// At is when the trigger observed the native event, not when the server
 	// received it. The gap between the two is the delivery latency of the surface
 	// and is worth being able to measure.
-	At            *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=at,proto3" json:"at,omitempty"`
+	At *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=at,proto3" json:"at,omitempty"`
+	// Attachments are the files that arrived with the tag, in the order the
+	// surface listed them. Each is a reference to content already in the
+	// server's blob store under the caller's tenant, never the bytes: a tag is
+	// the durable input of a run and is replayed on every attempt, so it has to
+	// stay small. A reference to a blob the tenant does not hold is rejected.
+	Attachments   []*Attachment `protobuf:"bytes,10,rep,name=attachments,proto3" json:"attachments,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -491,6 +504,109 @@ func (x *Tag) GetAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Tag) GetAttachments() []*Attachment {
+	if x != nil {
+		return x.Attachments
+	}
+	return nil
+}
+
+// Attachment is a reference to one stored file. The digest is the identity:
+// the same bytes uploaded twice are one blob, and a run that is replayed reads
+// exactly the bytes its first attempt read.
+type Attachment struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Digest is the lowercase hex SHA-256 of the content.
+	Digest string `protobuf:"bytes,1,opt,name=digest,proto3" json:"digest,omitempty"`
+	// MediaType is the type detected from the content when it was stored. It is
+	// a hint for display: the server sniffs the stored bytes again before a
+	// model sees them and does not trust this field.
+	MediaType string `protobuf:"bytes,2,opt,name=media_type,json=mediaType,proto3" json:"media_type,omitempty"`
+	// Name is the file name the surface gave, for display.
+	Name string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// Size is the content length in bytes.
+	Size int64 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	// Origin is where the file was attached, when that differs from the tag's
+	// source or is worth citing.
+	Origin *Address `protobuf:"bytes,5,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Alt is the uploader's description of the file, if the surface has one.
+	Alt           string `protobuf:"bytes,6,opt,name=alt,proto3" json:"alt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Attachment) Reset() {
+	*x = Attachment{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Attachment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Attachment) ProtoMessage() {}
+
+func (x *Attachment) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Attachment.ProtoReflect.Descriptor instead.
+func (*Attachment) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Attachment) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *Attachment) GetMediaType() string {
+	if x != nil {
+		return x.MediaType
+	}
+	return ""
+}
+
+func (x *Attachment) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Attachment) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *Attachment) GetOrigin() *Address {
+	if x != nil {
+		return x.Origin
+	}
+	return nil
+}
+
+func (x *Attachment) GetAlt() string {
+	if x != nil {
+		return x.Alt
+	}
+	return ""
+}
+
 // InvokeResponse acknowledges an accepted tag. It returns as soon as the run is
 // durable, before any inference has happened, because the surfaces that raise
 // tags have short timeouts and a run that outlives its HTTP request is the
@@ -518,7 +634,7 @@ type InvokeResponse struct {
 
 func (x *InvokeResponse) Reset() {
 	*x = InvokeResponse{}
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -530,7 +646,7 @@ func (x *InvokeResponse) String() string {
 func (*InvokeResponse) ProtoMessage() {}
 
 func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[4]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -543,7 +659,7 @@ func (x *InvokeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InvokeResponse.ProtoReflect.Descriptor instead.
 func (*InvokeResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{4}
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *InvokeResponse) GetRunId() string {
@@ -620,14 +736,31 @@ type Run struct {
 	// between created_at and started_at is queue latency and nothing else.
 	StartedAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	// EndedAt is when the run reached a terminal state. Unset until then.
-	EndedAt       *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	EndedAt *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
+	// StopReason is why the run was stopped, in the words of whoever asked,
+	// empty unless status is RUN_STATUS_STOPPED. It may be empty then too: a
+	// reason is optional.
+	StopReason string `protobuf:"bytes,14,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
+	// StoppedBy is who asked the run to stop, empty unless status is
+	// RUN_STATUS_STOPPED. It is the asking credential's subject, or the person a
+	// surface trusted to act for others named.
+	StoppedBy string `protobuf:"bytes,15,opt,name=stopped_by,json=stoppedBy,proto3" json:"stopped_by,omitempty"`
+	// Usage is what the run spent: every model call of every attempt, and every
+	// sub-task and child run it delegated to, each counted once. Unset while
+	// the run is executing, and for a run recorded before usage was. For a
+	// failed run it is what its attempts spent before they failed.
+	Usage *RunUsage `protobuf:"bytes,16,opt,name=usage,proto3" json:"usage,omitempty"`
+	// PendingQuestion is what the run is waiting on a person for, set while
+	// status is RUN_STATUS_PARKED on a question. Answer it with
+	// InvokeService.Answer.
+	PendingQuestion *Question `protobuf:"bytes,17,opt,name=pending_question,json=pendingQuestion,proto3" json:"pending_question,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Run) Reset() {
 	*x = Run{}
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -639,7 +772,7 @@ func (x *Run) String() string {
 func (*Run) ProtoMessage() {}
 
 func (x *Run) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[5]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -652,7 +785,7 @@ func (x *Run) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Run.ProtoReflect.Descriptor instead.
 func (*Run) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{5}
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Run) GetRunId() string {
@@ -746,6 +879,820 @@ func (x *Run) GetEndedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Run) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
+}
+
+func (x *Run) GetStoppedBy() string {
+	if x != nil {
+		return x.StoppedBy
+	}
+	return ""
+}
+
+func (x *Run) GetUsage() *RunUsage {
+	if x != nil {
+		return x.Usage
+	}
+	return nil
+}
+
+func (x *Run) GetPendingQuestion() *Question {
+	if x != nil {
+		return x.PendingQuestion
+	}
+	return nil
+}
+
+// Question is what a parked run is waiting on a person for: an approval of a
+// tool call, a choice among options, or a free-text reply. It is published on
+// lifecycle.parked when the run parks and kept on the run until it is
+// resolved.
+type Question struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id identifies the question within its run. An answer names it.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Kind is "approval", "choice" or "reply".
+	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	// Agent is the agent that asked.
+	Agent string `protobuf:"bytes,3,opt,name=agent,proto3" json:"agent,omitempty"`
+	// Prompt is the question, for a person.
+	Prompt string `protobuf:"bytes,4,opt,name=prompt,proto3" json:"prompt,omitempty"`
+	// Options are the answers a choice offers. An answer must be one of them.
+	Options []string `protobuf:"bytes,5,rep,name=options,proto3" json:"options,omitempty"`
+	// Tool is the call an approval is about.
+	Tool *QuestionTool `protobuf:"bytes,6,opt,name=tool,proto3" json:"tool,omitempty"`
+	// AskedOf is a hint at who should answer, as a role or a principal. It is
+	// not an authorization: the host decides who may answer.
+	AskedOf string `protobuf:"bytes,7,opt,name=asked_of,json=askedOf,proto3" json:"asked_of,omitempty"`
+	// ExpiresAt is when an unanswered question takes its default.
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// DefaultAnswer is what an unanswered question resolves to when it
+	// expires: a denial for an approval, the stated default for a choice or a
+	// reply. Unset when there is none, and the agent is then told nobody
+	// answered.
+	DefaultAnswer *Answer `protobuf:"bytes,9,opt,name=default_answer,json=defaultAnswer,proto3" json:"default_answer,omitempty"`
+	// AskedAt is when the run asked.
+	AskedAt       *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=asked_at,json=askedAt,proto3" json:"asked_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Question) Reset() {
+	*x = Question{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Question) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Question) ProtoMessage() {}
+
+func (x *Question) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Question.ProtoReflect.Descriptor instead.
+func (*Question) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Question) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Question) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *Question) GetAgent() string {
+	if x != nil {
+		return x.Agent
+	}
+	return ""
+}
+
+func (x *Question) GetPrompt() string {
+	if x != nil {
+		return x.Prompt
+	}
+	return ""
+}
+
+func (x *Question) GetOptions() []string {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
+func (x *Question) GetTool() *QuestionTool {
+	if x != nil {
+		return x.Tool
+	}
+	return nil
+}
+
+func (x *Question) GetAskedOf() string {
+	if x != nil {
+		return x.AskedOf
+	}
+	return ""
+}
+
+func (x *Question) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *Question) GetDefaultAnswer() *Answer {
+	if x != nil {
+		return x.DefaultAnswer
+	}
+	return nil
+}
+
+func (x *Question) GetAskedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AskedAt
+	}
+	return nil
+}
+
+// QuestionTool is the tool call an approval asks about.
+type QuestionTool struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Name is the tool.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// CallId is the model's id for the call.
+	CallId string `protobuf:"bytes,2,opt,name=call_id,json=callId,proto3" json:"call_id,omitempty"`
+	// ArgumentsJson is the arguments the model asked for, as a JSON object.
+	ArgumentsJson string `protobuf:"bytes,3,opt,name=arguments_json,json=argumentsJson,proto3" json:"arguments_json,omitempty"`
+	// SchemaJson is the tool's parameter schema, as JSON Schema. Edited
+	// arguments must satisfy it.
+	SchemaJson    string `protobuf:"bytes,4,opt,name=schema_json,json=schemaJson,proto3" json:"schema_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QuestionTool) Reset() {
+	*x = QuestionTool{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuestionTool) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuestionTool) ProtoMessage() {}
+
+func (x *QuestionTool) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuestionTool.ProtoReflect.Descriptor instead.
+func (*QuestionTool) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *QuestionTool) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *QuestionTool) GetCallId() string {
+	if x != nil {
+		return x.CallId
+	}
+	return ""
+}
+
+func (x *QuestionTool) GetArgumentsJson() string {
+	if x != nil {
+		return x.ArgumentsJson
+	}
+	return ""
+}
+
+func (x *QuestionTool) GetSchemaJson() string {
+	if x != nil {
+		return x.SchemaJson
+	}
+	return ""
+}
+
+// Answer is a person's answer to a Question, or the question's default.
+type Answer struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// QuestionId is the question answered. Set by the server.
+	QuestionId string `protobuf:"bytes,1,opt,name=question_id,json=questionId,proto3" json:"question_id,omitempty"`
+	// Decision is "approve" or "deny", for an approval.
+	Decision string `protobuf:"bytes,2,opt,name=decision,proto3" json:"decision,omitempty"`
+	// ArgumentsJson replaces the model's arguments on an approval, as a JSON
+	// object that satisfies the tool's schema. Empty keeps the model's.
+	ArgumentsJson string `protobuf:"bytes,3,opt,name=arguments_json,json=argumentsJson,proto3" json:"arguments_json,omitempty"`
+	// Choice is the option chosen, for a choice.
+	Choice string `protobuf:"bytes,4,opt,name=choice,proto3" json:"choice,omitempty"`
+	// Text is the reply, for a reply.
+	Text string `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
+	// Note is anything the person added. The model is shown a denial's note.
+	Note string `protobuf:"bytes,6,opt,name=note,proto3" json:"note,omitempty"`
+	// By is who answered. Set by the server from the caller's credential.
+	By string `protobuf:"bytes,7,opt,name=by,proto3" json:"by,omitempty"`
+	// AnsweredAt is when the answer was recorded. Set by the server.
+	AnsweredAt *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=answered_at,json=answeredAt,proto3" json:"answered_at,omitempty"`
+	// Expired is set when nobody answered in time and this is the question's
+	// default.
+	Expired       bool `protobuf:"varint,9,opt,name=expired,proto3" json:"expired,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Answer) Reset() {
+	*x = Answer{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Answer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Answer) ProtoMessage() {}
+
+func (x *Answer) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Answer.ProtoReflect.Descriptor instead.
+func (*Answer) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Answer) GetQuestionId() string {
+	if x != nil {
+		return x.QuestionId
+	}
+	return ""
+}
+
+func (x *Answer) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *Answer) GetArgumentsJson() string {
+	if x != nil {
+		return x.ArgumentsJson
+	}
+	return ""
+}
+
+func (x *Answer) GetChoice() string {
+	if x != nil {
+		return x.Choice
+	}
+	return ""
+}
+
+func (x *Answer) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *Answer) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
+func (x *Answer) GetBy() string {
+	if x != nil {
+		return x.By
+	}
+	return ""
+}
+
+func (x *Answer) GetAnsweredAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AnsweredAt
+	}
+	return nil
+}
+
+func (x *Answer) GetExpired() bool {
+	if x != nil {
+		return x.Expired
+	}
+	return false
+}
+
+// AnswerRequest answers a question a run is parked on.
+type AnswerRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// RunId is the run. Required.
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// QuestionId is the question, as Question.id reported it. Required.
+	QuestionId string `protobuf:"bytes,2,opt,name=question_id,json=questionId,proto3" json:"question_id,omitempty"`
+	// Answer is the answer. Its question_id, answered_at and expired are
+	// ignored, and so is by unless the credential may act for others.
+	Answer        *Answer `protobuf:"bytes,3,opt,name=answer,proto3" json:"answer,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnswerRequest) Reset() {
+	*x = AnswerRequest{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnswerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnswerRequest) ProtoMessage() {}
+
+func (x *AnswerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnswerRequest.ProtoReflect.Descriptor instead.
+func (*AnswerRequest) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *AnswerRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *AnswerRequest) GetQuestionId() string {
+	if x != nil {
+		return x.QuestionId
+	}
+	return ""
+}
+
+func (x *AnswerRequest) GetAnswer() *Answer {
+	if x != nil {
+		return x.Answer
+	}
+	return nil
+}
+
+// AnswerResponse is the answer the question has: this request's, or the one
+// recorded first.
+type AnswerResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Answer is the recorded answer.
+	Answer *Answer `protobuf:"bytes,1,opt,name=answer,proto3" json:"answer,omitempty"`
+	// First reports whether this request's answer is the one recorded. A
+	// second answer to a question is told the first and gets false.
+	First         bool `protobuf:"varint,2,opt,name=first,proto3" json:"first,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnswerResponse) Reset() {
+	*x = AnswerResponse{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnswerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnswerResponse) ProtoMessage() {}
+
+func (x *AnswerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnswerResponse.ProtoReflect.Descriptor instead.
+func (*AnswerResponse) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *AnswerResponse) GetAnswer() *Answer {
+	if x != nil {
+		return x.Answer
+	}
+	return nil
+}
+
+func (x *AnswerResponse) GetFirst() bool {
+	if x != nil {
+		return x.First
+	}
+	return false
+}
+
+// RunUsage is what a run spent, split by who spent it. Each model call and
+// each child run is in exactly one of own and children.
+type RunUsage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Own is the run's own agent's model calls.
+	Own *Usage `protobuf:"bytes,1,opt,name=own,proto3" json:"own,omitempty"`
+	// Children is everything the run delegated, at every depth: in-turn
+	// sub-tasks, and child runs a host carried out and reported.
+	Children *Usage `protobuf:"bytes,2,opt,name=children,proto3" json:"children,omitempty"`
+	// Total is own and children added: the figure to hold against a limit.
+	Total *Usage `protobuf:"bytes,3,opt,name=total,proto3" json:"total,omitempty"`
+	// Context is how full the run's own agent's context was at its latest
+	// model call. Unset when it made none.
+	Context       *ContextUsage `protobuf:"bytes,4,opt,name=context,proto3" json:"context,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunUsage) Reset() {
+	*x = RunUsage{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunUsage) ProtoMessage() {}
+
+func (x *RunUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunUsage.ProtoReflect.Descriptor instead.
+func (*RunUsage) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RunUsage) GetOwn() *Usage {
+	if x != nil {
+		return x.Own
+	}
+	return nil
+}
+
+func (x *RunUsage) GetChildren() *Usage {
+	if x != nil {
+		return x.Children
+	}
+	return nil
+}
+
+func (x *RunUsage) GetTotal() *Usage {
+	if x != nil {
+		return x.Total
+	}
+	return nil
+}
+
+func (x *RunUsage) GetContext() *ContextUsage {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+// Usage is what some model calls cost, summed.
+type Usage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ModelCalls is the number of model calls counted.
+	ModelCalls int64 `protobuf:"varint,1,opt,name=model_calls,json=modelCalls,proto3" json:"model_calls,omitempty"`
+	// Requests is the billable provider requests those calls made.
+	Requests int64 `protobuf:"varint,2,opt,name=requests,proto3" json:"requests,omitempty"`
+	// PromptTokens is all input: uncached, read from the prompt cache, and
+	// written to it.
+	PromptTokens int64 `protobuf:"varint,3,opt,name=prompt_tokens,json=promptTokens,proto3" json:"prompt_tokens,omitempty"`
+	// CachedPromptTokens is the part of prompt_tokens read from the prompt
+	// cache.
+	CachedPromptTokens int64 `protobuf:"varint,4,opt,name=cached_prompt_tokens,json=cachedPromptTokens,proto3" json:"cached_prompt_tokens,omitempty"`
+	// CacheWriteTokens is the part of prompt_tokens written to the prompt
+	// cache.
+	CacheWriteTokens int64 `protobuf:"varint,5,opt,name=cache_write_tokens,json=cacheWriteTokens,proto3" json:"cache_write_tokens,omitempty"`
+	// CompletionTokens is all output.
+	CompletionTokens int64 `protobuf:"varint,6,opt,name=completion_tokens,json=completionTokens,proto3" json:"completion_tokens,omitempty"`
+	// Cost is what the calls priced in its currency cost, from saige's price
+	// catalog: the currency of the first priced call counted. Unset when no
+	// call could be priced. A lower bound whenever unpriced_calls is not zero,
+	// and it does not include other_costs.
+	Cost *Cost `protobuf:"bytes,7,opt,name=cost,proto3" json:"cost,omitempty"`
+	// UnpricedCalls counts calls whose tokens are counted above and that have
+	// no cost: no rate card for the model, an unpriced modality, or no tokens
+	// reported. Nothing is estimated for them.
+	UnpricedCalls int64 `protobuf:"varint,8,opt,name=unpriced_calls,json=unpricedCalls,proto3" json:"unpriced_calls,omitempty"`
+	// OtherCosts is what calls priced in currencies other than cost's cost,
+	// one entry per currency in the order first counted. Nothing is converted.
+	OtherCosts    []*Cost `protobuf:"bytes,9,rep,name=other_costs,json=otherCosts,proto3" json:"other_costs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Usage) Reset() {
+	*x = Usage{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Usage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Usage) ProtoMessage() {}
+
+func (x *Usage) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Usage.ProtoReflect.Descriptor instead.
+func (*Usage) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *Usage) GetModelCalls() int64 {
+	if x != nil {
+		return x.ModelCalls
+	}
+	return 0
+}
+
+func (x *Usage) GetRequests() int64 {
+	if x != nil {
+		return x.Requests
+	}
+	return 0
+}
+
+func (x *Usage) GetPromptTokens() int64 {
+	if x != nil {
+		return x.PromptTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCachedPromptTokens() int64 {
+	if x != nil {
+		return x.CachedPromptTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCacheWriteTokens() int64 {
+	if x != nil {
+		return x.CacheWriteTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCompletionTokens() int64 {
+	if x != nil {
+		return x.CompletionTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCost() *Cost {
+	if x != nil {
+		return x.Cost
+	}
+	return nil
+}
+
+func (x *Usage) GetUnpricedCalls() int64 {
+	if x != nil {
+		return x.UnpricedCalls
+	}
+	return 0
+}
+
+func (x *Usage) GetOtherCosts() []*Cost {
+	if x != nil {
+		return x.OtherCosts
+	}
+	return nil
+}
+
+// Cost is an amount of money in integer micro-units of a currency: one US
+// dollar is micros 1000000 with currency "USD". Integers, because costs are
+// summed across many calls and compared against limits.
+type Cost struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Micros is the amount in millionths of currency.
+	Micros int64 `protobuf:"varint,1,opt,name=micros,proto3" json:"micros,omitempty"`
+	// Currency is an ISO 4217 code.
+	Currency string `protobuf:"bytes,2,opt,name=currency,proto3" json:"currency,omitempty"`
+	// AsOf is the date the rates were recorded, such as "2026-07-24": the
+	// oldest among the calls summed, and empty when any was priced from a card
+	// with no date.
+	AsOf          string `protobuf:"bytes,3,opt,name=as_of,json=asOf,proto3" json:"as_of,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Cost) Reset() {
+	*x = Cost{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Cost) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Cost) ProtoMessage() {}
+
+func (x *Cost) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Cost.ProtoReflect.Descriptor instead.
+func (*Cost) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *Cost) GetMicros() int64 {
+	if x != nil {
+		return x.Micros
+	}
+	return 0
+}
+
+func (x *Cost) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *Cost) GetAsOf() string {
+	if x != nil {
+		return x.AsOf
+	}
+	return ""
+}
+
+// ContextUsage is how full a context was at one model call.
+type ContextUsage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Model is the model of that call.
+	Model string `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
+	// Window is the model's input token limit from saige's model catalog, 0
+	// when the catalog does not declare one.
+	Window int64 `protobuf:"varint,2,opt,name=window,proto3" json:"window,omitempty"`
+	// Tokens is the prompt that call sent, in tokens.
+	Tokens        int64 `protobuf:"varint,3,opt,name=tokens,proto3" json:"tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContextUsage) Reset() {
+	*x = ContextUsage{}
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContextUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContextUsage) ProtoMessage() {}
+
+func (x *ContextUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContextUsage.ProtoReflect.Descriptor instead.
+func (*ContextUsage) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ContextUsage) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *ContextUsage) GetWindow() int64 {
+	if x != nil {
+		return x.Window
+	}
+	return 0
+}
+
+func (x *ContextUsage) GetTokens() int64 {
+	if x != nil {
+		return x.Tokens
+	}
+	return 0
+}
+
 // GetRunRequest reads one run.
 type GetRunRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -757,7 +1704,7 @@ type GetRunRequest struct {
 
 func (x *GetRunRequest) Reset() {
 	*x = GetRunRequest{}
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -769,7 +1716,7 @@ func (x *GetRunRequest) String() string {
 func (*GetRunRequest) ProtoMessage() {}
 
 func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_invoke_proto_msgTypes[6]
+	mi := &file_mandatum_v1_invoke_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -782,7 +1729,7 @@ func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunRequest.ProtoReflect.Descriptor instead.
 func (*GetRunRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{6}
+	return file_mandatum_v1_invoke_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetRunRequest) GetRunId() string {
@@ -811,7 +1758,7 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x05Actor\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\adisplay\x18\x02 \x01(\tR\adisplay\x12\x10\n" +
-	"\x03bot\x18\x03 \x01(\bR\x03botJ\x04\b\x04\x10\x10\"\xf8\x02\n" +
+	"\x03bot\x18\x03 \x01(\bR\x03botJ\x04\b\x04\x10\x10\"\xb3\x03\n" +
 	"\x03Tag\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x16\n" +
@@ -821,17 +1768,27 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x05actor\x18\x06 \x01(\v2\x12.mandatum.v1.ActorR\x05actor\x12,\n" +
 	"\adeliver\x18\a \x03(\v2\x12.mandatum.v1.RouteR\adeliver\x12.\n" +
 	"\x04meta\x18\b \x03(\v2\x1a.mandatum.v1.Tag.MetaEntryR\x04meta\x12*\n" +
-	"\x02at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x1a7\n" +
+	"\x02at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x129\n" +
+	"\vattachments\x18\n" +
+	" \x03(\v2\x17.mandatum.v1.AttachmentR\vattachments\x1a7\n" +
 	"\tMetaEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\n" +
-	"\x10\x19\"\x92\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\v\x10\x19\"\xb1\x01\n" +
+	"\n" +
+	"Attachment\x12\x16\n" +
+	"\x06digest\x18\x01 \x01(\tR\x06digest\x12\x1d\n" +
+	"\n" +
+	"media_type\x18\x02 \x01(\tR\tmediaType\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
+	"\x04size\x18\x04 \x01(\x03R\x04size\x12,\n" +
+	"\x06origin\x18\x05 \x01(\v2\x14.mandatum.v1.AddressR\x06origin\x12\x10\n" +
+	"\x03alt\x18\x06 \x01(\tR\x03altJ\x04\b\a\x10\x10\"\x92\x01\n" +
 	"\x0eInvokeResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x10\n" +
 	"\x03rev\x18\x02 \x01(\x05R\x03rev\x12\x14\n" +
 	"\x05topic\x18\x03 \x01(\tR\x05topic\x12;\n" +
 	"\vaccepted_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"acceptedAtJ\x04\b\x05\x10\x10\"\xc2\x03\n" +
+	"acceptedAtJ\x04\b\x05\x10\x10\"\xf1\x04\n" +
 	"\x03Run\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\tR\x06tenant\x12\x14\n" +
@@ -848,21 +1805,100 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"created_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"started_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x125\n" +
-	"\bended_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\aendedAtJ\x04\b\x0e\x10 \",\n" +
+	"\bended_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt\x12\x1f\n" +
+	"\vstop_reason\x18\x0e \x01(\tR\n" +
+	"stopReason\x12\x1d\n" +
+	"\n" +
+	"stopped_by\x18\x0f \x01(\tR\tstoppedBy\x12+\n" +
+	"\x05usage\x18\x10 \x01(\v2\x15.mandatum.v1.RunUsageR\x05usage\x12@\n" +
+	"\x10pending_question\x18\x11 \x01(\v2\x15.mandatum.v1.QuestionR\x0fpendingQuestionJ\x04\b\x12\x10 \"\xf4\x02\n" +
+	"\bQuestion\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x14\n" +
+	"\x05agent\x18\x03 \x01(\tR\x05agent\x12\x16\n" +
+	"\x06prompt\x18\x04 \x01(\tR\x06prompt\x12\x18\n" +
+	"\aoptions\x18\x05 \x03(\tR\aoptions\x12-\n" +
+	"\x04tool\x18\x06 \x01(\v2\x19.mandatum.v1.QuestionToolR\x04tool\x12\x19\n" +
+	"\basked_of\x18\a \x01(\tR\aaskedOf\x129\n" +
+	"\n" +
+	"expires_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12:\n" +
+	"\x0edefault_answer\x18\t \x01(\v2\x13.mandatum.v1.AnswerR\rdefaultAnswer\x125\n" +
+	"\basked_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\aaskedAtJ\x04\b\v\x10\x14\"\x89\x01\n" +
+	"\fQuestionTool\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x17\n" +
+	"\acall_id\x18\x02 \x01(\tR\x06callId\x12%\n" +
+	"\x0earguments_json\x18\x03 \x01(\tR\rargumentsJson\x12\x1f\n" +
+	"\vschema_json\x18\x04 \x01(\tR\n" +
+	"schemaJsonJ\x04\b\x05\x10\n" +
+	"\"\x99\x02\n" +
+	"\x06Answer\x12\x1f\n" +
+	"\vquestion_id\x18\x01 \x01(\tR\n" +
+	"questionId\x12\x1a\n" +
+	"\bdecision\x18\x02 \x01(\tR\bdecision\x12%\n" +
+	"\x0earguments_json\x18\x03 \x01(\tR\rargumentsJson\x12\x16\n" +
+	"\x06choice\x18\x04 \x01(\tR\x06choice\x12\x12\n" +
+	"\x04text\x18\x05 \x01(\tR\x04text\x12\x12\n" +
+	"\x04note\x18\x06 \x01(\tR\x04note\x12\x0e\n" +
+	"\x02by\x18\a \x01(\tR\x02by\x12;\n" +
+	"\vanswered_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"answeredAt\x12\x18\n" +
+	"\aexpired\x18\t \x01(\bR\aexpiredJ\x04\b\n" +
+	"\x10\x14\"z\n" +
+	"\rAnswerRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1f\n" +
+	"\vquestion_id\x18\x02 \x01(\tR\n" +
+	"questionId\x12+\n" +
+	"\x06answer\x18\x03 \x01(\v2\x13.mandatum.v1.AnswerR\x06answerJ\x04\b\x04\x10\n" +
+	"\"Y\n" +
+	"\x0eAnswerResponse\x12+\n" +
+	"\x06answer\x18\x01 \x01(\v2\x13.mandatum.v1.AnswerR\x06answer\x12\x14\n" +
+	"\x05first\x18\x02 \x01(\bR\x05firstJ\x04\b\x03\x10\n" +
+	"\"\xc5\x01\n" +
+	"\bRunUsage\x12$\n" +
+	"\x03own\x18\x01 \x01(\v2\x12.mandatum.v1.UsageR\x03own\x12.\n" +
+	"\bchildren\x18\x02 \x01(\v2\x12.mandatum.v1.UsageR\bchildren\x12(\n" +
+	"\x05total\x18\x03 \x01(\v2\x12.mandatum.v1.UsageR\x05total\x123\n" +
+	"\acontext\x18\x04 \x01(\v2\x19.mandatum.v1.ContextUsageR\acontextJ\x04\b\x05\x10\x10\"\xfe\x02\n" +
+	"\x05Usage\x12\x1f\n" +
+	"\vmodel_calls\x18\x01 \x01(\x03R\n" +
+	"modelCalls\x12\x1a\n" +
+	"\brequests\x18\x02 \x01(\x03R\brequests\x12#\n" +
+	"\rprompt_tokens\x18\x03 \x01(\x03R\fpromptTokens\x120\n" +
+	"\x14cached_prompt_tokens\x18\x04 \x01(\x03R\x12cachedPromptTokens\x12,\n" +
+	"\x12cache_write_tokens\x18\x05 \x01(\x03R\x10cacheWriteTokens\x12+\n" +
+	"\x11completion_tokens\x18\x06 \x01(\x03R\x10completionTokens\x12%\n" +
+	"\x04cost\x18\a \x01(\v2\x11.mandatum.v1.CostR\x04cost\x12%\n" +
+	"\x0eunpriced_calls\x18\b \x01(\x03R\runpricedCalls\x122\n" +
+	"\vother_costs\x18\t \x03(\v2\x11.mandatum.v1.CostR\n" +
+	"otherCostsJ\x04\b\n" +
+	"\x10\x10\"U\n" +
+	"\x04Cost\x12\x16\n" +
+	"\x06micros\x18\x01 \x01(\x03R\x06micros\x12\x1a\n" +
+	"\bcurrency\x18\x02 \x01(\tR\bcurrency\x12\x13\n" +
+	"\x05as_of\x18\x03 \x01(\tR\x04asOfJ\x04\b\x04\x10\n" +
+	"\"Z\n" +
+	"\fContextUsage\x12\x14\n" +
+	"\x05model\x18\x01 \x01(\tR\x05model\x12\x16\n" +
+	"\x06window\x18\x02 \x01(\x03R\x06window\x12\x16\n" +
+	"\x06tokens\x18\x03 \x01(\x03R\x06tokensJ\x04\b\x04\x10\n" +
+	"\",\n" +
 	"\rGetRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runIdJ\x04\b\x02\x10\n" +
-	"*\xa6\x01\n" +
+	"*\xbe\x01\n" +
 	"\tRunStatus\x12\x1a\n" +
 	"\x16RUN_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13RUN_STATUS_ACCEPTED\x10\x01\x12\x16\n" +
 	"\x12RUN_STATUS_RUNNING\x10\x02\x12\x15\n" +
 	"\x11RUN_STATUS_PARKED\x10\x03\x12\x18\n" +
 	"\x14RUN_STATUS_COMPLETED\x10\x04\x12\x15\n" +
-	"\x11RUN_STATUS_FAILED\x10\x05\"\x04\b\x06\x10\x0f2\xbe\x01\n" +
+	"\x11RUN_STATUS_FAILED\x10\x05\x12\x16\n" +
+	"\x12RUN_STATUS_STOPPED\x10\x06\"\x04\b\a\x10\x0f2\x83\x02\n" +
 	"\rInvokeService\x129\n" +
 	"\x06Invoke\x12\x10.mandatum.v1.Tag\x1a\x1b.mandatum.v1.InvokeResponse\"\x00\x128\n" +
 	"\fInvokeStream\x12\x10.mandatum.v1.Tag\x1a\x12.mandatum.v1.Event\"\x000\x01\x128\n" +
-	"\x06GetRun\x12\x1a.mandatum.v1.GetRunRequest\x1a\x10.mandatum.v1.Run\"\x00B6Z4github.com/urmzd/mandatum/gen/mandatum/v1;mandatumv1b\x06proto3"
+	"\x06GetRun\x12\x1a.mandatum.v1.GetRunRequest\x1a\x10.mandatum.v1.Run\"\x00\x12C\n" +
+	"\x06Answer\x12\x1a.mandatum.v1.AnswerRequest\x1a\x1b.mandatum.v1.AnswerResponse\"\x00B6Z4github.com/urmzd/mandatum/gen/mandatum/v1;mandatumv1b\x06proto3"
 
 var (
 	file_mandatum_v1_invoke_proto_rawDescOnce sync.Once
@@ -877,46 +1913,75 @@ func file_mandatum_v1_invoke_proto_rawDescGZIP() []byte {
 }
 
 var file_mandatum_v1_invoke_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_mandatum_v1_invoke_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_mandatum_v1_invoke_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_mandatum_v1_invoke_proto_goTypes = []any{
 	(RunStatus)(0),                // 0: mandatum.v1.RunStatus
 	(*Address)(nil),               // 1: mandatum.v1.Address
 	(*Route)(nil),                 // 2: mandatum.v1.Route
 	(*Actor)(nil),                 // 3: mandatum.v1.Actor
 	(*Tag)(nil),                   // 4: mandatum.v1.Tag
-	(*InvokeResponse)(nil),        // 5: mandatum.v1.InvokeResponse
-	(*Run)(nil),                   // 6: mandatum.v1.Run
-	(*GetRunRequest)(nil),         // 7: mandatum.v1.GetRunRequest
-	nil,                           // 8: mandatum.v1.Address.ParamsEntry
-	nil,                           // 9: mandatum.v1.Tag.MetaEntry
-	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
-	(*Event)(nil),                 // 11: mandatum.v1.Event
+	(*Attachment)(nil),            // 5: mandatum.v1.Attachment
+	(*InvokeResponse)(nil),        // 6: mandatum.v1.InvokeResponse
+	(*Run)(nil),                   // 7: mandatum.v1.Run
+	(*Question)(nil),              // 8: mandatum.v1.Question
+	(*QuestionTool)(nil),          // 9: mandatum.v1.QuestionTool
+	(*Answer)(nil),                // 10: mandatum.v1.Answer
+	(*AnswerRequest)(nil),         // 11: mandatum.v1.AnswerRequest
+	(*AnswerResponse)(nil),        // 12: mandatum.v1.AnswerResponse
+	(*RunUsage)(nil),              // 13: mandatum.v1.RunUsage
+	(*Usage)(nil),                 // 14: mandatum.v1.Usage
+	(*Cost)(nil),                  // 15: mandatum.v1.Cost
+	(*ContextUsage)(nil),          // 16: mandatum.v1.ContextUsage
+	(*GetRunRequest)(nil),         // 17: mandatum.v1.GetRunRequest
+	nil,                           // 18: mandatum.v1.Address.ParamsEntry
+	nil,                           // 19: mandatum.v1.Tag.MetaEntry
+	(*timestamppb.Timestamp)(nil), // 20: google.protobuf.Timestamp
+	(*Event)(nil),                 // 21: mandatum.v1.Event
 }
 var file_mandatum_v1_invoke_proto_depIdxs = []int32{
-	8,  // 0: mandatum.v1.Address.params:type_name -> mandatum.v1.Address.ParamsEntry
+	18, // 0: mandatum.v1.Address.params:type_name -> mandatum.v1.Address.ParamsEntry
 	1,  // 1: mandatum.v1.Route.target:type_name -> mandatum.v1.Address
 	1,  // 2: mandatum.v1.Tag.source:type_name -> mandatum.v1.Address
 	3,  // 3: mandatum.v1.Tag.actor:type_name -> mandatum.v1.Actor
 	2,  // 4: mandatum.v1.Tag.deliver:type_name -> mandatum.v1.Route
-	9,  // 5: mandatum.v1.Tag.meta:type_name -> mandatum.v1.Tag.MetaEntry
-	10, // 6: mandatum.v1.Tag.at:type_name -> google.protobuf.Timestamp
-	10, // 7: mandatum.v1.InvokeResponse.accepted_at:type_name -> google.protobuf.Timestamp
-	0,  // 8: mandatum.v1.Run.status:type_name -> mandatum.v1.RunStatus
-	4,  // 9: mandatum.v1.Run.tag:type_name -> mandatum.v1.Tag
-	10, // 10: mandatum.v1.Run.created_at:type_name -> google.protobuf.Timestamp
-	10, // 11: mandatum.v1.Run.started_at:type_name -> google.protobuf.Timestamp
-	10, // 12: mandatum.v1.Run.ended_at:type_name -> google.protobuf.Timestamp
-	4,  // 13: mandatum.v1.InvokeService.Invoke:input_type -> mandatum.v1.Tag
-	4,  // 14: mandatum.v1.InvokeService.InvokeStream:input_type -> mandatum.v1.Tag
-	7,  // 15: mandatum.v1.InvokeService.GetRun:input_type -> mandatum.v1.GetRunRequest
-	5,  // 16: mandatum.v1.InvokeService.Invoke:output_type -> mandatum.v1.InvokeResponse
-	11, // 17: mandatum.v1.InvokeService.InvokeStream:output_type -> mandatum.v1.Event
-	6,  // 18: mandatum.v1.InvokeService.GetRun:output_type -> mandatum.v1.Run
-	16, // [16:19] is the sub-list for method output_type
-	13, // [13:16] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	19, // 5: mandatum.v1.Tag.meta:type_name -> mandatum.v1.Tag.MetaEntry
+	20, // 6: mandatum.v1.Tag.at:type_name -> google.protobuf.Timestamp
+	5,  // 7: mandatum.v1.Tag.attachments:type_name -> mandatum.v1.Attachment
+	1,  // 8: mandatum.v1.Attachment.origin:type_name -> mandatum.v1.Address
+	20, // 9: mandatum.v1.InvokeResponse.accepted_at:type_name -> google.protobuf.Timestamp
+	0,  // 10: mandatum.v1.Run.status:type_name -> mandatum.v1.RunStatus
+	4,  // 11: mandatum.v1.Run.tag:type_name -> mandatum.v1.Tag
+	20, // 12: mandatum.v1.Run.created_at:type_name -> google.protobuf.Timestamp
+	20, // 13: mandatum.v1.Run.started_at:type_name -> google.protobuf.Timestamp
+	20, // 14: mandatum.v1.Run.ended_at:type_name -> google.protobuf.Timestamp
+	13, // 15: mandatum.v1.Run.usage:type_name -> mandatum.v1.RunUsage
+	8,  // 16: mandatum.v1.Run.pending_question:type_name -> mandatum.v1.Question
+	9,  // 17: mandatum.v1.Question.tool:type_name -> mandatum.v1.QuestionTool
+	20, // 18: mandatum.v1.Question.expires_at:type_name -> google.protobuf.Timestamp
+	10, // 19: mandatum.v1.Question.default_answer:type_name -> mandatum.v1.Answer
+	20, // 20: mandatum.v1.Question.asked_at:type_name -> google.protobuf.Timestamp
+	20, // 21: mandatum.v1.Answer.answered_at:type_name -> google.protobuf.Timestamp
+	10, // 22: mandatum.v1.AnswerRequest.answer:type_name -> mandatum.v1.Answer
+	10, // 23: mandatum.v1.AnswerResponse.answer:type_name -> mandatum.v1.Answer
+	14, // 24: mandatum.v1.RunUsage.own:type_name -> mandatum.v1.Usage
+	14, // 25: mandatum.v1.RunUsage.children:type_name -> mandatum.v1.Usage
+	14, // 26: mandatum.v1.RunUsage.total:type_name -> mandatum.v1.Usage
+	16, // 27: mandatum.v1.RunUsage.context:type_name -> mandatum.v1.ContextUsage
+	15, // 28: mandatum.v1.Usage.cost:type_name -> mandatum.v1.Cost
+	15, // 29: mandatum.v1.Usage.other_costs:type_name -> mandatum.v1.Cost
+	4,  // 30: mandatum.v1.InvokeService.Invoke:input_type -> mandatum.v1.Tag
+	4,  // 31: mandatum.v1.InvokeService.InvokeStream:input_type -> mandatum.v1.Tag
+	17, // 32: mandatum.v1.InvokeService.GetRun:input_type -> mandatum.v1.GetRunRequest
+	11, // 33: mandatum.v1.InvokeService.Answer:input_type -> mandatum.v1.AnswerRequest
+	6,  // 34: mandatum.v1.InvokeService.Invoke:output_type -> mandatum.v1.InvokeResponse
+	21, // 35: mandatum.v1.InvokeService.InvokeStream:output_type -> mandatum.v1.Event
+	7,  // 36: mandatum.v1.InvokeService.GetRun:output_type -> mandatum.v1.Run
+	12, // 37: mandatum.v1.InvokeService.Answer:output_type -> mandatum.v1.AnswerResponse
+	34, // [34:38] is the sub-list for method output_type
+	30, // [30:34] is the sub-list for method input_type
+	30, // [30:30] is the sub-list for extension type_name
+	30, // [30:30] is the sub-list for extension extendee
+	0,  // [0:30] is the sub-list for field type_name
 }
 
 func init() { file_mandatum_v1_invoke_proto_init() }
@@ -931,7 +1996,7 @@ func file_mandatum_v1_invoke_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mandatum_v1_invoke_proto_rawDesc), len(file_mandatum_v1_invoke_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

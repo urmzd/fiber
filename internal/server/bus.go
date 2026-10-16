@@ -75,6 +75,26 @@ func (s *busService) Publish(ctx context.Context, req *connect.Request[mandatumv
 	if err != nil {
 		return nil, fail(s.log, "publish", err)
 	}
+	// The control namespace is not a run's topic, and what is published there
+	// is obeyed by a run. A stop has its own route, which stamps who asked
+	// from the credential; letting a client write the request by hand would
+	// let it name anyone.
+	if e.Topic.IsControl() {
+		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q is a control topic and is not published to directly", ErrInvalid, e.Topic))
+	}
+	// Usage is accounting a host enforces limits on, and only the attempt
+	// executing a run knows what it spent. A client writing usage events by
+	// hand would put figures on the run's stream that no model call made.
+	if e.Kind.Family() == "usage" {
+		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q events are published by the run that spent the tokens, not directly", ErrInvalid, e.Kind))
+	}
+	// A run's lifecycle is the run's to report. A client publishing one by
+	// hand could show a run as finished, failed, or parked on a question it
+	// never asked, and a host that answers what lifecycle.parked shows would
+	// be answering a forgery. Control kinds are the control plane's.
+	if f := e.Kind.Family(); f == "lifecycle" || f == "control" {
+		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q events are published by the run or the control plane, not directly", ErrInvalid, e.Kind))
+	}
 	e.Tenant = id.Tenant
 	e.Seq = 0
 	e.At = s.srv.now()
@@ -174,5 +194,5 @@ func (s *Server) streamEvents(
 // of a terminal RunStatus, and it is the only thing InvokeStream needs to know
 // about a run's lifecycle: the run's own record is the ledger's business.
 func terminalKind(e envelope.Event) bool {
-	return e.Kind == envelope.KindCompleted || e.Kind == envelope.KindFailed
+	return e.Kind == envelope.KindCompleted || e.Kind == envelope.KindFailed || e.Kind == envelope.KindStopped
 }

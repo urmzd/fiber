@@ -35,6 +35,34 @@
 // content changed under a pinned number fails loudly instead of executing
 // something the run never agreed to.
 //
+// # History is pinned the same way, for the same reason
+//
+// With a thread store (WithThreads) a run continues the conversation of the
+// thread its tag belongs to (see thread.KeyOf). The journal of that thread
+// keeps growing while a run waits in the queue and between its attempts, so
+// "the history" is exactly as unstable as "the latest revision", and it gets
+// exactly the same treatment: Accept reads the journal's head ONCE and writes
+// that sequence number into the run's input, and every execution loads the
+// entries at or below it. Nothing inside the workflow body ever asks the
+// journal for its latest entries. The journal is append-only, so the entries
+// at or below a sequence number are the same bytes forever, and an attempt
+// made a day later asks the model what the first attempt asked.
+//
+// A journal that no longer holds what a run pinned fails the run terminally,
+// as a revision whose hash moved does. The alternative is an agent that
+// silently forgot half a conversation.
+//
+// A completed run appends its exchange to the journal: the request as the
+// model was shown it, and the final answer. The append is idempotent on the
+// run id, so a replayed turn appends nothing the second time. It happens
+// before the completed event is published, and its failure fails the attempt:
+// the agent's result is memoized, so the retry costs one write and no model
+// call, and the alternative is a thread that looks answered on the surface
+// and has no memory of it.
+//
+// Without a thread store none of this happens and a run's input is byte for
+// byte what it was before the store existed.
+//
 // # Every event is published twice, to two different systems
 //
 //	duraturo.Emit    the run's own durable journal: replayable, per-run,
@@ -53,6 +81,31 @@
 // delta log), while a failed Publish fails the turn: a run whose events nobody
 // can see has not done its job.
 //
+// # A run can be stopped
+//
+// Stop asks a run to end before it has finished. The request is recorded on
+// the run in the ledger and announced on the bus, the attempt executing the run
+// hears it, and the run ends with lifecycle.stopped: over, not failed, never
+// retried, and remembered by its thread with what it had said so far. See
+// stop.go.
+//
+// # A run can park on a person
+//
+// A turn that needs a person (an approval, a choice, a reply) ends at the
+// question. The run publishes it on lifecycle.parked, waits on a duraturo
+// event record holding no worker, and continues the turn with the first
+// answer recorded (Answer), the question's default once it expires, or ends
+// stopped if it is stopped while it waits. See park.go.
+//
+// # Usage
+//
+// Every model call is published as usage.call as it happens, and a run's
+// total, delegations included and every call of every attempt counted once,
+// is on its terminal event and its Output. Every attempt's calls are kept on
+// the run in the ledger before it returns, so a retried or re-executed
+// attempt's calls are counted; a replay counts nothing.
+// See usage.go.
+//
 // # Single goroutine
 //
 // duraturo v1 workflow bodies are single-goroutine. Nothing in this package
@@ -64,11 +117,13 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/urmzd/duraturo"
@@ -77,7 +132,10 @@ import (
 	"github.com/urmzd/mandatum/pkg/agentrt"
 	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/mandatum/pkg/thread"
 	"github.com/urmzd/mandatum/pkg/topic"
+
+	"github.com/urmzd/mandatum/pkg/attachment"
 )
 
 // Activity names. They are the correlation contract with the ledger: records
@@ -91,6 +149,11 @@ const (
 	// replay of the turn re-publishes lifecycle events but must never pay for
 	// the model a second time.
 	ActivityAgent = "mandatum.turn.agent"
+	// ActivityResume continues a turn that parked on a question, with the
+	// answer. It is its own activity because its input is not Input: it
+	// carries the parked turn and the answer, both read from records, so a
+	// replay hashes the same input and reads the same result.
+	ActivityResume = "mandatum.turn.resume"
 )
 
 // ErrInvalid reports a tag or configuration this package cannot run.
@@ -145,6 +208,25 @@ type Input struct {
 	// plane does not compute one. When present, it is verified before the
 	// agent runs.
 	Hash string `json:"hash,omitempty"`
+	// HistorySeq is the head of the tag's thread journal, pinned at accept
+	// time: the run is shown the entries with a sequence at or below it and
+	// nothing newer, on every attempt. Zero means no history, which is also
+	// what a runtime with no thread store always pins, so the field is
+	// absent from such a run's input and that input hashes as it always did.
+	//
+	// It is a sequence number in the journal, not in the run's event stream,
+	// and it is fixed at accept: it does not contradict the rule above.
+	HistorySeq uint64 `json:"history_seq,omitempty"`
+	// Parent is the run that started this one for a delegation and waits on
+	// it (WithChildRuns). This run's ending answers the parent's wait. Absent
+	// for every other run, so their input hashes as it always did.
+	Parent *ParentRef `json:"parent,omitempty"`
+}
+
+// ParentRef names the run, and the wait in it, that a child run answers.
+type ParentRef struct {
+	RunID      string `json:"run_id"`
+	QuestionID string `json:"question_id"`
 }
 
 // Output is a run's durable result.
@@ -163,6 +245,17 @@ type Output struct {
 	// Stored is the workspace key the answer artifact was written to, empty
 	// when the pinned revision granted no workspace area for it.
 	Stored string `json:"stored,omitempty"`
+	// Stopped is set when the run ended because it was asked to stop, and
+	// says why and by whom. Text is then the partial answer and LastSeq is
+	// the sequence of the stopped event. The ledger records such a run as
+	// succeeded: it ended, it did not fail, and it is never retried.
+	Stopped *agentrt.Stop `json:"stopped,omitempty"`
+	// Usage is what the run spent: every model call of every attempt, and
+	// everything it delegated, each counted once (see usage.go). It is in
+	// the ledger with the rest of the output, so it survives a restart. Nil
+	// when the run made no model call, and for an output recorded before
+	// usage was.
+	Usage *payload.RunUsage `json:"usage,omitempty"`
 }
 
 // Request is one turn handed to an Executor: the tag's content, plus the exact
@@ -173,9 +266,8 @@ type Output struct {
 // process, or on another machine, and "the definition to run" is not a question
 // it is allowed to answer.
 type Request struct {
-	// History and Instructions are explicit host-supplied invocation input.
-	History      []agentrt.Message `json:"history,omitempty"`
-	Instructions string            `json:"instructions,omitempty"`
+	// Instructions is a trusted host-generated return contract for this run.
+	Instructions string `json:"instructions,omitempty"`
 
 	// RunID is the durable run. It is also the stream key: chunks a Sandbox
 	// tool produces find their way back to this run by it.
@@ -194,11 +286,39 @@ type Request struct {
 	Text string `json:"text"`
 	// Meta is trigger context.
 	Meta map[string]string `json:"meta,omitempty"`
+	// History is the thread's conversation so far, oldest first, as pinned at
+	// accept time. Like Revision it is a resolved value: an executor replays
+	// it and must not go looking for a newer one.
+	History []agentrt.Message `json:"history,omitempty"`
+
+	// Attachments are the files that arrived with the tag, as references. A
+	// delegated sub-task inherits its parent's, under the same tenant.
+	Attachments []attachment.Attachment `json:"attachments,omitempty"`
 	// Revision is the pinned definition to execute.
 	Revision agentrt.Revision `json:"revision"`
 	// Service is set by the Sandbox: the legatus deployment this turn runs
 	// in, so a delegated sub-task can be awaited in the right place.
 	Service string `json:"service,omitempty"`
+	// Accounting is the prefix the turn's model calls are keyed under when
+	// saige reports no key of its own (see agentrt.Turn.Accounting). Empty
+	// for a durable run, which is keyed "<run>/a<attempt>"; a delegated
+	// sub-task is handed its parent's prefix extended by its own name.
+	Accounting string `json:"accounting,omitempty"`
+	// Park lets the turn end at a question for a person (see
+	// agentrt.Turn.Park). The runtime sets it for a durable run when it can
+	// record a question and its answer, which takes WithStopLedger. A
+	// delegated sub-task never has it.
+	Park bool `json:"park,omitempty"`
+	// QuestionTTL is how long a question waits for an answer.
+	QuestionTTL time.Duration `json:"question_ttl,omitempty"`
+	// Resume continues a turn that parked, with the answers its pending tool
+	// calls have. Like Revision and History it is a resolved value, read
+	// from the run's records.
+	Resume *agentrt.Parked `json:"resume,omitempty"`
+	// ChildRuns makes a delegation a child run the turn parks on, rather
+	// than work it waits for (WithChildRuns). Only a durable run that can
+	// park has it.
+	ChildRuns bool `json:"child_runs,omitempty"`
 }
 
 // Agent returns the agent name.
@@ -211,6 +331,13 @@ func (r Request) Rev() int { return r.Revision.Rev }
 type Outcome struct {
 	// Text is the agent's final answer.
 	Text string `json:"text"`
+	// Prompt is the request message exactly as the model was sent it:
+	// trigger metadata, retrieved passages, and the tag's text. It is what
+	// the thread journal records as the user's message, so that the next run
+	// in the thread replays the same bytes this one sent. An executor that
+	// leaves it empty has the tag's text recorded instead, which keeps the
+	// conversation and gives up the shared request prefix.
+	Prompt string `json:"prompt,omitempty"`
 	// Chunks counts the event bodies produced.
 	Chunks int `json:"chunks"`
 	// Citations counts the retrieved passages the turn was grounded in.
@@ -221,6 +348,28 @@ type Outcome struct {
 	// is not a turn failure: it means the pinned revision was not granted that
 	// workspace area, which is the sandbox working as defined.
 	StoreError string `json:"store_error,omitempty"`
+	// Stopped is set when the turn ended because it was asked to stop. Text
+	// is then what had been answered so far, which may be nothing. An
+	// executor sets it instead of returning an error: a stopped turn must not
+	// be retried.
+	Stopped *agentrt.Stop `json:"stopped,omitempty"`
+	// StopRecorded is set by the runtime, never by an executor: a stop
+	// request is recorded on the run in the ledger (see WithStopLedger),
+	// whether or not the turn was stopped by it, so the workflow body claims
+	// that record and the ledger has no record left over that no call read.
+	StopRecorded bool `json:"stop_recorded,omitempty"`
+	// Usage is set by the runtime, never by an executor: what the run spent
+	// up to and including this outcome, counted from the usage events the
+	// attempts published (see usage.go). Whatever an executor puts here is
+	// replaced.
+	Usage *payload.RunUsage `json:"usage,omitempty"`
+	// UsageAttempts is set by the runtime: the earlier attempts whose usage
+	// records Usage counts, which the workflow body claims.
+	UsageAttempts []int `json:"usage_attempts,omitempty"`
+	// Parked is set when the turn ended at a question for a person. Text is
+	// then what it had said so far. An executor sets it from
+	// agentrt.Result.Parked.
+	Parked *agentrt.Parked `json:"parked,omitempty"`
 }
 
 // Acceptance is what a caller learns when a tag is accepted. It mirrors
@@ -291,9 +440,31 @@ type Runtime struct {
 	logger *slog.Logger
 	now    func() time.Time
 
+	// threads is the conversation journal; nil runs every tag as a fresh
+	// conversation. lister and messageID only matter when it is set.
+	threads   thread.Store
+	lister    thread.Lister
+	messageID func(envelope.Tag) string
+
+	// control is the bus as something to subscribe to, which is how a turn
+	// hears a stop request. Nil when the bus can only be published to.
+	control   Subscriber
+	stops     StopLedger
+	stopGrace time.Duration
+	stopPoll  time.Duration
+
+	// waker wakes a parked run once its question is answered or it is
+	// stopped. Nil leaves it to the worker's janitor.
+	waker       Waker
+	questionTTL time.Duration
+	roles       Roles
+	reader      RecordReader
+	childRuns   bool
+
 	registry *run.Registry
 	turn     *duraturo.ActivityFn[Input, Output]
 	agent    *duraturo.ActivityFn[Input, Outcome]
+	resume   *duraturo.ActivityFn[Continue, Outcome]
 }
 
 // Option configures a Runtime.
@@ -329,6 +500,42 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+// WithThreads gives runs a memory: each run is shown the conversation so far
+// in its tag's thread and appends its own exchange when it completes. See
+// "History is pinned the same way" in the package documentation.
+//
+// Without it, or with a nil store, every tag starts a fresh conversation and
+// nothing about a run changes.
+func WithThreads(store thread.Store) Option {
+	return func(r *Runtime) { r.threads = store }
+}
+
+// WithReconciler reconciles a thread with its surface before a run's history
+// is pinned, so the run is shown what people said in the thread without
+// tagging the agent. It has no effect without WithThreads.
+//
+// Reconciliation is best-effort at accept time. A surface that cannot be
+// listed is logged and the run pins what the journal already holds: refusing
+// a tag because a history API was slow would trade a complete answer for no
+// answer. The messages it missed are appended by the next accept.
+//
+// Pair it with WithMessageID, or the message that raised each tag is
+// journaled twice: once as a message someone posted, once by its run.
+func WithReconciler(l thread.Lister) Option {
+	return func(r *Runtime) { r.lister = l }
+}
+
+// WithMessageID tells the runtime which surface message raised a tag: a Slack
+// timestamp, a GitHub comment id. The trigger knows it and usually carries it
+// in Tag.Meta, so this is a function rather than a field the runtime guesses
+// at. It returns "" when the tag has no such message.
+//
+// The id is recorded on the journal entry for the tag's request, which is how
+// a reconciliation recognizes that message as one the journal already holds.
+func WithMessageID(fn func(envelope.Tag) string) Option {
+	return func(r *Runtime) { r.messageID = fn }
+}
+
 // New composes a runtime.
 //
 // The durable activities are registered in a registry OWNED BY THIS INSTANCE
@@ -356,12 +563,28 @@ func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Opt
 		logger:   slog.Default(),
 		now:      time.Now,
 		registry: run.NewRegistry(),
+
+		stopGrace: DefaultStopGrace,
+		stopPoll:  DefaultStopPoll,
+
+		questionTTL: agentrt.DefaultQuestionTTL,
 	}
+	// Stopping needs the reading half of the bus. It is discovered rather
+	// than configured, as a connector's roles are: every backend in pkg/bus
+	// has it, and a bus that does not cannot be made to by an option.
+	r.control, _ = b.(Subscriber)
 	for _, o := range opts {
 		o(r)
 	}
+	if r.control == nil {
+		// Said once, here, rather than discovered at the first stop: a bus
+		// wrapper that only forwards Publish quietly removes the fast path.
+		r.logger.Warn("mandatum/runtime: the bus cannot be subscribed to, so a running turn hears a stop only through the ledger poll",
+			"stop_ledger", r.stops != nil)
+	}
 	r.turn = duraturo.ActivityIn(r.registry, ActivityTurn, r.runTurn)
 	r.agent = duraturo.ActivityIn(r.registry, ActivityAgent, r.runAgent)
+	r.resume = duraturo.ActivityIn(r.registry, ActivityResume, r.runResume)
 	return r, nil
 }
 
@@ -391,12 +614,21 @@ func (r *Runtime) Registry() *run.Registry { return r.registry }
 // because duraturo returns the existing run untouched and the bus keeps the first
 // write of sequence 1. (A redelivery does re-resolve the current revision for its
 // own accepted event, which the bus then discards. The run's own events all
-// report the pinned revision, which is the one that matters.)
+// report the pinned revision, which is the one that matters.) The same holds for
+// the history pin: a redelivery reads a newer head and duraturo discards it.
 func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
+	return r.accept(ctx, tag, nil)
+}
+
+// accept is Accept for a run that may be another run's child.
+func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRef) (Acceptance, error) {
 	if err := tag.Validate(); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept: %w", err)
 	}
-	runID := RunID(tag.ID)
+	if tag.Agent == topic.ControlName {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", tag.ID, ErrInvalid, tag.Agent)
+	}
+	runID := RunID(tag.Tenant, tag.ID)
 	tp, err := topic.Run(tag.Agent, runID)
 	if err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
@@ -409,7 +641,14 @@ func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, err
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
 	}
 
-	in := Input{Tag: tag, Rev: rev.Rev, Hash: rev.Hash}
+	// The second pin. It is taken here, next to the revision's, because it is
+	// the same kind of fact: something that keeps moving, read once.
+	seq, err := r.pinHistory(ctx, tag)
+	if err != nil {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
+	}
+
+	in := Input{Tag: tag, Rev: rev.Rev, Hash: rev.Hash, HistorySeq: seq, Parent: parent}
 	acc := Acceptance{RunID: runID, Rev: rev.Rev, Topic: tp, AcceptedAt: r.now().UTC()}
 
 	e := r.event(in, SeqAccepted, envelope.KindAccepted)
@@ -422,7 +661,11 @@ func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, err
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", tag.ID, err)
 	}
 
-	if _, err := duraturo.Start(ctx, r.client, r.turn, in, duraturo.WithRunID(runID)); err != nil {
+	startOpts := []duraturo.StartOption{duraturo.WithRunID(runID)}
+	if parent != nil {
+		startOpts = append(startOpts, duraturo.WithParent(parent.RunID))
+	}
+	if _, err := duraturo.Start(ctx, r.client, r.turn, in, startOpts...); err != nil {
 		// Start returns a handle alongside an enqueue failure: the run is
 		// durable and the janitor will drive it anyway. Report the error —
 		// the caller asked for an acknowledgement it did not fully get — but
@@ -442,32 +685,55 @@ func (r *Runtime) Result(ctx context.Context, runID string) (Output, error) {
 // It publishes the run's lifecycle and delegates the work. Everything in it is
 // either derived from the pinned input or read from the replay frame, so a
 // replay produces the same decisions; nothing here resolves, reads a clock for a
-// decision, or forks.
+// decision, or forks. A turn that parks on a question waits for the answer as
+// a duraturo event record and continues in a later attempt (see park.go).
 func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	attempt := attemptOf(ctx)
 	b, err := newBand(r.stride, attempt)
 	if err != nil {
 		return Output{}, duraturo.NonRetryable(err)
 	}
-
-	// Attempt 1 started the work; every later attempt resumed it, whether it
-	// was parked on an event or interrupted by a crash. The two are one fact
-	// for a subscriber — this run is executing again — and the attempt number
-	// in the payload is what distinguishes them for anyone who cares.
-	opened := envelope.KindStarted
-	if attempt > 1 {
-		opened = envelope.KindResumed
-	}
-	if err := r.publish(ctx, in, b.open, opened, payload.Lifecycle{Attempt: attempt, Rev: in.Rev}); err != nil {
-		return Output{}, err
-	}
+	at := &attemptLog{r: r, in: in, band: b, attempt: attempt}
+	// The agent activity opens the attempt when it executes for real; a
+	// memoized replay publishes nothing until the body has something new to
+	// say. A parked run the janitor wakes with no answer says nothing at all.
+	ctx = context.WithValue(ctx, openerKey{}, at.open)
 
 	out, err := r.agent.Call(ctx, in)
+	claimed := map[int]bool{}
+	var said strings.Builder
+	parks := 0
+	var transcript []json.RawMessage
+	for err == nil && out.Parked != nil {
+		if transcript, err = wholeTranscript(transcript, out.Parked); err != nil {
+			break
+		}
+		out.Parked.Transcript, out.Parked.Since = transcript, 0
+		r.claimUsage(ctx, in, out.UsageAttempts, claimed)
+		said.WriteString(out.Text)
+		res, werr := r.awaitAnswer(ctx, at, out)
+		if werr != nil {
+			return Output{}, werr
+		}
+		if res.Stopped != nil {
+			out.Text = said.String()
+			return r.stoppedWhileParked(ctx, at, out, *res.Stopped, parks)
+		}
+		parks++
+		at.answer = res.Answer
+		next := *out.Parked
+		next.Answers = make(map[string]payload.Answer, len(out.Parked.Answers)+1)
+		for k, v := range out.Parked.Answers {
+			next.Answers[k] = v
+		}
+		next.Answers[out.Parked.CallID] = *res.Answer
+		out, err = r.resume.Call(ctx, Continue{Input: in, Seq: parks, Parked: next})
+	}
 	switch {
 	case errors.Is(err, run.ErrParked):
 		// The run stopped at an event that has no record yet. It is not
 		// failed and it has not consumed retry budget; it waits.
-		r.report(ctx, in, b.close, envelope.KindParked, payload.Lifecycle{
+		at.report(ctx, envelope.KindParked, payload.Lifecycle{
 			Attempt: attempt, Rev: in.Rev, Reason: err.Error(),
 		})
 		return Output{}, err
@@ -478,27 +744,144 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// error will not be attempted again, anything else may be. A run that
 		// later exhausts its budget has its last failure on the bus marked
 		// non-terminal; the ledger stays the authority on run status.
-		r.report(ctx, in, b.close, envelope.KindFailed, payload.Lifecycle{
+		terminal := run.IsNonRetryable(err) || errors.Is(err, run.ErrNonDeterministic)
+		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
+			Attempt: attempt, Rev: in.Rev, Error: err.Error(), Terminal: terminal,
+		})
+		if terminal {
+			r.answerParent(ctx, in, "", nil, err)
+		}
+		return Output{}, err
+	}
+	// The run's answer is everything it said, across every park.
+	said.WriteString(out.Text)
+	out.Text = said.String()
+
+	// The exchange joins the thread before the run is announced complete, so
+	// that a tag raised in reply to the answer always finds the answer in the
+	// history it pins. A replay appends nothing: the journal recognizes the
+	// run. A stopped run is remembered the same way, for the same reason: the
+	// reply to a stopped answer is the whole point of stopping gently.
+	if err := r.remember(ctx, in, out); err != nil {
+		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
 			Attempt: attempt, Rev: in.Rev, Error: err.Error(),
-			Terminal: run.IsNonRetryable(err) || errors.Is(err, run.ErrNonDeterministic),
 		})
 		return Output{}, err
 	}
 
-	if err := r.publish(ctx, in, b.close, envelope.KindCompleted, payload.Lifecycle{
-		Attempt: attempt, Rev: in.Rev, Text: out.Text,
+	if out.StopRecorded {
+		r.claimStop(ctx, in)
+	}
+	r.claimUsage(ctx, in, out.UsageAttempts, claimed)
+	// accepted, opened, the agent's chunks, a parked and a resumed per
+	// question, and the terminal event.
+	events := out.Chunks + 3 + 2*parks
+	if out.Stopped != nil {
+		// The run is over and nothing failed. Returning a result rather than
+		// an error is what tells the ledger so: it records the run as ended
+		// and never retries it. Everything here comes from the agent's
+		// recorded outcome, so a replay announces the same stop.
+		if err := at.publish(ctx, envelope.KindStopped, payload.Stopped{
+			Attempt: attempt, Rev: in.Rev, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
+			Usage: out.Usage,
+		}); err != nil {
+			return Output{}, err
+		}
+		r.answerParent(ctx, in, out.Text, out.Stopped, nil)
+		return Output{
+			Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
+			Events: events, Stopped: out.Stopped, Usage: out.Usage,
+		}, nil
+	}
+
+	if err := at.publish(ctx, envelope.KindCompleted, payload.Lifecycle{
+		Attempt: attempt, Rev: in.Rev, Text: out.Text, Usage: out.Usage,
 	}); err != nil {
 		return Output{}, err
 	}
+	r.answerParent(ctx, in, out.Text, nil, nil)
 	return Output{
-		Rev:     in.Rev,
-		Text:    out.Text,
-		LastSeq: b.close,
-		Attempt: attempt,
-		// accepted, opened, the agent's chunks, and completed.
-		Events: out.Chunks + 3,
-		Stored: out.Stored,
+		Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
+		Events: events, Stored: out.Stored, Usage: out.Usage,
 	}, nil
+}
+
+// claimStop claims a recorded stop request, for the one case where it
+// matters: duraturo replays from the records it loaded when the attempt
+// began, and logs any of those that no call read. A request recorded before
+// this attempt began is among them and is claimed here. One recorded during
+// the attempt is not among them; it reads as an event that has not happened
+// (ErrParked), which here means only that there is nothing to claim, and the
+// body carries on. The claim is advisory either way: the outcome is already
+// decided.
+func (r *Runtime) claimStop(ctx context.Context, in Input) {
+	_, err := duraturo.Event[json.RawMessage](ctx, stopRecordName)
+	switch {
+	case err == nil, errors.Is(err, run.ErrParked):
+	default:
+		r.logger.Warn("mandatum/runtime: could not claim the recorded stop request",
+			"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
+	}
+}
+
+// attemptLog publishes one attempt's lifecycle into its sequence band.
+//
+// The attempt is opened (lifecycle.started, or resumed after the first) by the
+// first thing it publishes, not when it begins: the agent activity opens it
+// when it executes for real, and the body when it announces something. An
+// attempt that only replays recorded work and parks again, as a parked run
+// does every time the worker's janitor polls it, publishes nothing.
+type attemptLog struct {
+	r       *Runtime
+	in      Input
+	band    band
+	attempt int
+	opened  bool
+	// answer is the answer this attempt resumed with, carried on its
+	// resumed event.
+	answer *payload.Answer
+}
+
+type openerKey struct{}
+
+// open publishes the attempt's opening event, once.
+func (a *attemptLog) open(ctx context.Context) error {
+	if a.opened {
+		return nil
+	}
+	kind := envelope.KindStarted
+	if a.attempt > 1 {
+		// Attempt 1 started the work; every later attempt resumed it, whether
+		// it was parked on a question or interrupted by a crash. The answer,
+		// when there is one, says which.
+		kind = envelope.KindResumed
+	}
+	if err := a.r.publish(ctx, a.in, a.band.open, kind, payload.Lifecycle{
+		Attempt: a.attempt, Rev: a.in.Rev, Answer: a.answer,
+	}); err != nil {
+		return err
+	}
+	a.opened = true
+	return nil
+}
+
+// publish opens the attempt if it has not been, then publishes the attempt's
+// last event: it takes the band's closing sequence.
+func (a *attemptLog) publish(ctx context.Context, kind envelope.Kind, body any) error {
+	if err := a.open(ctx); err != nil {
+		return err
+	}
+	return a.r.publish(ctx, a.in, a.band.close, kind, body)
+}
+
+// report publishes an event whose failure must not mask the failure it reports.
+// A parked or failed turn already has an error on its way up; losing the
+// announcement of it is worth a log line, not a different error.
+func (a *attemptLog) report(ctx context.Context, kind envelope.Kind, body any) {
+	if err := a.publish(ctx, kind, body); err != nil {
+		a.r.logger.Warn("mandatum/runtime: could not publish lifecycle event",
+			"run_id", RunID(a.in.Tag.Tenant, a.in.Tag.ID), "kind", string(kind), "seq", a.band.close, "error", err)
+	}
 }
 
 // runAgent is the nested activity that executes the agent.
@@ -508,6 +891,23 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 // memoized, which is the whole reason it is a separate activity: a replay of the
 // turn must re-publish the run's lifecycle without paying for the model again.
 func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
+	return r.executeAgent(ctx, in, nil)
+}
+
+// runResume is the activity that continues a parked turn with its answer.
+func (r *Runtime) runResume(ctx context.Context, c Continue) (Outcome, error) {
+	return r.executeAgent(ctx, c.Input, &c.Parked)
+}
+
+// executeAgent is the agent activity's body, for a fresh turn or for the
+// continuation of a parked one.
+func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Parked) (Outcome, error) {
+	// This attempt is doing real work: it says so before anything else.
+	if open, ok := ctx.Value(openerKey{}).(func(context.Context) error); ok {
+		if err := open(ctx); err != nil {
+			return Outcome{}, err
+		}
+	}
 	rev, err := r.pinned(ctx, in)
 	if err != nil {
 		return Outcome{}, err
@@ -518,18 +918,46 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		return Outcome{}, duraturo.NonRetryable(err)
 	}
 
+	history, err := r.pinnedHistory(ctx, in)
+	if err != nil {
+		return Outcome{}, err
+	}
+
 	req := Request{
-		RunID:    RunID(in.Tag.ID),
+		RunID:    RunID(in.Tag.Tenant, in.Tag.ID),
 		Tenant:   in.Tag.Tenant,
 		Attempt:  attempt,
 		Origin:   in.Tag.Origin,
 		Source:   in.Tag.Source.String(),
 		Text:     in.Tag.Text,
 		Meta:     in.Tag.Meta,
+		History:  history,
 		Revision: rev,
+
+		Attachments: in.Tag.Attachments,
+
+		// A question can be parked on only where its answer can be
+		// recorded: in the ledger the run lives in.
+		Park:        r.stops != nil,
+		QuestionTTL: r.questionTTL,
+		Resume:      resume,
+		ChildRuns:   r.childRuns && r.stops != nil,
 	}
 
-	out, err := r.exec.Execute(ctx, req, func(ctx context.Context, c agentrt.Chunk) error {
+	// What earlier attempts spent and failed is read here, inside the
+	// memoized activity, and never in the workflow body: which attempts
+	// failed is exactly the kind of fact that differs between replays.
+	prior, priorAttempts := r.priorUsage(ctx, req.RunID, attempt)
+	meter := &meter{s: spent{Attempt: attempt}}
+
+	// A Delegator's report of a child run is checked against the ledger and
+	// its total read from there; see ReportChildUsage.
+	execCtx := context.WithValue(ctx, childUsageKey{}, r.childUsage(in.Tag.Tenant, req.RunID))
+	execCtx = context.WithValue(execCtx, childQuestionKey{}, r.childQuestion(in.Tag.Tenant, req.RunID))
+	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
+		// A call is counted when it is reported, before it is published:
+		// the tokens were spent whether or not the bus takes the event.
+		meter.observe(c)
 		seq, err := b.delta()
 		if err != nil {
 			// The band is spent. Retrying would produce the same flood, so
@@ -538,8 +966,34 @@ func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 		}
 		return r.publishRaw(ctx, in, seq, c.Kind, c.Payload)
 	})
+	if resume != nil {
+		// The request is the parked turn's, whatever path this turn took.
+		out.Prompt = resume.Prompt
+		trimTranscript(out.Parked, resume)
+	}
+	mine := meter.snapshot()
+	// The attempt spent what it spent. Its calls go on the run before the
+	// outcome goes up, whatever the outcome: a failure is retried, and a
+	// success whose record is never written (the ledger write fails, the
+	// worker dies before it) is executed again too. Either way the attempt
+	// that finally records an outcome reads these calls and counts them.
+	recorded := r.recordSpent(ctx, req.RunID, mine)
 	if err != nil {
 		return out, fmt.Errorf("runtime: run %s: agent %q revision %d: %w", req.RunID, rev.Spec.Name, rev.Rev, err)
+	}
+	var tally payload.Tally
+	for i := range prior {
+		prior[i].into(&tally)
+	}
+	mine.into(&tally)
+	if usage := tally.Usage(); !usage.Total.IsZero() {
+		out.Usage = &usage
+	}
+	out.UsageAttempts = priorAttempts
+	if recorded {
+		// Claimed by a replay of this attempt's outcome; this attempt's own
+		// frame never loaded it, so it has nothing to claim yet.
+		out.UsageAttempts = append(out.UsageAttempts, attempt)
 	}
 	return out, nil
 }
@@ -570,6 +1024,164 @@ func (r *Runtime) pinned(ctx context.Context, in Input) (agentrt.Revision, error
 			ErrInvalid, in.Tag.Agent, in.Rev, rev.Hash, in.Hash))
 	}
 	return rev, nil
+}
+
+// pinHistory returns the sequence number a run of tag is pinned to: the head
+// of its thread's journal, after the thread has been reconciled with its
+// surface. It is called once, by Accept, and is the only place this package
+// asks a journal where it ends.
+func (r *Runtime) pinHistory(ctx context.Context, tag envelope.Tag) (uint64, error) {
+	if r.threads == nil {
+		return 0, nil
+	}
+	key := thread.KeyOf(tag)
+	if err := key.Validate(); err != nil {
+		return 0, err
+	}
+	if r.lister != nil && !key.OneShot() {
+		var skip []string
+		if id := r.surfaceID(tag); id != "" {
+			// The message being answered is the run's request, not its
+			// history.
+			skip = append(skip, id)
+		}
+		if err := thread.Reconcile(ctx, r.threads, r.lister, key, tag.Source, skip...); err != nil {
+			r.logger.Warn("mandatum/runtime: could not reconcile the thread with its surface; pinning what the journal holds",
+				"run_id", RunID(tag.Tenant, tag.ID), "thread", key.String(), "error", err)
+		}
+	}
+	seq, err := r.threads.Head(ctx, key)
+	if err != nil {
+		return 0, fmt.Errorf("pin history of %s: %w", key, err)
+	}
+	return seq, nil
+}
+
+// pinnedHistory loads the history a run pinned, and only that: the entries at
+// or below Input.HistorySeq. It runs on every attempt and returns the same
+// messages on every attempt, because the journal never changes an entry.
+//
+// A journal that cannot produce them is terminal, like a revision whose hash
+// moved: replaying identical code against a journal that lost entries cannot
+// bring them back, and running with a shorter history would be an agent that
+// forgot without saying so.
+func (r *Runtime) pinnedHistory(ctx context.Context, in Input) ([]agentrt.Message, error) {
+	if in.HistorySeq == 0 {
+		return nil, nil
+	}
+	key := thread.KeyOf(in.Tag)
+	if r.threads == nil {
+		return nil, duraturo.NonRetryable(fmt.Errorf(
+			"%w: run pinned %d entries of thread %s but this runtime has no thread store",
+			ErrInvalid, in.HistorySeq, key))
+	}
+	entries, err := r.threads.History(ctx, key, in.HistorySeq)
+	switch {
+	case errors.Is(err, thread.ErrGap), errors.Is(err, thread.ErrInvalid):
+		return nil, duraturo.NonRetryable(fmt.Errorf("runtime: history of %s up to %d: %w", key, in.HistorySeq, err))
+	case err != nil:
+		return nil, fmt.Errorf("runtime: history of %s up to %d: %w", key, in.HistorySeq, err)
+	}
+	return historyOf(entries), nil
+}
+
+// historyOf projects journal entries into what a turn replays: a role and a
+// text, in journal order.
+//
+// Everything else an entry carries stays behind. Its sequence, run id and
+// timestamp differ between entries and mean nothing to a model, and the one
+// thing kept from the rest is who spoke, for a message that reached the
+// journal by reconciliation: a thread has several people in it, and "ship it"
+// reads differently depending on who said it. The label is a function of the
+// stored entry alone, so it renders the same on every run.
+func historyOf(entries []thread.Entry) []agentrt.Message {
+	out := make([]agentrt.Message, 0, len(entries))
+	for _, e := range entries {
+		m := agentrt.Message{Role: agentrt.Role(e.Role), Text: e.Text}
+		if e.Role == thread.RoleUser {
+			m.Attachments = e.Attachments
+		}
+		if e.RunID == "" && e.Role == thread.RoleUser {
+			if who := firstNonEmpty(e.Actor.Display, e.Actor.ID); who != "" {
+				m.Text = who + ": " + e.Text
+				if e.Text == "" {
+					// A message that was only files: the label alone,
+					// with the files after it.
+					m.Text = who + ":"
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// remember appends a completed run's exchange to its thread: what the model
+// was asked, then what it answered, as one atomic append so that no other
+// run's entries can land between a question and its answer.
+//
+// It is called from the workflow body, so it runs again on every replay, and
+// the journal makes that safe: an entry is recognized by its run id and role,
+// and the first write is the one that stays.
+//
+// A stopped run's answer is what it had said, followed by StopMarker, and it
+// is always recorded, even when the turn said nothing: see stoppedText. It is
+// built from the agent's recorded outcome and a constant, so a replay offers
+// the journal the same bytes it already holds.
+func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
+	if r.threads == nil {
+		return nil
+	}
+	runID := RunID(in.Tag.Tenant, in.Tag.ID)
+	entries := make([]thread.Entry, 0, 2)
+	// The request's files are journaled with it, as the references the run
+	// was handed, so a later run in the thread is shown them where this run
+	// was: after the request's text.
+	if said := firstNonEmpty(out.Prompt, in.Tag.Text); strings.TrimSpace(said) != "" || len(in.Tag.Attachments) > 0 {
+		entries = append(entries, thread.Entry{
+			Role: thread.RoleUser, Text: said, Actor: in.Tag.Actor,
+			RunID: runID, SurfaceID: r.surfaceID(in.Tag), At: in.Tag.At,
+			Attachments: in.Tag.Attachments,
+		})
+	}
+	answer := out.Text
+	if out.Stopped != nil {
+		answer = stoppedText(out.Text)
+	}
+	// A turn that only called tools has no answer to remember, and an empty
+	// assistant message is one a provider would refuse to be sent back.
+	if strings.TrimSpace(answer) != "" {
+		entries = append(entries, thread.Entry{
+			Role: thread.RoleAssistant, Text: answer,
+			Actor: envelope.Actor{ID: in.Tag.Agent, Bot: true},
+			RunID: runID, At: r.now(),
+		})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	key := thread.KeyOf(in.Tag)
+	if _, err := r.threads.Append(ctx, key, entries...); err != nil {
+		return fmt.Errorf("runtime: run %s: record the exchange in thread %s: %w", runID, key, err)
+	}
+	return nil
+}
+
+// surfaceID is the id of the surface message that raised tag, or "".
+func (r *Runtime) surfaceID(tag envelope.Tag) string {
+	if r.messageID == nil {
+		return ""
+	}
+	return r.messageID(tag)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // publish sends one event to both the live bus and the run's durable journal.
@@ -606,21 +1218,11 @@ func (r *Runtime) publishRaw(ctx context.Context, in Input, seq uint64, kind env
 	return nil
 }
 
-// report publishes an event whose failure must not mask the failure it reports.
-// A parked or failed turn already has an error on its way up; losing the
-// announcement of it is worth a log line, not a different error.
-func (r *Runtime) report(ctx context.Context, in Input, seq uint64, kind envelope.Kind, body any) {
-	if err := r.publish(ctx, in, seq, kind, body); err != nil {
-		r.logger.Warn("mandatum/runtime: could not publish lifecycle event",
-			"run_id", RunID(in.Tag.ID), "kind", string(kind), "seq", seq, "error", err)
-	}
-}
-
 // event builds the identity every event of a run shares. The topic is the most
 // specific form, always: publishing to agent:<name>:<run> is what lets a
 // subscriber on any prefix of it receive the event.
 func (r *Runtime) event(in Input, seq uint64, kind envelope.Kind) envelope.Event {
-	runID := RunID(in.Tag.ID)
+	runID := RunID(in.Tag.Tenant, in.Tag.ID)
 	tp, err := topic.Run(in.Tag.Agent, runID)
 	if err != nil {
 		// Accept validated this topic before the run existed, so a failure
@@ -655,22 +1257,34 @@ func attemptOf(ctx context.Context) int {
 	return info.Attempt
 }
 
-// RunID is the run identity a tag maps to.
+// RunID is the run identity a tag maps to within one tenant.
 //
-// A tag's id is the trigger's own event identity — a Slack event_id, a GitHub
-// delivery GUID, a schedule occurrence — and using it as the run id is what
-// makes a redelivery join the existing run instead of starting a second one.
+// A tag's id is the trigger's own event identity (a Slack event_id, a GitHub
+// delivery GUID, a schedule occurrence) and deriving the run id from it is
+// what makes a redelivery join the existing run instead of starting a second
+// one.
 //
-// It is also a topic segment, and topics are restricted to letters, digits, "-",
-// and "_" so that they stay safe to embed in stream keys and URLs unescaped. A
-// tag id that does not fit is hashed rather than rewritten: sanitizing by
-// dropping characters would map two distinct ids onto one run, which is the one
-// failure mode idempotency cannot tolerate. The hash is deterministic, so a
-// redelivery of an awkward id still lands on the same run.
-func RunID(tagID string) string {
-	if _, err := topic.Run("probe", tagID); err == nil {
-		return tagID
+// The tenant is part of the identity, not a property checked afterwards. A tag
+// id is chosen by whoever raises the tag, and two tenants are free to choose
+// the same one. Everything downstream is keyed by the run id alone: the
+// ledger's idempotent start, the router's delivery bindings, the run's topic,
+// the thread journal. If the id did not carry the tenant, a second tenant
+// reusing a first tenant's tag id would join that tenant's run and replace
+// where its events are delivered. Filtering on the way out cannot repair
+// that, because the collision has already happened by the time anything is
+// read. Scoping the id means there is nothing to collide on.
+//
+// The id is a hash rather than the two values joined. It is a topic segment,
+// restricted to letters, digits, "-" and "_", and no separator from that
+// alphabet could keep ("a_b", "c") and ("a", "b_c") apart. Each field is
+// length-prefixed before hashing for the same reason. The hash is
+// deterministic, so a redelivery lands on the same run.
+func RunID(tenant, tagID string) string {
+	h := sha256.New()
+	var n [binary.MaxVarintLen64]byte
+	for _, field := range []string{tenant, tagID} {
+		h.Write(n[:binary.PutUvarint(n[:], uint64(len(field)))])
+		h.Write([]byte(field))
 	}
-	sum := sha256.Sum256([]byte(tagID))
-	return "r" + hex.EncodeToString(sum[:12])
+	return "r" + hex.EncodeToString(h.Sum(nil)[:16])
 }

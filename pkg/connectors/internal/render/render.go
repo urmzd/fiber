@@ -53,6 +53,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
 	"github.com/urmzd/mandatum/pkg/envelope"
 )
 
@@ -77,12 +78,19 @@ const (
 	StatusParked   Status = "parked"
 	StatusDone     Status = "completed"
 	StatusFailed   Status = "failed"
+	// StatusStopped is a run that was asked to stop before it finished. It
+	// is terminal and it is not a failure: the text it carries is a partial
+	// answer, and a surface should say so rather than present it as either
+	// the whole answer or an error.
+	StatusStopped Status = "stopped"
 )
 
 // Terminal reports whether no further events are expected. A sink uses it to
 // decide that this is the last edit it will make, which is when it must flush
 // regardless of any coalescing interval.
-func (s Status) Terminal() bool { return s == StatusDone || s == StatusFailed }
+func (s Status) Terminal() bool {
+	return s == StatusDone || s == StatusFailed || s == StatusStopped
+}
 
 // Tool is one tool call the agent made, joined from its call and done events.
 type Tool struct {
@@ -121,6 +129,39 @@ func (c Citation) Ref() string {
 	return strconv.Itoa(c.N)
 }
 
+// Question is what a run is waiting on a person for, as a surface shows it.
+type Question struct {
+	// Kind is "approval", "choice" or "reply".
+	Kind   string
+	Prompt string
+	// Options are a choice's answers.
+	Options []string
+	// Tool and Args are the call an approval is about, Args as JSON.
+	Tool string
+	Args string
+	// AskedOf is who should answer, as a hint.
+	AskedOf string
+	// Expires is when the question takes its default.
+	Expires time.Time
+	// RunID and Agent name the child run that asked, for a question a run
+	// is waiting on through a delegation. Empty for the run's own question.
+	RunID string
+	Agent string
+	// Child is the run a delegation waits on, for Kind "delegation".
+	Child string
+}
+
+// Answered is how the question a run waited on was resolved.
+type Answered struct {
+	// Summary is the answer in a few words: "approved", "denied", the
+	// choice, or the reply.
+	Summary string
+	// By is who answered, empty for an expired question's default.
+	By string
+	// Expired is set when nobody answered and the default applied.
+	Expired bool
+}
+
 // Action is one thing the agent changed on a real surface.
 type Action struct {
 	Summary string
@@ -143,6 +184,17 @@ type View struct {
 	Status Status
 	// Error is the failure message from lifecycle.failed, empty otherwise.
 	Error string
+	// Reason is why the run was stopped, from lifecycle.stopped, in the words
+	// of whoever asked. Empty otherwise, and empty when no reason was given.
+	Reason string
+	// Question is what the run is waiting on a person for, while it is
+	// parked on one.
+	Question *Question
+	// Answered is how the latest question was resolved, once it was.
+	Answered *Answered
+	// Waiting is a question a child run the agent delegated to is parked
+	// on, while the delegation waits for it.
+	Waiting *Question
 
 	// Text is the agent's answer so far, assembled in sequence order.
 	Text string
@@ -197,7 +249,12 @@ type Doc struct {
 	status    Status
 	statusSeq uint64
 	errText   string
+	reason    string
 	finalText string
+
+	question *Question
+	answered *Answered
+	waiting  *Question
 
 	text     strings.Builder
 	thinking strings.Builder
@@ -274,6 +331,8 @@ func (d *Doc) effect(e envelope.Event) bool {
 	case envelope.KindToolCall:
 		return d.addToolCall(e)
 	case envelope.KindToolDone:
+		// A delegation that waited on a child's question has its answer.
+		d.waiting = nil
 		return d.addToolDone(e)
 	case envelope.KindCitation:
 		return d.addCitations(e)
@@ -281,10 +340,37 @@ func (d *Doc) effect(e envelope.Event) bool {
 		return d.addAction(e)
 	case envelope.KindAccepted:
 		return d.setStatus(e.Seq, StatusAccepted, "")
-	case envelope.KindStarted, envelope.KindResumed:
+	case envelope.KindStarted:
 		return d.setStatus(e.Seq, StatusRunning, "")
+	case envelope.KindResumed:
+		changed := d.setStatus(e.Seq, StatusRunning, "")
+		if e.Seq == 0 || e.Seq >= d.statusSeq {
+			body, err := payload.Decode[payload.Lifecycle](e)
+			if err == nil && body.Answer != nil {
+				d.question, d.answered = nil, answeredOf(body.Answer)
+				changed = true
+			}
+		}
+		return changed
 	case envelope.KindParked:
-		return d.setStatus(e.Seq, StatusParked, "")
+		changed := d.setStatus(e.Seq, StatusParked, "")
+		if e.Seq == 0 || e.Seq >= d.statusSeq {
+			body, err := payload.Decode[payload.Lifecycle](e)
+			if err == nil && body.Question != nil {
+				d.question = questionOf(*body.Question)
+				changed = true
+			}
+		}
+		return changed
+	case envelope.KindChildParked:
+		body, err := payload.Decode[payload.ChildQuestion](e)
+		if err != nil || body.Question.ID == "" {
+			return false
+		}
+		q := questionOf(body.Question)
+		q.RunID, q.Agent = body.RunID, body.Agent
+		d.waiting = q
+		return true
 	case envelope.KindCompleted:
 		changed := d.setStatus(e.Seq, StatusDone, "")
 		if e.Seq == 0 || e.Seq >= d.statusSeq {
@@ -299,6 +385,36 @@ func (d *Doc) effect(e envelope.Event) bool {
 		return changed
 	case envelope.KindFailed:
 		return d.setStatus(e.Seq, StatusFailed, decodeError(e.Payload))
+	case envelope.KindStopped:
+		changed := d.setStatus(e.Seq, StatusStopped, "")
+		if e.Seq == 0 || e.Seq >= d.statusSeq {
+			// The partial answer travels on the event, as a completed
+			// run's answer does, so a route that selected only lifecycle
+			// kinds still shows what the agent had said.
+			var stopped struct {
+				Text   string `json:"text"`
+				Reason string `json:"reason"`
+			}
+			if json.Unmarshal(e.Payload, &stopped) == nil {
+				if stopped.Text != "" && stopped.Text != d.finalText {
+					d.finalText = stopped.Text
+					changed = true
+				}
+				if stopped.Reason != d.reason {
+					d.reason = stopped.Reason
+					changed = true
+				}
+			}
+		}
+		return changed
+	case envelope.KindUsageCall, envelope.KindUsageChild:
+		// Deliberately not rendered. A chat surface is the conversation, and
+		// often a shared one: token counts and cost are accounting for the
+		// host that pays, not something everyone in a Slack channel or on an
+		// issue should be shown. Reporting no change also spares a sink the
+		// edit a usage event would otherwise cost after every model call. A
+		// route that wants usage delivered selects "usage" on a webhook.
+		return false
 	default:
 		// An unknown kind is not an error: kinds are an open set precisely so
 		// that a connector released today can be sent an event kind invented
@@ -503,8 +619,21 @@ func (d *Doc) View() View {
 		Tenant: d.tenant,
 		Status: d.status,
 		Error:  d.errText,
+		Reason: d.reason,
 		Seq:    d.seq,
 		At:     d.at,
+	}
+	if d.status == StatusParked && d.question != nil {
+		q := *d.question
+		v.Question = &q
+	}
+	if d.answered != nil {
+		a := *d.answered
+		v.Answered = &a
+	}
+	if d.waiting != nil && !d.status.Terminal() {
+		q := *d.waiting
+		v.Waiting = &q
 	}
 
 	v.Text = assemble(&d.text, d.pending, streamText)
@@ -541,4 +670,31 @@ func assemble(settled *strings.Builder, pending []piece, str stream) string {
 		}
 	}
 	return b.String()
+}
+
+func questionOf(q payload.Question) *Question {
+	out := &Question{Kind: q.Kind, Prompt: q.Prompt, Options: append([]string(nil), q.Options...), AskedOf: q.AskedOf, Expires: q.ExpiresAt, Child: q.ChildRunID}
+	if q.Tool != nil {
+		out.Tool, out.Args = q.Tool.Name, string(q.Tool.Arguments)
+	}
+	return out
+}
+
+func answeredOf(a *payload.Answer) *Answered {
+	out := &Answered{By: a.By, Expired: a.Expired}
+	switch {
+	case a.Decision == payload.DecisionApprove && len(a.Arguments) > 0:
+		out.Summary = "approved with changes"
+	case a.Decision == payload.DecisionApprove:
+		out.Summary = "approved"
+	case a.Decision == payload.DecisionDeny:
+		out.Summary = "denied"
+	case a.Choice != "":
+		out.Summary = a.Choice
+	case a.Text != "":
+		out.Summary = a.Text
+	default:
+		out.Summary = "no answer"
+	}
+	return out
 }

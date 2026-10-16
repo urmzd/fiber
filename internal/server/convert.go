@@ -9,6 +9,8 @@ import (
 
 	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
 	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/mandatum/pkg/attachment"
 	"github.com/urmzd/mandatum/pkg/envelope"
 	"github.com/urmzd/mandatum/pkg/topic"
 )
@@ -126,6 +128,23 @@ func tagFromProto(p *mandatumv1.Tag) (envelope.Tag, error) {
 		}
 		t.Deliver = append(t.Deliver, route)
 	}
+	for i, a := range p.GetAttachments() {
+		att := attachment.Attachment{
+			Digest:    a.GetDigest(),
+			MediaType: a.GetMediaType(),
+			Name:      a.GetName(),
+			Size:      a.GetSize(),
+			Alt:       a.GetAlt(),
+		}
+		if o := a.GetOrigin(); o != nil {
+			origin, err := addressFromProto(o)
+			if err != nil {
+				return envelope.Tag{}, fmt.Errorf("tag attachment %d origin: %w", i, err)
+			}
+			att.Origin = origin
+		}
+		t.Attachments = append(t.Attachments, att)
+	}
 	return t, nil
 }
 
@@ -145,6 +164,19 @@ func tagToProto(t envelope.Tag) *mandatumv1.Tag {
 	}
 	for _, r := range t.Deliver {
 		p.Deliver = append(p.Deliver, &mandatumv1.Route{Target: addressToProto(r.Target), Kinds: r.Kinds})
+	}
+	for _, a := range t.Attachments {
+		att := &mandatumv1.Attachment{
+			Digest:    a.Digest,
+			MediaType: a.MediaType,
+			Name:      a.Name,
+			Size:      a.Size,
+			Alt:       a.Alt,
+		}
+		if !a.Origin.IsZero() {
+			att.Origin = addressToProto(a.Origin)
+		}
+		p.Attachments = append(p.Attachments, att)
 	}
 	return p
 }
@@ -229,6 +261,10 @@ func specFromProto(p *mandatumv1.AgentSpec) (Spec, error) {
 		Provider:     p.GetProvider(),
 		SystemPrompt: p.GetSystemPrompt(),
 		Tools:        p.GetTools(),
+		Approvals:    p.GetApprovals(),
+		Approvers:    p.GetApprovers(),
+		SelfApproval: p.GetSelfApproval(),
+		Answerers:    p.GetAnswerers(),
 	}
 	for _, src := range p.GetSources() {
 		s.Sources = append(s.Sources, Source{
@@ -251,6 +287,10 @@ func specToProto(s Spec) *mandatumv1.AgentSpec {
 		Provider:     s.Provider,
 		SystemPrompt: s.SystemPrompt,
 		Tools:        s.Tools,
+		Approvals:    s.Approvals,
+		Approvers:    s.Approvers,
+		SelfApproval: s.SelfApproval,
+		Answerers:    s.Answerers,
 		Access:       &mandatumv1.Access{Spawn: s.Access.Spawn, WorkspaceAreas: s.Access.WorkspaceAreas},
 	}
 	for _, src := range s.Sources {
@@ -278,20 +318,61 @@ func revisionToProto(r Revision) *mandatumv1.Revision {
 // everything needed to explain what the agent did.
 func runToProto(r Run) *mandatumv1.Run {
 	return &mandatumv1.Run{
-		RunId:     r.ID,
-		Tenant:    r.Tenant,
-		Agent:     r.Agent,
-		Rev:       int32Of(r.Rev),
-		Origin:    r.Origin,
-		Topic:     r.Topic.String(),
-		Status:    statusToProto(r.Status),
-		Tag:       tagToProto(r.Tag),
-		LastSeq:   r.LastSeq,
-		Error:     r.Error,
-		CreatedAt: timeToProto(r.CreatedAt),
-		StartedAt: timeToProto(r.StartedAt),
-		EndedAt:   timeToProto(r.EndedAt),
+		RunId:      r.ID,
+		Tenant:     r.Tenant,
+		Agent:      r.Agent,
+		Rev:        int32Of(r.Rev),
+		Origin:     r.Origin,
+		Topic:      r.Topic.String(),
+		Status:     statusToProto(r.Status),
+		Tag:        tagToProto(r.Tag),
+		LastSeq:    r.LastSeq,
+		Error:      r.Error,
+		StopReason: r.StopReason,
+		StoppedBy:  r.StoppedBy,
+		Usage:      runUsageToProto(r.Usage),
+
+		PendingQuestion: questionToProto(r.Question),
+		CreatedAt:       timeToProto(r.CreatedAt),
+		StartedAt:       timeToProto(r.StartedAt),
+		EndedAt:         timeToProto(r.EndedAt),
 	}
+}
+
+// runUsageToProto renders what a run spent. Nil stays unset: a run with no
+// record of usage is not a run that spent nothing.
+func runUsageToProto(u *payload.RunUsage) *mandatumv1.RunUsage {
+	if u == nil {
+		return nil
+	}
+	out := &mandatumv1.RunUsage{
+		Own:      usageToProto(u.Own),
+		Children: usageToProto(u.Children),
+		Total:    usageToProto(u.Total),
+	}
+	if c := u.Context; c != nil {
+		out.Context = &mandatumv1.ContextUsage{Model: c.Model, Window: int64(c.Window), Tokens: int64(c.Tokens)}
+	}
+	return out
+}
+
+func usageToProto(u payload.Usage) *mandatumv1.Usage {
+	out := &mandatumv1.Usage{
+		ModelCalls:         int64(u.ModelCalls),
+		Requests:           int64(u.Requests),
+		PromptTokens:       int64(u.PromptTokens),
+		CachedPromptTokens: int64(u.CachedPromptTokens),
+		CacheWriteTokens:   int64(u.CacheWriteTokens),
+		CompletionTokens:   int64(u.CompletionTokens),
+		UnpricedCalls:      int64(u.UnpricedCalls),
+	}
+	if c := u.Cost; c != nil {
+		out.Cost = &mandatumv1.Cost{Micros: c.Micros, Currency: c.Currency, AsOf: c.AsOf}
+	}
+	for _, c := range u.OtherCosts {
+		out.OtherCosts = append(out.OtherCosts, &mandatumv1.Cost{Micros: c.Micros, Currency: c.Currency, AsOf: c.AsOf})
+	}
+	return out
 }
 
 // statusToProto maps a run status onto the wire enum. An unrecognised status
@@ -307,6 +388,8 @@ func statusToProto(s Status) mandatumv1.RunStatus {
 		return mandatumv1.RunStatus_RUN_STATUS_PARKED
 	case StatusCompleted:
 		return mandatumv1.RunStatus_RUN_STATUS_COMPLETED
+	case StatusStopped:
+		return mandatumv1.RunStatus_RUN_STATUS_STOPPED
 	case StatusFailed:
 		return mandatumv1.RunStatus_RUN_STATUS_FAILED
 	default:
@@ -345,4 +428,60 @@ func int32Of(n int) int32 {
 	default:
 		return int32(n)
 	}
+}
+
+// questionToProto renders a question a run is parked on. Nil stays unset.
+func questionToProto(q *payload.Question) *mandatumv1.Question {
+	if q == nil {
+		return nil
+	}
+	out := &mandatumv1.Question{
+		Id:            q.ID,
+		Kind:          q.Kind,
+		Agent:         q.Agent,
+		Prompt:        q.Prompt,
+		Options:       q.Options,
+		AskedOf:       q.AskedOf,
+		ExpiresAt:     timeToProto(q.ExpiresAt),
+		DefaultAnswer: answerToProto(q.Default),
+		AskedAt:       timeToProto(q.At),
+	}
+	if t := q.Tool; t != nil {
+		out.Tool = &mandatumv1.QuestionTool{Name: t.Name, CallId: t.CallID, ArgumentsJson: string(t.Arguments), SchemaJson: string(t.Schema)}
+	}
+	return out
+}
+
+// answerToProto renders an answer. Nil stays unset.
+func answerToProto(a *payload.Answer) *mandatumv1.Answer {
+	if a == nil {
+		return nil
+	}
+	return &mandatumv1.Answer{
+		QuestionId:    a.QuestionID,
+		Decision:      a.Decision,
+		ArgumentsJson: string(a.Arguments),
+		Choice:        a.Choice,
+		Text:          a.Text,
+		Note:          a.Note,
+		By:            a.By,
+		AnsweredAt:    timeToProto(a.At),
+		Expired:       a.Expired,
+	}
+}
+
+// answerFromProto reads what a caller may say in an answer: the decision,
+// edited arguments, the choice, the reply and a note. Everything else is the
+// server's to set.
+func answerFromProto(a *mandatumv1.Answer) payload.Answer {
+	out := payload.Answer{
+		Decision: a.GetDecision(),
+		Choice:   a.GetChoice(),
+		Text:     a.GetText(),
+		Note:     a.GetNote(),
+	}
+	if args := a.GetArgumentsJson(); args != "" {
+		out.Arguments = []byte(args)
+	}
+	return out
 }

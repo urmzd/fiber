@@ -2,6 +2,7 @@ package render_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -397,5 +398,63 @@ func TestFinalAnswerReplacesPartialAndLateDeltas(t *testing.T) {
 		if got := doc.View().Text; got != "complete answer" {
 			t.Fatalf("final answer = %q", got)
 		}
+	}
+}
+
+// A stopped run is terminal and is its own status: not done, because the text
+// is an unfinished answer, and not failed, because nothing went wrong. The
+// partial answer and the reason travel on the event, so a route that selected
+// only lifecycle kinds still shows both.
+func TestAStoppedRunIsTerminalAndCarriesItsPartialAnswerAndReason(t *testing.T) {
+	d := render.New()
+	d.Apply(ev(1, envelope.KindStarted, `{}`))
+	d.Apply(text(2, "Half an "))
+	d.Apply(text(3, "answer"))
+	if !d.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped by a user","by":"slack:U1"}`)) {
+		t.Fatal("applying lifecycle.stopped reported no change")
+	}
+
+	v := d.View()
+	if v.Status != render.StatusStopped || !v.Terminal() {
+		t.Fatalf("status = %q, terminal = %v; want stopped and terminal", v.Status, v.Terminal())
+	}
+	if v.Status == render.StatusDone || v.Status == render.StatusFailed || v.Error != "" {
+		t.Fatalf("a stopped run renders as %q with error %q", v.Status, v.Error)
+	}
+	if v.Text != "Half an answer" || v.Reason != "Stopped by a user" {
+		t.Errorf("text = %q, reason = %q", v.Text, v.Reason)
+	}
+
+	// At-least-once: the same event again changes nothing.
+	if d.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped by a user"}`)) {
+		t.Error("a redelivered lifecycle.stopped changed the document")
+	}
+
+	// A sink that was sent the terminal event alone still has the answer.
+	only := render.New()
+	only.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer"}`))
+	if got := only.View(); got.Text != "Half an answer" || got.Status != render.StatusStopped || got.Reason != "" {
+		t.Errorf("lifecycle-only view = %+v", got)
+	}
+}
+
+// Token counts and cost are accounting for whoever pays, not something a
+// Slack channel or an issue thread should show, so usage events change
+// nothing on a chat surface and cost the sink no edit. The usage riding on the
+// completed event does not reach the document either.
+func TestUsageIsNeverRenderedOnAChatSurface(t *testing.T) {
+	d := render.New()
+	if d.Apply(ev(1, envelope.KindUsageCall, `{"accounting_id":"r/a1/1","prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}`)) {
+		t.Error("a usage.call event reported a change")
+	}
+	if d.Apply(ev(2, envelope.KindUsageChild, `{"accounting_id":"run:r9","usage":{"prompt_tokens":5}}`)) {
+		t.Error("a usage.child event reported a change")
+	}
+	if v := d.View(); !v.Empty() {
+		t.Errorf("usage contributed to the document: %+v", v)
+	}
+	d.Apply(ev(3, envelope.KindCompleted, `{"text":"Done.","usage":{"total":{"prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}}}`))
+	if v := d.View(); strings.Contains(fmt.Sprintf("%+v", v), "40500") || strings.Contains(fmt.Sprintf("%+v", v), "12000") {
+		t.Errorf("the run's usage reached the document: %+v", v)
 	}
 }

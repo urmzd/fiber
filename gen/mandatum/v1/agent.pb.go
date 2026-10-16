@@ -89,7 +89,24 @@ type AgentSpec struct {
 	// Access is the agent's authority boundary: what it may spawn and what it
 	// may touch in the shared workspace. Absent means the deployment default,
 	// which grants neither.
-	Access        *Access `protobuf:"bytes,8,opt,name=access,proto3" json:"access,omitempty"`
+	Access *Access `protobuf:"bytes,8,opt,name=access,proto3" json:"access,omitempty"`
+	// Approvals names the tools whose every call waits for a person to approve
+	// it. Each must be a tool the agent is granted: one in tools, or the
+	// delegation tool "tag_<agent>" of an agent in access.spawn. The run parks
+	// on the call, publishing the question on lifecycle.parked, and resumes
+	// with the decision (InvokeService.Answer).
+	Approvals []string `protobuf:"bytes,9,rep,name=approvals,proto3" json:"approvals,omitempty"`
+	// Approvers, when set, are the only people who may answer an approval:
+	// principals as the host names them, or "role:<name>" for a role the host
+	// resolves. Empty lets anyone in the tenant approve except the requester.
+	Approvers []string `protobuf:"bytes,10,rep,name=approvers,proto3" json:"approvers,omitempty"`
+	// SelfApproval lets the person whose request raised a call approve it.
+	// Off by default: an approval is a second pair of eyes.
+	SelfApproval bool `protobuf:"varint,11,opt,name=self_approval,json=selfApproval,proto3" json:"self_approval,omitempty"`
+	// Answerers, when set, are the only people who may answer a choice or a
+	// reply the agent asks, named as approvers are. Empty lets anyone in the
+	// tenant answer.
+	Answerers     []string `protobuf:"bytes,12,rep,name=answerers,proto3" json:"answerers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -176,6 +193,34 @@ func (x *AgentSpec) GetSources() []*Source {
 func (x *AgentSpec) GetAccess() *Access {
 	if x != nil {
 		return x.Access
+	}
+	return nil
+}
+
+func (x *AgentSpec) GetApprovals() []string {
+	if x != nil {
+		return x.Approvals
+	}
+	return nil
+}
+
+func (x *AgentSpec) GetApprovers() []string {
+	if x != nil {
+		return x.Approvers
+	}
+	return nil
+}
+
+func (x *AgentSpec) GetSelfApproval() bool {
+	if x != nil {
+		return x.SelfApproval
+	}
+	return false
+}
+
+func (x *AgentSpec) GetAnswerers() []string {
+	if x != nil {
+		return x.Answerers
 	}
 	return nil
 }
@@ -1005,7 +1050,7 @@ var File_mandatum_v1_agent_proto protoreflect.FileDescriptor
 
 const file_mandatum_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x17mandatum/v1/agent.proto\x12\vmandatum.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x90\x02\n" +
+	"\x17mandatum/v1/agent.proto\x12\vmandatum.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8f\x03\n" +
 	"\tAgentSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x14\n" +
@@ -1014,7 +1059,12 @@ const file_mandatum_v1_agent_proto_rawDesc = "" +
 	"\rsystem_prompt\x18\x05 \x01(\tR\fsystemPrompt\x12\x14\n" +
 	"\x05tools\x18\x06 \x03(\tR\x05tools\x12-\n" +
 	"\asources\x18\a \x03(\v2\x13.mandatum.v1.SourceR\asources\x12+\n" +
-	"\x06access\x18\b \x01(\v2\x13.mandatum.v1.AccessR\x06accessJ\x04\b\t\x10\x19\"\xac\x01\n" +
+	"\x06access\x18\b \x01(\v2\x13.mandatum.v1.AccessR\x06access\x12\x1c\n" +
+	"\tapprovals\x18\t \x03(\tR\tapprovals\x12\x1c\n" +
+	"\tapprovers\x18\n" +
+	" \x03(\tR\tapprovers\x12#\n" +
+	"\rself_approval\x18\v \x01(\bR\fselfApproval\x12\x1c\n" +
+	"\tanswerers\x18\f \x03(\tR\tanswerersJ\x04\b\r\x10\x19\"\xac\x01\n" +
 	"\x06Source\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03uri\x18\x02 \x01(\tR\x03uri\x12:\n" +
