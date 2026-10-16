@@ -218,7 +218,7 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 		err := hs.Shutdown(shutdown)
-		<-errs
+		_ = <-errs
 		if err != nil {
 			return fmt.Errorf("cli: shutdown: %w", err)
 		}

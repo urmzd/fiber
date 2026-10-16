@@ -351,7 +351,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	grace, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.grace)
 	defer cancel()
 	err := s.Shutdown(grace)
-	<-serveErr // Serve always returns once Shutdown has closed the listener.
+	_ = <-serveErr // Serve always returns once Shutdown has closed the listener.
 	return err
 }
 

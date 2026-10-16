@@ -38,7 +38,7 @@ func TestAWebhookIsSentUsageOnlyWhenItsRouteAsksForIt(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- r.Run(ctx) }()
-			t.Cleanup(func() { cancel(); <-done })
+			t.Cleanup(func() { cancel(); _ = <-done })
 
 			if err := r.Register("run_1", []envelope.Route{{Target: target, Kinds: tc.kinds}}); err != nil {
 				t.Fatal(err)
