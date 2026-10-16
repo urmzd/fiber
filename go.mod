@@ -10,7 +10,7 @@ require (
 	github.com/urmzd/duraturo v0.1.1
 	github.com/urmzd/duraturo/adapters/postgres v0.1.1
 	github.com/urmzd/legatus v0.2.0
-	github.com/urmzd/saige v0.36.0
+	github.com/urmzd/saige v0.37.0
 	google.golang.org/protobuf v1.36.11
 )
 
