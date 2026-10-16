@@ -114,11 +114,9 @@ func (w *world) workers(t *testing.T, rt *runtime.Runtime, concurrency int, jani
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	// A live turn must have time to renew its lease even with Postgres
+	// and race instrumentation. Janitor frequency is independent of this.
 	lease := 5 * time.Second
-	if janitor > 0 {
-		// The janitor only sweeps runs older than one lease.
-		lease = janitor
-	}
 	go func() {
 		defer close(done)
 		_ = worker.New(w.ledger, w.queue,
@@ -660,7 +658,9 @@ func TestAParkedRunPolledWithNoAnswerPublishesNothing(t *testing.T) {
 	runID := p.accept(t, rt, tag("ops", "evt-1", "ship"))
 	p.parkedOn(t, rt, runID)
 	before := len(p.bus.of(runID))
-	time.Sleep(400 * time.Millisecond) // several janitor polls
+	// The janitor only sweeps runs older than one lease. Include several
+	// eligible polls, rather than only polling while the run is too young.
+	time.Sleep(5*time.Second + 400*time.Millisecond)
 	if after := len(p.bus.of(runID)); after != before {
 		t.Errorf("polls published %d events: %v", after-before, kindsOf(p.bus.of(runID))[before:])
 	}

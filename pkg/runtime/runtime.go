@@ -266,6 +266,9 @@ type Output struct {
 // process, or on another machine, and "the definition to run" is not a question
 // it is allowed to answer.
 type Request struct {
+	// Instructions is a trusted host-generated return contract for this run.
+	Instructions string `json:"instructions,omitempty"`
+
 	// RunID is the durable run. It is also the stream key: chunks a Sandbox
 	// tool produces find their way back to this run by it.
 	RunID string `json:"run_id"`

@@ -120,6 +120,7 @@ type Sandbox struct {
 	// delegator, when set, carries out a delegation for a turn that is a
 	// durable run, in place of the in-turn sub-task.
 	delegator Delegator
+	callTool  string
 
 	agentOpts []agentrt.Option
 	knowledge func(tenant string, sources []string) agentrt.Retriever
@@ -214,6 +215,12 @@ type Delegator func(ctx context.Context, parent Request, target, text string, re
 // delegation is a sub-task, which is what it always was.
 func WithDelegator(d Delegator) SandboxOption {
 	return func(s *Sandbox) { s.delegator = d }
+}
+
+// WithCallTool replaces per-agent tag tools with one host catalog tool for
+// agents granted Access.Spawn. The host must enforce the pinned spawn grant.
+func WithCallTool(name string) SandboxOption {
+	return func(s *Sandbox) { s.callTool = name }
 }
 
 // WithAgentOptions passes options through to every agentrt.Runner the sandbox
@@ -624,7 +631,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	}
 
 	res, err := runner.Run(ctx, agentrt.Turn{
-		Text: req.Text, Meta: req.Meta, History: req.History,
+		Text: req.Text, Meta: req.Meta, History: req.History, Instructions: req.Instructions,
 		Attachments: req.Attachments, Tenant: req.Tenant,
 		Stop: stop, Accounting: req.Accounting,
 		Park: req.Park, QuestionTTL: req.QuestionTTL, Resume: req.Resume,
@@ -689,7 +696,12 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 	for _, target := range req.Revision.Spec.Access.Spawn {
 		name := DelegateToolName(target)
 		delegates[name] = s.delegateTool(rt, req, target, report, send)
-		add(name)
+		if s.callTool == "" {
+			add(name)
+		}
+	}
+	if s.callTool != "" && len(req.Revision.Spec.Access.Spawn) > 0 {
+		add(s.callTool)
 	}
 
 	var base agentrt.Tools
@@ -708,7 +720,14 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 		if base == nil {
 			return nil, fmt.Errorf("%w: %q (no tool catalog configured)", agentrt.ErrNoSuchTool, name)
 		}
-		return base.Lookup(name)
+		t, err := base.Lookup(name)
+		if err != nil {
+			return nil, err
+		}
+		if name == s.callTool {
+			return &hostCallTool{Tool: t, sandbox: s, parent: req, send: send}, nil
+		}
+		return t, nil
 	}), granted, nil
 }
 
@@ -773,36 +792,8 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			// from here. A sub-task has no run id, so it cannot be a parent
 			// to one and falls through to delegating by sub-task.
 			if s.delegator != nil && parent.RunID != "" {
-				dctx, done := s.delegationContext(ctx, parent.RunID)
+				dctx, done := s.hostCallContext(ctx, parent, send)
 				defer done()
-				dctx = context.WithValue(dctx, usageReporterKey{}, func(ctx context.Context, runID string) error {
-					t := s.turn(parent.RunID)
-					if t == nil || t.childUsage == nil {
-						return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
-					}
-					c, err := t.childUsage(ctx, runID)
-					if err != nil {
-						return err
-					}
-					body, err := payload.Encode(c)
-					if err != nil {
-						return err
-					}
-					return send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
-				})
-				dctx = context.WithValue(dctx, childQuestionKey{}, func(ctx context.Context, runID string) error {
-					t := s.turn(parent.RunID)
-					if t == nil || t.childQuestion == nil {
-						return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
-					}
-					return watchChild(ctx, t.childQuestion, runID, func(cq payload.ChildQuestion) error {
-						body, err := payload.Encode(cq)
-						if err != nil {
-							return err
-						}
-						return send(agentrt.Chunk{Kind: envelope.KindChildParked, Payload: body})
-					})
-				})
 				return s.delegator(dctx, parent, target, text, report)
 			}
 			if s.specs == nil {
@@ -1020,4 +1011,59 @@ func (t *childRunTool) Execute(ctx context.Context, args map[string]any) (string
 		return "", errors.New(a.Note)
 	}
 	return a.Text, nil
+}
+
+// hostCallContext gives a unified host tool the same stop propagation, child
+// accounting and question forwarding as the built-in delegation tools.
+func (s *Sandbox) hostCallContext(ctx context.Context, parent Request, send func(agentrt.Chunk) error) (context.Context, func()) {
+	dctx, done := s.delegationContext(ctx, parent.RunID)
+	dctx = context.WithValue(dctx, usageReporterKey{}, func(ctx context.Context, runID string) error {
+		t := s.turn(parent.RunID)
+		if t == nil || t.childUsage == nil {
+			return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
+		}
+		c, err := t.childUsage(ctx, runID)
+		if err != nil {
+			return err
+		}
+		body, err := payload.Encode(c)
+		if err != nil {
+			return err
+		}
+		return send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
+	})
+	dctx = context.WithValue(dctx, childQuestionKey{}, func(ctx context.Context, runID string) error {
+		t := s.turn(parent.RunID)
+		if t == nil || t.childQuestion == nil {
+			return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
+		}
+		return watchChild(ctx, t.childQuestion, runID, func(cq payload.ChildQuestion) error {
+			body, err := payload.Encode(cq)
+			if err != nil {
+				return err
+			}
+			return send(agentrt.Chunk{Kind: envelope.KindChildParked, Payload: body})
+		})
+	})
+
+	return dctx, done
+}
+
+type hostCallTool struct {
+	saigetypes.Tool
+	sandbox *Sandbox
+	parent  Request
+	send    func(agentrt.Chunk) error
+}
+
+func (t *hostCallTool) Execute(ctx context.Context, args map[string]any) (string, error) {
+	ctx, done := t.sandbox.hostCallContext(ctx, t.parent, t.send)
+	defer done()
+	return t.Tool.Execute(ctx, args)
+}
+func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
+	if awaiting, ok := t.Tool.(agentrt.Awaiting); ok {
+		return awaiting.AwaitQuestion(call)
+	}
+	return payload.Question{}, false
 }

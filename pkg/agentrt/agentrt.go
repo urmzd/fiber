@@ -194,6 +194,10 @@ type Stop struct {
 
 // Turn is one request to an agent.
 type Turn struct {
+	// Instructions is a trusted host-generated return contract. It supplements
+	// the pinned system rules; callers must not supply arbitrary system text.
+	Instructions string
+
 	// Stop, when set, is how the turn is asked to wrap up early: the first
 	// value received on it stops the turn (see "Stopping a turn" in the
 	// package documentation). A nil channel is a turn that cannot be stopped,
@@ -565,7 +569,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 
 	agentCfg := saige.Config{
 		Name:         r.rev.Spec.Name,
-		SystemPrompt: r.rev.Spec.SystemPrompt,
+		SystemPrompt: invocationPrompt(r.rev.Spec.SystemPrompt, t.Instructions),
 		Provider:     provider,
 		Tools:        r.tools,
 		MaxIter:      r.maxIter,
@@ -968,4 +972,11 @@ func firstOf(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func invocationPrompt(system, instructions string) string {
+	if instructions == "" {
+		return system
+	}
+	return system + "\n\nInvocation return contract (subject to the agent rules above):\n" + instructions
 }
