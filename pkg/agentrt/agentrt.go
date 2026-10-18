@@ -623,6 +623,12 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	// The translator's hook goes last, so the arguments it records are the
 	// ones every other hook has finished with: what the tool runs with.
 	translator := newTranslator(r.toolArgs)
+	if pending != nil {
+		// A continuation's first call is answered with the recorded message
+		// and its deltas are dropped (see replaying), so the translator is
+		// told the model's arguments from that message instead.
+		translator.seed(*pending)
+	}
 	agentCfg.Hooks = append(agentCfg.Hooks, translator.hooks())
 	agent, err := saige.New(agentCfg)
 	if err != nil {
