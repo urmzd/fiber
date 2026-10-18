@@ -71,17 +71,43 @@ type ToolCall struct {
 	Name string `json:"name"`
 	// Phase is PhaseRequested or PhaseExecuting.
 	Phase string `json:"phase"`
+	// Arguments are the call's arguments as a compact JSON object. They are
+	// absent while the model is still generating the call (PhaseRequested),
+	// and on any event whose arguments were left out: see ToolArguments.
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// ArgumentsBytes is the size of arguments that were left out for
+	// exceeding the cap, so a reader can tell "left out" from "none".
+	ArgumentsBytes int `json:"arguments_bytes,omitempty"`
 }
+
+// MaxToolArguments bounds the arguments a tool event carries, in bytes of
+// compact JSON. Arguments over it are left out whole, never cut, because a
+// cut JSON object is not JSON, and ArgumentsBytes reports their size instead.
+//
+// Arguments are model output addressed to a tool, and can hold anything the
+// model saw: file contents, a customer's message, a credential it was shown.
+// They travel on the run's stream to every subscriber and every route, so
+// the cap keeps one call from flooding a stream, and a deployment that must
+// keep some arguments off the bus scrubs them before they are published
+// (agentrt.WithToolArguments).
+const MaxToolArguments = 8 << 10
 
 // ToolDone is the body of envelope.KindToolDone: a tool execution finished.
 // Error is set when the tool failed; Result is then the failure text the model
 // was shown, because the model always sees something and an auditor should see
 // the same thing.
+//
+// Arguments are the arguments the tool ran with, which can differ from the
+// ones the model asked for when a person edited them on approval. They follow
+// the rules on ToolCall.Arguments.
 type ToolDone struct {
 	ID     string `json:"id"`
 	Name   string `json:"name,omitempty"`
 	Result string `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// Arguments and ArgumentsBytes are as on ToolCall.
+	Arguments      json.RawMessage `json:"arguments,omitempty"`
+	ArgumentsBytes int             `json:"arguments_bytes,omitempty"`
 }
 
 // Provenance locates the source a citation came from, well enough to follow.

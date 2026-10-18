@@ -1,6 +1,14 @@
 package agentrt
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+	"sync"
+
+	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
@@ -21,14 +29,63 @@ type Chunk struct {
 
 // Translator converts saige's typed deltas into event bodies.
 //
-// It holds no state: saige names the tool on every tool delta, including the
-// ToolExecEndDelta that reports the result, so each delta translates on its
-// own. A Translator is still made per turn with NewTranslator, which keeps the
-// call sites stable if the mapping ever needs per-turn state again.
-type Translator struct{}
+// Its only state is the arguments of the turn's tool calls. saige names the
+// tool on every tool delta, but it does not repeat the arguments: they arrive
+// once, on the PartEnd that completes the model's call, and again on the
+// BeforeTool hook as the tool is about to run with them. The translator keeps
+// them by call id so that the executing ToolCall and the ToolDone can carry
+// them. A Translator is made per turn with NewTranslator and is safe for
+// concurrent use, because hooks call it from the goroutines that run tools.
+type Translator struct {
+	redact ToolArguments
 
-// NewTranslator returns a translator for one turn.
-func NewTranslator() *Translator { return &Translator{} }
+	mu sync.Mutex
+	// args holds each call's arguments, rendered, by scoped call id.
+	args map[string]rendered
+	// parts maps an open tool call part to its call id and the argument
+	// fragments streamed for it, by scoped part index.
+	parts map[string]*openCall
+}
+
+// rendered is a call's arguments as an event carries them.
+type rendered struct {
+	json  json.RawMessage
+	bytes int
+}
+
+type openCall struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// ToolArguments rewrites a tool call's arguments before any event carries
+// them. It receives the tool's name and the arguments as compact JSON, and
+// returns what to publish: the same bytes, a scrubbed JSON object, or nil to
+// leave them out. What it returns is not checked for being JSON beyond what
+// publishing needs; a result that is not valid JSON is left out.
+//
+// It changes only what is published. The tool runs with, and the model sees,
+// the arguments it was called with.
+type ToolArguments func(tool string, args json.RawMessage) json.RawMessage
+
+// NewTranslator returns a translator for one turn. A zero Translator works
+// too.
+func NewTranslator() *Translator { return newTranslator(nil) }
+
+func newTranslator(redact ToolArguments) *Translator {
+	return &Translator{redact: redact}
+}
+
+// maps makes the zero value usable. The caller holds mu.
+func (t *Translator) maps() {
+	if t.args == nil {
+		t.args = map[string]rendered{}
+	}
+	if t.parts == nil {
+		t.parts = map[string]*openCall{}
+	}
+}
 
 // Delta maps one saige delta to an event body. The second result reports
 // whether this delta becomes an event at all.
@@ -43,6 +100,11 @@ func NewTranslator() *Translator { return &Translator{} }
 //	PartDelta with Thinking                    -> delta.thinking
 //	PartStart of a tool_call, ToolExecStartDelta -> delta.tool.call
 //	ToolExecEndDelta                           -> delta.tool.done
+//
+// The executing delta.tool.call and the delta.tool.done carry the call's
+// arguments (see payload.MaxToolArguments and ToolArguments). The requested
+// one does not: it is published as the model starts the call, before its
+// arguments exist.
 //
 // Citations are the exception that is not in this list: they are derived from
 // retrieval instead (see Citations). saige's CitationDelta, which reports what
@@ -60,7 +122,12 @@ func NewTranslator() *Translator { return &Translator{} }
 //     with what only the runner knows: the call's key, the model's price and
 //     its context window. Connectors do not render that kind, so token counts
 //     never reach a Slack thread.
-func (t *Translator) Delta(d saigetypes.Delta) (Chunk, bool) {
+func (t *Translator) Delta(d saigetypes.Delta) (Chunk, bool) { return t.delta("", d) }
+
+// delta translates d, a delta of the agent whose tool call path is scope.
+// Part indices are only unique within one agent's stream, so a nested agent's
+// parts are kept apart from its parent's by scope.
+func (t *Translator) delta(scope string, d saigetypes.Delta) (Chunk, bool) {
 	switch v := d.(type) {
 	case saigetypes.PartDelta:
 		switch {
@@ -68,6 +135,9 @@ func (t *Translator) Delta(d saigetypes.Delta) (Chunk, bool) {
 			return chunk(envelope.KindText, payload.Text{Text: v.Text})
 		case v.Thinking != "":
 			return chunk(envelope.KindThinking, payload.Thinking{Text: v.Thinking})
+		case v.Args != "":
+			t.fragment(scope, v.Index, v.Args)
+			return Chunk{}, false
 		default:
 			return Chunk{}, false
 		}
@@ -76,32 +146,167 @@ func (t *Translator) Delta(d saigetypes.Delta) (Chunk, bool) {
 		if v.Kind != saigetypes.KindToolCall {
 			return Chunk{}, false
 		}
+		t.open(scope, v.Index, v.ID, v.Name)
 		return chunk(envelope.KindToolCall, payload.ToolCall{
 			ID: v.ID, Name: v.Name, Phase: payload.PhaseRequested,
 		})
 
+	case saigetypes.PartEnd:
+		t.close(scope, v)
+		return Chunk{}, false
+
 	case saigetypes.ToolExecStartDelta:
+		args := t.arguments(v.ToolCallID, false)
 		return chunk(envelope.KindToolCall, payload.ToolCall{
 			ID: v.ToolCallID, Name: v.Name, Phase: payload.PhaseExecuting,
+			Arguments: args.json, ArgumentsBytes: args.bytes,
 		})
 
 	case saigetypes.ToolExecEndDelta:
+		args := t.arguments(v.ToolCallID, true)
 		return chunk(envelope.KindToolDone, payload.ToolDone{
-			ID:     v.ToolCallID,
-			Name:   v.Name,
-			Result: v.Result,
-			Error:  v.Error,
+			ID:             v.ToolCallID,
+			Name:           v.Name,
+			Result:         v.Result,
+			Error:          v.Error,
+			Arguments:      args.json,
+			ArgumentsBytes: args.bytes,
 		})
 
 	case saigetypes.ToolExecDelta:
 		// A streaming tool or sub-agent nested inside a tool call. Its inner
 		// deltas are the agent's work too, so they translate the same way;
 		// the tool call id already told a subscriber that a tool is running.
-		return t.Delta(v.Inner)
+		return t.delta(scope+"/"+v.ToolCallID, v.Inner)
 
 	default:
 		return Chunk{}, false
 	}
+}
+
+// Ran records the arguments a tool call is about to run with. They replace
+// the ones the model sent, because an approval may have edited them, and they
+// are what the ToolDone for the call carries. A call that never reaches its
+// tool (its arguments did not parse, say) is reported with the model's.
+func (t *Translator) Ran(callID, tool string, args map[string]any) {
+	if callID == "" {
+		return
+	}
+	r := t.render(tool, args)
+	t.mu.Lock()
+	t.maps()
+	t.args[callID] = r
+	t.mu.Unlock()
+}
+
+// hooks feeds the translator the arguments each tool runs with.
+func (t *Translator) hooks() saige.Hooks {
+	return saige.Hooks{
+		Name: "fiber-tool-arguments",
+		BeforeTool: func(_ context.Context, ev *saige.BeforeToolEvent) error {
+			t.Ran(ev.Call.ID, ev.Call.Name, ev.Arguments)
+			return nil
+		},
+	}
+}
+
+func partKey(scope string, index int) string { return scope + "#" + strconv.Itoa(index) }
+
+func (t *Translator) open(scope string, index int, id, name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.maps()
+	t.parts[partKey(scope, index)] = &openCall{id: id, name: name}
+}
+
+func (t *Translator) fragment(scope string, index int, args string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if c := t.parts[partKey(scope, index)]; c != nil {
+		c.args.WriteString(args)
+	}
+}
+
+// close records the arguments of a completed tool call part: the part's own,
+// when the producer sent it whole, or the fragments streamed for it.
+func (t *Translator) close(scope string, end saigetypes.PartEnd) {
+	key := partKey(scope, end.Index)
+	t.mu.Lock()
+	open := t.parts[key]
+	delete(t.parts, key)
+	t.mu.Unlock()
+
+	var r rendered
+	var id string
+	switch p := end.Part.(type) {
+	case saigetypes.ToolCallPart:
+		if p.ArgumentsError != "" {
+			return
+		}
+		id = p.ID
+		r = t.render(p.Name, p.Arguments)
+	case nil:
+		if open == nil || open.args.Len() == 0 {
+			return
+		}
+		var args map[string]any
+		if err := json.Unmarshal([]byte(open.args.String()), &args); err != nil {
+			return
+		}
+		id = open.id
+		r = t.render(open.name, args)
+	default:
+		return
+	}
+	if id == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.maps()
+	if _, ran := t.args[id]; !ran {
+		t.args[id] = r
+	}
+}
+
+// arguments returns what the events of a call carry. done forgets the call,
+// since nothing is published about it after its ToolDone.
+func (t *Translator) arguments(callID string, done bool) rendered {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.args[callID]
+	if done {
+		delete(t.args, callID)
+	}
+	return r
+}
+
+// render turns arguments into what an event carries: compact JSON with keys
+// in sorted order, scrubbed by the deployment's ToolArguments, and left out
+// when over payload.MaxToolArguments.
+func (t *Translator) render(tool string, args map[string]any) rendered {
+	if len(args) == 0 {
+		return rendered{}
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return rendered{}
+	}
+	if t.redact != nil {
+		b = t.redact(tool, b)
+		if len(bytes.TrimSpace(b)) == 0 {
+			return rendered{}
+		}
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, b); err != nil {
+			return rendered{}
+		}
+		b = buf.Bytes()
+	}
+	if len(b) > payload.MaxToolArguments {
+		return rendered{bytes: len(b)}
+	}
+	return rendered{json: b}
 }
 
 // chunk marshals a body into a Chunk. A payload that will not marshal is a

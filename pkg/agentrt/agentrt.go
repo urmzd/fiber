@@ -294,6 +294,9 @@ type Runner struct {
 	logger    *slog.Logger
 	// compaction is the history budget; its zero value never compacts.
 	compaction Compaction
+	// toolArgs scrubs tool arguments before events carry them; nil
+	// publishes them as they are, within payload.MaxToolArguments.
+	toolArgs ToolArguments
 }
 
 // Option configures a Runner.
@@ -310,6 +313,16 @@ type config struct {
 	compaction  Compaction
 	promptCache string
 	files       *resolve.Resolver
+	toolArgs    ToolArguments
+}
+
+// WithToolArguments sets how tool arguments are scrubbed before the events
+// of a call carry them. Without it they are published as the model sent
+// them, or as an approval edited them, and left out only when they exceed
+// payload.MaxToolArguments. A deployment whose tools take secrets, or whose
+// streams reach people who should not read every argument, passes one.
+func WithToolArguments(fn ToolArguments) Option {
+	return func(c *config) { c.toolArgs = fn }
 }
 
 // WithAttachments lets turns carry files. The resolver reads each attachment
@@ -464,6 +477,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		maxIter:    cfg.maxIter,
 		logger:     cfg.logger,
 		compaction: cfg.compaction,
+		toolArgs:   cfg.toolArgs,
 	}, nil
 }
 
@@ -580,13 +594,16 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		agentCfg.CompactCfg = cc
 		agentCfg.Hooks = append(agentCfg.Hooks, newCompactionGuard(r.compaction.keepTurns()).hooks())
 	}
+	// The translator's hook goes last, so the arguments it records are the
+	// ones every other hook has finished with: what the tool runs with.
+	translator := newTranslator(r.toolArgs)
+	agentCfg.Hooks = append(agentCfg.Hooks, translator.hooks())
 	agent, err := saige.New(agentCfg)
 	if err != nil {
 		return res, fmt.Errorf("agentrt: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
 	}
 
 	stream := agent.Invoke(ctx, input)
-	translator := NewTranslator()
 	accounts := newAccountant(t.Accounting, r.rev.Spec.Name, r.rev.Spec.Model, r.provider)
 
 	// The stop request is applied from its own goroutine, because this one is
