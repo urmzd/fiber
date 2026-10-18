@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.0 (2026-10-18)
+
+### Features
+
+- add MCP tool providers as versioned records (#21) ([1fa1854](https://github.com/urmzd/fiber/commit/1fa1854c8482e677ba46bc46de9da8a751fe4055))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.13.0...v0.14.0)
+
+
 ## 0.13.0 (2026-10-18)
 
 ### Breaking
