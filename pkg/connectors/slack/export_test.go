@@ -1,6 +1,6 @@
 package slack
 
-import "github.com/urmzd/mandatum/pkg/attachment/intake"
+import "github.com/urmzd/fiber/pkg/attachment/intake"
 
 // UseFetcher swaps the connector's file fetcher, so a test can serve files
 // from loopback. The host and credential policies it would have used are

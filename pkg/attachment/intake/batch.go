@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/blob"
 )
 
 // ErrRefused reports a surface that would not hand over a file: it answered

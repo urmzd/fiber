@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/knowledge"
 )
 
 func cosine(a, b []float32) float64 {

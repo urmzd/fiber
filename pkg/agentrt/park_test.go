@@ -9,9 +9,9 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // parkFixture is an agent with a deploy tool that needs approval, a lookup

@@ -5,8 +5,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/blob"
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 // The runtime reconciles a thread through the connector that owns its

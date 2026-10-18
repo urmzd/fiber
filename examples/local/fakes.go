@@ -23,12 +23,12 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
 )
 
 // ── the transcript ──────────────────────────────────────────────────
@@ -246,7 +246,7 @@ func (w *webhookSink) seenKinds() map[envelope.Kind]int {
 // ── the executor ────────────────────────────────────────────────────
 //
 // runtime.Executor is the seam between the durable turn and the agent loop. A
-// deployment passes runtime.NewSandbox, which runs the turn as a legatus task
+// deployment passes runtime.NewSandbox, which runs the turn as a playscape task
 // under the NGAC policy compiled from the pinned revision's Access grant.
 //
 // This example passes an in-process executor instead, for one reason: a sandbox
@@ -261,7 +261,7 @@ func (w *webhookSink) seenKinds() map[envelope.Kind]int {
 
 type offlineExecutor struct {
 	// calls counts how often the model was actually reached. It is the whole
-	// proof in section 7: duraturo replays the turn, but a recorded activity
+	// proof in section 7: anchor replays the turn, but a recorded activity
 	// is served from the ledger, so this must not move on a replay.
 	calls atomic.Int64
 
@@ -339,7 +339,7 @@ func (c corpus) Retrieve(context.Context, string) (*ragtypes.AssembledContext, e
 //
 // pkg/bus.Memory is a complete broker, not a stub, so there is no failure
 // injection in it and there should not be. Section 7 needs one specific
-// publish to fail once — that is how it forces duraturo to replay a turn whose
+// publish to fail once — that is how it forces anchor to replay a turn whose
 // agent activity is already recorded — so the failure is wrapped around the
 // bus instead of built into it.
 //
@@ -495,7 +495,7 @@ func decodeCitation(e envelope.Event) (payload.Citation, error) {
 
 // summarize renders an event's payload as one short line, for the observer's
 // log. It goes through pkg/agentrt/payload, which is a leaf package: decoding
-// an event needs neither saige nor duraturo, which is the point of it existing.
+// an event needs neither saige nor anchor, which is the point of it existing.
 func summarize(e envelope.Event) string {
 	body, known, err := payload.Of(e)
 	if err != nil || !known {

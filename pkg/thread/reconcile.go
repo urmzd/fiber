@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Message is one message as its surface holds it now.

@@ -14,7 +14,7 @@ import (
 	"github.com/urmzd/saige/agent/provider/wrapper"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
 )
 
 // Parking a turn on a person.

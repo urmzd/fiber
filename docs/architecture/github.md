@@ -1,6 +1,6 @@
 # GitHub connector capabilities
 
-Mandatum owns signature verification, normalized mentions and webhook events,
+Fiber owns signature verification, normalized mentions and webhook events,
 API context/file reads, comments and review-thread replies, idempotent delivery,
 commit comparison, workflow API operations, and check-run transport.
 
@@ -11,13 +11,13 @@ explicit mentions with ordinary Markdown and exposes no `/fix` or `/check` tools
 
 PR auto-label activation, per-commit review policy, PR guides, signed mutation
 grants, agent specs and deployment configuration now live in
-[collegium](https://github.com/urmzd/collegium/blob/main/docs/github.md).
-Evidence-backed Markdown presentation lives in vultus's `go/github` package.
+[warp](https://github.com/urmzd/warp/blob/main/docs/github.md).
+Evidence-backed Markdown presentation lives in warp's `go/github` package.
 
-For the product setup use `COLLEGIUM_GITHUB_*` with `collegium serve`.
-The standalone mandatum CLI retains only transport configuration:
-`MANDATUM_GITHUB_TOKEN`, `MANDATUM_GITHUB_WEBHOOK_SECRET`,
-`MANDATUM_GITHUB_OWNERS`, `MANDATUM_GITHUB_BOTS`,
-`MANDATUM_GITHUB_READ_REPOSITORIES`, and `MANDATUM_GITHUB_CHECKS`.
-`MANDATUM_GITHUB_AUTO_LABELS`, `MANDATUM_GITHUB_GUIDES` and
-`MANDATUM_GITHUB_MUTATIONS` are no longer supported here.
+For the product setup use `WARP_GITHUB_*` with `warp serve`.
+The standalone fiber CLI retains only transport configuration:
+`FIBER_GITHUB_TOKEN`, `FIBER_GITHUB_WEBHOOK_SECRET`,
+`FIBER_GITHUB_OWNERS`, `FIBER_GITHUB_BOTS`,
+`FIBER_GITHUB_READ_REPOSITORIES`, and `FIBER_GITHUB_CHECKS`.
+`FIBER_GITHUB_AUTO_LABELS`, `FIBER_GITHUB_GUIDES` and
+`FIBER_GITHUB_MUTATIONS` are no longer supported here.

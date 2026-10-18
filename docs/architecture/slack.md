@@ -1,6 +1,6 @@
 # Slack connector capabilities
 
-Mandatum owns signature verification, mention and slash-command translation,
+Fiber owns signature verification, mention and slash-command translation,
 threaded message delivery, reaction APIs, and the optional `AgentAPI` methods
 for session status and command registration. Ordinary messaging clients need
 only implement `API`; agent-session features are a separate capability.
@@ -12,11 +12,11 @@ is acknowledged without invoking application policy or raising a tag.
 
 Session lifecycle policy, command discovery, refusal logging, app manifests,
 and installation configuration live in
-[collegium](https://github.com/urmzd/collegium/blob/main/docs/slack.md).
-Use `COLLEGIUM_SLACK_*` with `collegium serve` for that experience.
-The standalone mandatum CLI still supports the token, signing secret, team,
+[warp](https://github.com/urmzd/warp/blob/main/docs/slack.md).
+Use `WARP_SLACK_*` with `warp serve` for that experience.
+The standalone fiber CLI still supports the token, signing secret, team,
 bot mapping and default agent; it does not enable product session or command
-policy through `MANDATUM_SLACK_SESSIONS` or `MANDATUM_SLACK_COMMANDS`.
+policy through `FIBER_SLACK_SESSIONS` or `FIBER_SLACK_COMMANDS`.
 
 ## Stopping a session
 
@@ -41,5 +41,5 @@ carries, `runtime.RunID(tenant, tagID)`. It is not the Slack event id the tag
 was raised with. The runtime must be built with `runtime.WithStopLedger` for
 the stop to be recorded before it is announced. The run then ends
 with `lifecycle.stopped`, and the sink edits the session's message to say so
-under what the agent had written. The standalone mandatum CLI does not set
+under what the agent had written. The standalone fiber CLI does not set
 `Stopped`, because it keeps no session-to-run mapping.

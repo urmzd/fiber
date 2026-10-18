@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // readBatch bounds how many entries one XRANGE or XREAD asks for. It caps the
@@ -33,7 +33,7 @@ const fieldEvent = "e"
 // so the catch-up/live seam is one continuous scan of one key rather than two
 // reads that have to be stitched.
 //
-// A supplied sequence at or below the stream's top is a replay: duraturo
+// A supplied sequence at or below the stream's top is a replay: anchor
 // re-runs a workflow from the top and re-publishes what the run already
 // emitted, and within a run sequences only move forward, so anything at or
 // below the top has already been published. Returning it unchanged makes

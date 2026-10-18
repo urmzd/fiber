@@ -15,8 +15,8 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/saige/agent/types"
 	"github.com/urmzd/saige/rag/extractor"
 )
@@ -43,7 +43,7 @@ type Transcript struct {
 
 // Transcriber turns audio, or the audio track of a video, into text.
 //
-// mandatum ships no implementation: transcription needs a model or a
+// fiber ships no implementation: transcription needs a model or a
 // service, and which one is a deployment's choice. Name and Version key the
 // stored transcript, so changing the backend or its model must change one of
 // them. An implementation should wrap ErrUnavailable around failures that a

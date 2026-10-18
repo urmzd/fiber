@@ -13,12 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/knowledge"
 )
 
 // Environment variables that select the embedding model the knowledge layer
-// indexes and searches with. The server and `mandatum index` must agree on
+// indexes and searches with. The server and `fiber index` must agree on
 // them: a corpus embedded with one model is not searchable with another, and
 // the store excludes chunks from the dense arm rather than compare vectors that
 // do not share a space.
@@ -26,13 +26,13 @@ const (
 	// EnvEmbeddingsURL is the base URL of an OpenAI-compatible embeddings
 	// API. Unset keeps the offline hashing embedder, which needs no key and
 	// matches on word overlap rather than meaning.
-	EnvEmbeddingsURL = "MANDATUM_EMBEDDINGS_URL"
+	EnvEmbeddingsURL = "FIBER_EMBEDDINGS_URL"
 	// EnvEmbeddingsModel names the model to request.
-	EnvEmbeddingsModel = "MANDATUM_EMBEDDINGS_MODEL"
+	EnvEmbeddingsModel = "FIBER_EMBEDDINGS_MODEL"
 	// EnvEmbeddingsKey is the bearer credential for that API.
-	EnvEmbeddingsKey = "MANDATUM_EMBEDDINGS_KEY"
+	EnvEmbeddingsKey = "FIBER_EMBEDDINGS_KEY"
 	// EnvEmbeddingsDimensions is the width of the vectors it returns.
-	EnvEmbeddingsDimensions = "MANDATUM_EMBEDDINGS_DIMENSIONS"
+	EnvEmbeddingsDimensions = "FIBER_EMBEDDINGS_DIMENSIONS"
 )
 
 // embeddingsConfig is the embedder selection, read from the environment by the
@@ -103,7 +103,7 @@ func retrieverFor(store knowledge.Store) func(tenant string, sources []string) a
 	}
 }
 
-// indexable is the set of extensions `mandatum index` reads when walking a
+// indexable is the set of extensions `fiber index` reads when walking a
 // directory. It is a closed list because a directory holds binaries, images and
 // lockfiles too, and embedding those buys nothing but noise in every search.
 var indexable = map[string]bool{
@@ -126,7 +126,7 @@ func newIndexCmd() *cobra.Command {
 			"Re-indexing an unchanged file is a no-op. A directory is walked for\n" +
 			"Markdown and plain text; a file named explicitly is indexed whatever its\n" +
 			"extension. Each document's URI is its path as given.",
-		Example:      "  mandatum index --source handbook ./docs",
+		Example:      "  fiber index --source handbook ./docs",
 		Args:         cobra.MinimumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, paths []string) error {

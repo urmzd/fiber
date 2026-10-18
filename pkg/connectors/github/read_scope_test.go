@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connectors/github"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connectors/github"
 )
 
 func TestCrossSourceReadsRequireAnExactRepositoryGrant(t *testing.T) {

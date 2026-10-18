@@ -1,6 +1,6 @@
 # Examples
 
-Runnable programs that demonstrate mandatum rather than describe it. Every
+Runnable programs that demonstrate fiber rather than describe it. Every
 example in this directory runs with no API key, no network and no
 infrastructure: the in-memory implementations of the same interfaces stand in
 for Postgres, Redis and a model provider, so `go run` is the only setup.
@@ -16,7 +16,7 @@ go run ./examples/local
 ```
 
 One process, one file of story (`main.go`) and one file of scaffolding
-(`fakes.go`). It prints seven numbered sections, each one a claim mandatum makes
+(`fakes.go`). It prints seven numbered sections, each one a claim fiber makes
 and a demonstration of it:
 
 1. **An agent is a declarative spec.** A name, a provider, a model, a system
@@ -46,7 +46,7 @@ and a demonstration of it:
    what the model claimed, so a reader can check them.
 7. **A replayed run does not re-execute a recorded activity.** The example arms
    one broker outage on a run's `lifecycle.completed` publish. The turn fails,
-   duraturo replays the workflow from the top, and the printed model-call
+   anchor replays the workflow from the top, and the printed model-call
    counter moves by exactly one across two attempts: the agent activity was
    served from the ledger. The subscriber sees a `lifecycle.resumed` event in
    its own sequence band rather than a run that went silent.
@@ -62,9 +62,9 @@ paths.
 | --- | --- | --- |
 | Control plane | `pkg/registry.Memory` | a `registry.Store` over Postgres |
 | Bus | `pkg/bus.Memory` | `pkg/bus` Redis Streams |
-| Ledger and queue | duraturo `ledger.Memory`, `queue.Memory` | duraturo `pgledger` and `redisqueue` |
+| Ledger and queue | anchor `ledger.Memory`, `queue.Memory` | anchor `pgledger` and `redisqueue` |
 | Model | saige `agenttest.ScriptedProvider`, via the spec's `offline` provider | `anthropic` or `ollama`, by changing two fields on the spec |
-| Execution | an in-process `runtime.Executor` | `runtime.NewSandbox`, a legatus node under NGAC |
+| Execution | an in-process `runtime.Executor` | `runtime.NewSandbox`, a playscape node under NGAC |
 | Connectors | two fakes implementing `connector.Sink` | `pkg/connectors/slack`, `pkg/connectors/webhook` |
 
 Every row is a constructor change. `main.go` does not otherwise change.

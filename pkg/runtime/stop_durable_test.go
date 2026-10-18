@@ -13,26 +13,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/duraturo/adapters/postgres/pgledger"
-	"github.com/urmzd/duraturo/adapters/postgres/pgqueue"
-	drun "github.com/urmzd/duraturo/pkg/run"
-	"github.com/urmzd/legatus/pkg/controlplane"
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/legatus/pkg/node/inproc"
-	"github.com/urmzd/legatus/pkg/task"
-	"github.com/urmzd/legatus/pkg/tool"
-	"github.com/urmzd/legatus/pkg/workspace"
+	"github.com/urmzd/anchor/adapters/postgres/pgledger"
+	"github.com/urmzd/anchor/adapters/postgres/pgqueue"
+	drun "github.com/urmzd/anchor/pkg/run"
+	"github.com/urmzd/playscape/pkg/controlplane"
+	"github.com/urmzd/playscape/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/node/inproc"
+	"github.com/urmzd/playscape/pkg/task"
+	"github.com/urmzd/playscape/pkg/tool"
+	"github.com/urmzd/playscape/pkg/workspace"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/thread"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ func noise(t *testing.T, b bus.Bus, n int) {
 // in returns tg answering in its own thread, so two runs of one test do not
 // share a conversation.
 func in(tg envelope.Tag, thread string) envelope.Tag {
-	tg.Source = address.MustParse("github://urmzd/mandatum/issues/" + thread)
+	tg.Source = address.MustParse("github://urmzd/fiber/issues/" + thread)
 	return tg
 }
 
@@ -691,7 +691,7 @@ func TestCancellingAWaitingTurnCancelsItsTask(t *testing.T) {
 	}
 }
 
-// The integration job sets $MANDATUM_POSTGRES_TEST_URL and $MANDATUM_REDIS_ADDR
+// The integration job sets $FIBER_POSTGRES_TEST_URL and $FIBER_REDIS_ADDR
 // and requires this test to pass, which is how it knows every stop test above,
 // and the usage tests in usage_test.go,
 // ran on Postgres (ledger, queue, journal) and Redis (bus) rather than on the
@@ -825,7 +825,7 @@ func (w *warnings) all() []string {
 	return append([]string(nil), w.seen...)
 }
 
-// An ordinary stop is not an incident. Neither the runtime nor duraturo's
+// An ordinary stop is not an incident. Neither the runtime nor anchor's
 // worker warns about anything, whether the request was recorded during the
 // turn (it is not in the attempt's replay set) or before it (the workflow body
 // claims it).

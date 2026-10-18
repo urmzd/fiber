@@ -10,8 +10,8 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // held is a model that says part of an answer and then keeps the call open

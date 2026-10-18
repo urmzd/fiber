@@ -1,4 +1,4 @@
-// Command mandatum is the agent platform and its pub/sub bus.
+// Command fiber is the agent platform and its pub/sub bus.
 //
 // It runs the core (serve), an execution node (work), and the client commands
 // that drive them (agent, tag, listen). See internal/cli for the command tree
@@ -8,7 +8,7 @@ package main
 import (
 	"os"
 
-	"github.com/urmzd/mandatum/internal/cli"
+	"github.com/urmzd/fiber/internal/cli"
 )
 
 // Build metadata, injected with -ldflags at release time. The defaults are what

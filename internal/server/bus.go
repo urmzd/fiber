@@ -7,18 +7,18 @@ import (
 	"log/slog"
 
 	"connectrpc.com/connect"
-	"github.com/urmzd/legatus/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/metrics"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Sequencer is the optional extension a broker implements when it can report
 // the sequence it assigned.
 //
 // bus.Bus.Publish returns only an error, deliberately: the runtime supplies its
-// own sequences because duraturo replays a workflow from the top and a replayed
+// own sequences because anchor replays a workflow from the top and a replayed
 // event must land on the number it landed on the first time. That leaves a wire
 // publisher with no way to learn its position, which PublishResponse.seq is
 // supposed to report, so a broker that can answer says so by implementing this.

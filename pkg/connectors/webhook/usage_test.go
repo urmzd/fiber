@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/connectors/webhook"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/router"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/connectors/webhook"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/router"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // An existing webhook route with no kind filter keeps receiving exactly what

@@ -7,9 +7,9 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // priced is a scripted model that declares what saige's catalog would: a rate

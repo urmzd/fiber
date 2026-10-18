@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // diffContext is how many unchanged lines are kept around a change.

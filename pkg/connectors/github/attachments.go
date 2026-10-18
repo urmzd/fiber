@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
 )
 
 // Where GitHub keeps the images and videos people paste into issues, pull

@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // schema is everything the Postgres store owns: one row per agent name, one row
@@ -53,14 +53,14 @@ CREATE TABLE IF NOT EXISTS mandatum_agent_revisions (
 // migrateLock is the advisory lock Migrate holds. CREATE TABLE IF NOT EXISTS is
 // not safe against itself: two processes starting together can both pass the
 // existence check and one then fails on the catalog's unique index. The value
-// is arbitrary and only has to be the same in every mandatum.
+// is arbitrary and only has to be the same in every fiber.
 const migrateLock = 0x6d616e64 // "mand"
 
 // Postgres is a Store that outlives the process.
 //
 // It keeps every rule Memory documents, and it is held to them by the same
 // tests: the suite in this package runs against Postgres whenever
-// $MANDATUM_POSTGRES_TEST_URL is set. What it adds is the one thing Memory says
+// $FIBER_POSTGRES_TEST_URL is set. What it adds is the one thing Memory says
 // it lacks, so a deployment whose agent definitions must survive a restart
 // swaps this in and changes nothing else.
 //

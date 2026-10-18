@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
-	"github.com/urmzd/legatus/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/metrics"
 )
 
 // ErrUnauthenticated reports a caller whose credential is missing, malformed,
@@ -23,7 +23,7 @@ const HeaderAuthorization = "Authorization"
 
 // HeaderTenant is the header TrustedHeader reads. It is only ever trusted
 // behind a gateway that sets it; see TrustedHeader.
-const HeaderTenant = "X-Mandatum-Tenant"
+const HeaderTenant = "X-Fiber-Tenant"
 
 // Identity is what a credential resolves to: the authorization scope the
 // request runs under, plus who is asking.

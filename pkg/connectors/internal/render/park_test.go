@@ -3,8 +3,8 @@ package render_test
 import (
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/connectors/internal/render"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // A parked run shows what it asked while it waits, and how it was answered

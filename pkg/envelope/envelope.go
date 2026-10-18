@@ -1,4 +1,4 @@
-// Package envelope is the contract every mandatum client speaks, independent
+// Package envelope is the contract every fiber client speaks, independent
 // of transport. gRPC, SSE, and the in-process path all carry these types.
 //
 // Two directions:
@@ -27,9 +27,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // ErrInvalid reports a malformed envelope value. Callers match with errors.Is.

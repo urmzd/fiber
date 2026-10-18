@@ -5,11 +5,11 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/urmzd/duraturo/adapters/postgres/pgledger"
-	"github.com/urmzd/duraturo/adapters/postgres/pgqueue"
+	"github.com/urmzd/anchor/adapters/postgres/pgledger"
+	"github.com/urmzd/anchor/adapters/postgres/pgqueue"
 )
 
-// Open migrates the schema and returns duraturo's Postgres ledger and queue
+// Open migrates the schema and returns anchor's Postgres ledger and queue
 // mapped onto it, both validated against the live database.
 func Open(ctx context.Context, pool *pgxpool.Pool, opts ...pgqueue.Option) (*pgledger.Ledger, *pgqueue.Queue, error) {
 	if err := Migrate(ctx, pool); err != nil {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // Severity ranks a finding.

@@ -14,24 +14,24 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/urmzd/duraturo/pkg/replay"
-	drun "github.com/urmzd/duraturo/pkg/run"
-	"github.com/urmzd/duraturo/pkg/worker"
-	"github.com/urmzd/legatus/pkg/controlplane"
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/legatus/pkg/node/inproc"
-	"github.com/urmzd/legatus/pkg/tool"
-	"github.com/urmzd/legatus/pkg/workspace"
+	"github.com/urmzd/anchor/pkg/replay"
+	drun "github.com/urmzd/anchor/pkg/run"
+	"github.com/urmzd/anchor/pkg/worker"
+	"github.com/urmzd/playscape/pkg/controlplane"
+	"github.com/urmzd/playscape/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/node/inproc"
+	"github.com/urmzd/playscape/pkg/tool"
+	"github.com/urmzd/playscape/pkg/workspace"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/thread"
-	"github.com/urmzd/mandatum/pkg/thread/threadtest"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/thread/threadtest"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -39,12 +39,12 @@ import (
 // threadsEnv names the Postgres these tests keep their journal in. Without it
 // the journal is in memory; with it, the runtime is exercised against the
 // backend a deployment uses.
-const threadsEnv = "MANDATUM_POSTGRES_TEST_URL"
+const threadsEnv = "FIBER_POSTGRES_TEST_URL"
 
 var threadSchemas atomic.Uint64
 
 // newThreads returns an empty thread store: Postgres in a schema of its own
-// when $MANDATUM_POSTGRES_TEST_URL is set, Memory otherwise.
+// when $FIBER_POSTGRES_TEST_URL is set, Memory otherwise.
 func newThreads(t *testing.T) thread.Store {
 	t.Helper()
 	url := os.Getenv(threadsEnv)
@@ -52,7 +52,7 @@ func newThreads(t *testing.T) thread.Store {
 		return thread.NewMemory()
 	}
 	ctx := context.Background()
-	schema := fmt.Sprintf("mandatumtest_runtime_%d_%d", time.Now().UnixNano(), threadSchemas.Add(1))
+	schema := fmt.Sprintf("fibertest_runtime_%d_%d", time.Now().UnixNano(), threadSchemas.Add(1))
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatalf("parse $%s: %v", threadsEnv, err)
@@ -241,7 +241,7 @@ func TestARunPinnedToAHistoryIsShownExactlyThatAfterTheThreadGrows(t *testing.T)
 	}
 }
 
-// duraturo re-executes a run from the top on every attempt. The history must
+// anchor re-executes a run from the top on every attempt. The history must
 // be read from the pin, never from "latest", or the second attempt asks the
 // model a different question than the first one did.
 func TestEveryAttemptOfARunIsShownTheSameHistory(t *testing.T) {
@@ -407,7 +407,7 @@ func TestHistoryIsNotSharedAcrossTenantAgentOrSurface(t *testing.T) {
 	otherTenant := tag("docs-bot", "Ev-tenant", "hello")
 	otherTenant.Tenant = "globex"
 	otherThread := tag("docs-bot", "Ev-surface", "hello")
-	otherThread.Source = address.MustParse("github://urmzd/mandatum/issues/43")
+	otherThread.Source = address.MustParse("github://urmzd/fiber/issues/43")
 	noSurface := tag("docs-bot", "Ev-cron-1", "nightly")
 	noSurface.Source = address.Address{}
 	noSurfaceAgain := tag("docs-bot", "Ev-cron-2", "nightly")
@@ -533,7 +533,7 @@ func TestWithoutAThreadStoreARunIsWhatItAlwaysWas(t *testing.T) {
 }
 
 // lossy is a journal that can forget, which no real one may. It exists so a
-// test can prove that mandatum notices.
+// test can prove that fiber notices.
 type lossy struct {
 	mu sync.Mutex
 	thread.Store

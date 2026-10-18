@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/playscape/pkg/metrics"
 )
 
 // Server-sent events are the browser-native read path. A dashboard opens one
@@ -56,7 +56,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.auth.Authenticate(r.Context(), r.Header)
 	if err != nil {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mandatum"`)
+		w.Header().Set("WWW-Authenticate", `Bearer realm="fiber"`)
 		s.httpFail(w, "sse", err)
 		return
 	}

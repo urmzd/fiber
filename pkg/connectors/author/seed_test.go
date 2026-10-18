@@ -6,9 +6,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/connectors/author"
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/connectors/author"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 func TestSeedingAtEveryStartupBurnsNoRevisions(t *testing.T) {

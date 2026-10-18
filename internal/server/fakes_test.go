@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/urmzd/legatus/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/metrics"
 
-	"github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/gen/mandatum/v1/mandatumv1connect"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // The fakes here are complete, not stubs: the store enforces the immutability

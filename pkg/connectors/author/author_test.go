@@ -11,13 +11,13 @@ import (
 
 	"github.com/urmzd/saige/agent/agenttest"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/connectors/author"
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/connectors/author"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 // runs is the test's run ledger: which principal each run acts as.

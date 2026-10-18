@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/urmzd/legatus/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/metrics"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // Accepted is what the runtime returns once a tag is durable. It is returned

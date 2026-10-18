@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 // specSchema is the JSON Schema of a draft definition, shared by every action

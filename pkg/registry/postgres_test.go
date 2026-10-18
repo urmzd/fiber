@@ -12,13 +12,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 // postgresEnv names the Postgres the Store suite runs against. Without it the
 // suite runs against Memory, so it stays runnable with no infrastructure; with
 // it, the Postgres backend is held to exactly the same contract.
-const postgresEnv = "MANDATUM_POSTGRES_TEST_URL"
+const postgresEnv = "FIBER_POSTGRES_TEST_URL"
 
 // schemas numbers each store the suite builds, so tests sharing one database
 // cannot see each other's agents.
@@ -30,7 +30,7 @@ var schemas atomic.Uint64
 func newPostgres(t *testing.T, url string, opts ...registry.Option) *registry.Postgres {
 	t.Helper()
 	ctx := context.Background()
-	schema := fmt.Sprintf("mandatumtest_%d_%d", time.Now().UnixNano(), schemas.Add(1))
+	schema := fmt.Sprintf("fibertest_%d_%d", time.Now().UnixNano(), schemas.Add(1))
 
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {

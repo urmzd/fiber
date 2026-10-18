@@ -16,35 +16,35 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/duraturo/pkg/ledger"
-	dqueue "github.com/urmzd/duraturo/pkg/queue"
-	drun "github.com/urmzd/duraturo/pkg/run"
-	"github.com/urmzd/duraturo/pkg/worker"
-	"github.com/urmzd/legatus/pkg/controlplane"
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/legatus/pkg/node/inproc"
-	"github.com/urmzd/legatus/pkg/tool"
-	"github.com/urmzd/legatus/pkg/workspace"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/anchor/pkg/ledger"
+	dqueue "github.com/urmzd/anchor/pkg/queue"
+	drun "github.com/urmzd/anchor/pkg/run"
+	"github.com/urmzd/anchor/pkg/worker"
+	"github.com/urmzd/playscape/pkg/controlplane"
+	"github.com/urmzd/playscape/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/node/inproc"
+	"github.com/urmzd/playscape/pkg/tool"
+	"github.com/urmzd/playscape/pkg/workspace"
 
-	"github.com/urmzd/mandatum/internal/server"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/attachment/resolve"
-	"github.com/urmzd/mandatum/pkg/blob"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/connectors/author"
-	"github.com/urmzd/mandatum/pkg/connectors/cron"
-	"github.com/urmzd/mandatum/pkg/durable"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/knowledge"
-	"github.com/urmzd/mandatum/pkg/registry"
-	"github.com/urmzd/mandatum/pkg/router"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/thread"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/internal/server"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/attachment/resolve"
+	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/connectors/author"
+	"github.com/urmzd/fiber/pkg/connectors/cron"
+	"github.com/urmzd/fiber/pkg/durable"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/router"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // Environment variables the composition root reads. Everything that names an
@@ -55,29 +55,29 @@ const (
 	// EnvRedis points the bus at Redis Streams. Unset keeps the in-memory
 	// broker, which is a complete implementation of the same interface and
 	// exactly as correct — for one process.
-	EnvRedis = "MANDATUM_REDIS_URL"
+	EnvRedis = "FIBER_REDIS_URL"
 
 	// EnvPostgres points the agent registry at Postgres. Unset keeps the
 	// in-memory registry, which enforces every rule the Postgres one does and
 	// forgets all of it on exit.
-	EnvPostgres = "MANDATUM_POSTGRES_URL"
+	EnvPostgres = "FIBER_POSTGRES_URL"
 
 	// EnvAuthorProvider and EnvAuthorModel choose what the built-in author
 	// agent runs on. Unset keeps the offline provider, which seeds the agent
 	// and its tools without calling a model.
-	EnvAuthorProvider = "MANDATUM_AUTHOR_PROVIDER"
-	EnvAuthorModel    = "MANDATUM_AUTHOR_MODEL"
+	EnvAuthorProvider = "FIBER_AUTHOR_PROVIDER"
+	EnvAuthorModel    = "FIBER_AUTHOR_MODEL"
 
 	// EnvCompactTokens is the input size, in tokens, above which a run's
 	// history is compacted. Unset or zero never compacts.
-	EnvCompactTokens = "MANDATUM_COMPACT_TOKENS"
+	EnvCompactTokens = "FIBER_COMPACT_TOKENS"
 
 	// EnvWorkspace is the directory agent artifacts are written under. Unset
 	// takes a directory under the user's cache.
-	EnvWorkspace = "MANDATUM_WORKSPACE"
+	EnvWorkspace = "FIBER_WORKSPACE"
 )
 
-// coreConfig is what a running mandatum needs that is not a command-line
+// coreConfig is what a running fiber needs that is not a command-line
 // concern. It is filled from flags and the environment by the commands, and
 // nothing in this file reads either: a composition root that reaches for
 // os.Getenv cannot be constructed twice in one process, and a test is exactly
@@ -124,12 +124,12 @@ type coreConfig struct {
 	Metrics metrics.Recorder
 }
 
-// core is mandatum assembled: every long-lived component this process owns, in
+// core is fiber assembled: every long-lived component this process owns, in
 // the order data flows through them.
 //
 //	registry  →  runtime  →  bus  →  router  →  connector sinks
 //	                ↑                              ↓
-//	            duraturo worker              a surface somewhere
+//	            anchor worker              a surface somewhere
 //
 // Nothing here is a stub standing in for a deployment. The in-memory registry,
 // bus, ledger and queue are complete implementations of the same interfaces the
@@ -164,7 +164,7 @@ type runLedger interface {
 }
 
 // newCore assembles the system. It is deliberately linear: read it top to
-// bottom and you have read how mandatum fits together.
+// bottom and you have read how fiber fits together.
 func newCore(cfg coreConfig) (*core, error) {
 	log := cfg.Log
 	if log == nil {
@@ -259,7 +259,7 @@ func newCore(cfg coreConfig) (*core, error) {
 	// trigger to sink holds both ends at once.
 	c.deliver = router.New(broker, sinks, router.WithLogger(log))
 
-	// The agent side. A turn runs as a legatus task under the NGAC policy
+	// The agent side. A turn runs as a playscape task under the NGAC policy
 	// compiled from the pinned revision's Access grant, so what an agent may
 	// touch is enforced rather than documented.
 	exec, err := newExecutor(cfg, c.store, c.docs, c.blobs, sinks, log, rec)
@@ -294,7 +294,7 @@ func newCore(cfg coreConfig) (*core, error) {
 		// record, not the run's transcripts.
 		rtOpts = append(rtOpts, runtime.WithRecordReader(durable.NewRecords(pool)))
 	}
-	rt, err := runtime.New(duraturo.New(c.ledger, c.queue), registry.NewSpecs(c.store), broker, exec, rtOpts...)
+	rt, err := runtime.New(anchor.New(c.ledger, c.queue), registry.NewSpecs(c.store), broker, exec, rtOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("cli: runtime: %w", err)
 	}
@@ -478,13 +478,13 @@ func workspaceDir(cfg coreConfig) string {
 	if err != nil {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "mandatum")
+	return filepath.Join(base, "fiber")
 }
 
 // newExecutor builds the sandbox a turn runs in.
 //
 // The tool registry and the workspace are shared with the control plane rather
-// than owned by the sandbox: legatus resolves a tool by name on the node that
+// than owned by the sandbox: playscape resolves a tool by name on the node that
 // executes it, and the node is created from this factory. The policy that
 // scopes what that tool can see comes from the pinned revision, one deployment
 // per (agent, revision), which is what stops a revised Access grant from
@@ -655,7 +655,7 @@ func (c *core) Answer(ctx context.Context, req server.AnswerRequest) (payload.An
 
 // statusOf maps a ledger status onto the edge's. The ledger has no word for
 // stopped: it records such a run as succeeded, and Run tells the two apart by
-// the run's recorded output, which is as durable as the status itself. duraturo has no "running"
+// the run's recorded output, which is as durable as the status itself. anchor has no "running"
 // state — assignment is flow state and lives in the queue, never in the ledger
 // — so a pending run is reported as accepted, which is the only thing the
 // ledger actually knows about it.
@@ -670,7 +670,7 @@ func statusOf(s drun.RunStatus) server.Status {
 	}
 }
 
-// startDelivery runs the router: the half of mandatum that reads the bus and
+// startDelivery runs the router: the half of fiber that reads the bus and
 // renders events onto surfaces. It is separable from execution on purpose —
 // see work.go.
 func (c *core) startDelivery(ctx context.Context, g *group) {

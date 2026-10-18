@@ -12,19 +12,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/urmzd/legatus/pkg/controlplane"
-	dispatchsandbox "github.com/urmzd/legatus/pkg/sandbox"
-	"github.com/urmzd/legatus/pkg/task"
-	"github.com/urmzd/legatus/pkg/tool"
+	"github.com/urmzd/playscape/pkg/controlplane"
+	dispatchsandbox "github.com/urmzd/playscape/pkg/sandbox"
+	"github.com/urmzd/playscape/pkg/task"
+	"github.com/urmzd/playscape/pkg/tool"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/envelope"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment"
 )
 
 // Sandbox defaults.
@@ -32,7 +32,7 @@ const (
 	// DefaultBuffer is the per-turn chunk buffer between the tool producing
 	// events and the activity publishing them.
 	DefaultBuffer = 256
-	// DefaultPollInterval is how often a turn checks whether its legatus
+	// DefaultPollInterval is how often a turn checks whether its playscape
 	// task has reported a result.
 	DefaultPollInterval = 5 * time.Millisecond
 	// AnswerArea is the workspace area a turn writes its answer artifact
@@ -73,14 +73,14 @@ func (r Request) SourceAddress() (address.Address, error) {
 	return a, nil
 }
 
-// Sandbox executes turns as legatus tasks, under the NGAC policy compiled from
+// Sandbox executes turns as playscape tasks, under the NGAC policy compiled from
 // the pinned revision's Access grant.
 //
 // # What the sandbox is for
 //
 // A turn is arbitrary model-directed code: it calls tools, writes files, and may
 // delegate to other agents. Access says what the agent may touch, and saying it
-// is worth nothing unless something enforces it. legatus is that something: the
+// is worth nothing unless something enforces it. playscape is that something: the
 // tool never receives the shared workspace, only a view scoped to its policy, and
 // every spawn attempt is checked against the policy's allowlist before it
 // reaches a queue. Default is deny, so an agent granted nothing can do nothing.
@@ -96,22 +96,22 @@ func (r Request) SourceAddress() (address.Address, error) {
 //
 // # Streaming out of a sandbox
 //
-// A legatus tool is a function over bytes: it has no way to stream, and the node
+// A playscape tool is a function over bytes: it has no way to stream, and the node
 // running it holds neither the caller's context nor the run's replay frame. So
 // the tool sends its chunks through an in-process channel registered under the
 // run id, and the activity that submitted the task drains that channel on its own
-// goroutine — which is what keeps every duraturo call (Emit, and the ledger
-// writes behind it) on the single goroutine duraturo requires, while the agent
+// goroutine — which is what keeps every anchor call (Emit, and the ledger
+// writes behind it) on the single goroutine anchor requires, while the agent
 // loop's own parallelism stays inside the task.
 //
-// That handoff is in-process by construction. A remote legatus node would have
+// That handoff is in-process by construction. A remote playscape node would have
 // to publish to the bus itself; nothing here pretends otherwise.
 //
 // # At-most-once, on purpose
 //
-// legatus's queue is at-most-once in beta. A lost task is a failed attempt, and
-// the attempt is what duraturo already knows how to repeat. Durability is never
-// borrowed from legatus.
+// playscape's queue is at-most-once in beta. A lost task is a failed attempt, and
+// the attempt is what anchor already knows how to repeat. Durability is never
+// borrowed from playscape.
 type Sandbox struct {
 	plane   controlplane.ControlPlane
 	tools   *tool.Registry
@@ -131,14 +131,14 @@ type Sandbox struct {
 
 	mu         sync.Mutex
 	deployed   map[string]string // "<agent>@<rev>" -> deployment name
-	registered map[string]bool   // legatus tool name -> registered
+	registered map[string]bool   // playscape tool name -> registered
 	turns      map[string]*turn  // run id or sub-task key -> the turn someone is waiting on
 
 	// subs numbers delegated sub-tasks, so each has a key to be cancelled by.
 	subs atomic.Uint64
 }
 
-// taskInput is what a legatus task carries: the turn's Request, plus the
+// taskInput is what a playscape task carries: the turn's Request, plus the
 // sandbox's own bookkeeping, which is not part of a Request because nothing
 // outside this file should ever see it. The Request's fields are embedded, so
 // the task input of a durable run is the Request's JSON as it always was.
@@ -150,7 +150,7 @@ type taskInput struct {
 	Sub string `json:"sandbox_sub,omitempty"`
 }
 
-// turn is what the goroutine waiting on a legatus task shares with the tool
+// turn is what the goroutine waiting on a playscape task shares with the tool
 // executing it. The two never share a context (see call), so everything that
 // has to cross between them crosses here.
 type turn struct {
@@ -164,7 +164,7 @@ type turn struct {
 	// abort is closed when nobody is waiting on the turn any more: its
 	// caller returned, was cancelled, or gave up on a stop. The tool cancels
 	// its own context on it, which is the only cancellation that reaches a
-	// legatus task from outside.
+	// playscape task from outside.
 	abort chan struct{}
 	// stopped is the stop request the turn was handed, once it has been: how
 	// a delegation the stop cancels learns that it was a stop.
@@ -279,7 +279,7 @@ func WithSandboxLogger(l *slog.Logger) SandboxOption {
 	}
 }
 
-// NewSandbox returns an executor over a legatus control plane.
+// NewSandbox returns an executor over a playscape control plane.
 //
 // tools is the registry the plane's nodes resolve from; the sandbox registers one
 // tool per agent into it as agents are first seen. specs is used only to resolve
@@ -287,10 +287,10 @@ func WithSandboxLogger(l *slog.Logger) SandboxOption {
 // the model can read.
 func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, specs Specs, opts ...SandboxOption) (*Sandbox, error) {
 	if plane == nil {
-		return nil, fmt.Errorf("%w: no legatus control plane", ErrInvalid)
+		return nil, fmt.Errorf("%w: no playscape control plane", ErrInvalid)
 	}
 	if tools == nil {
-		return nil, fmt.Errorf("%w: no legatus tool registry", ErrInvalid)
+		return nil, fmt.Errorf("%w: no playscape tool registry", ErrInvalid)
 	}
 	s := &Sandbox{
 		plane:      plane,
@@ -312,13 +312,13 @@ func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, specs Spe
 
 var _ Executor = (*Sandbox)(nil)
 
-// ToolName is the legatus tool an agent's turns execute as. It is also the
+// ToolName is the playscape tool an agent's turns execute as. It is also the
 // agent's identity in the policy graph, and the object a spawn grant names.
 func ToolName(agent string) string { return "agent:" + agent }
 
-// DeploymentName is the legatus deployment a pinned revision runs in.
+// DeploymentName is the playscape deployment a pinned revision runs in.
 func DeploymentName(agent string, rev int) string {
-	return fmt.Sprintf("mandatum-%s-r%d", agent, rev)
+	return fmt.Sprintf("fiber-%s-r%d", agent, rev)
 }
 
 // DelegateToolName is the tool an agent calls to tag another agent.
@@ -329,7 +329,7 @@ func AnswerKey(agent, runID string) string {
 	return path.Join(AnswerArea, agent, runID, "answer")
 }
 
-// Execute submits the turn as a legatus task and publishes what it streams.
+// Execute submits the turn as a playscape task and publishes what it streams.
 func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
 	if req.RunID == "" {
 		return Outcome{}, fmt.Errorf("%w: turn has no run id", ErrInvalid)
@@ -387,7 +387,7 @@ func (s *Sandbox) stream(ctx context.Context, req Request, deployment, taskID st
 	for {
 		select {
 		case <-ctx.Done():
-			// legatus owns the task's lifecycle and has no cancel, so the
+			// playscape owns the task's lifecycle and has no cancel, so the
 			// tool is told through the turn it shares with this goroutine
 			// (see detach). The run is what gets retried.
 			return Outcome{}, fmt.Errorf("runtime: run %s: %w", req.RunID, ctx.Err())
@@ -482,7 +482,7 @@ func (s *Sandbox) ensure(ctx context.Context, rev agentrt.Revision) (string, err
 	return name, nil
 }
 
-// register adds an agent's tool to the legatus registry, once.
+// register adds an agent's tool to the playscape registry, once.
 func (s *Sandbox) register(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -492,7 +492,7 @@ func (s *Sandbox) register(name string) error {
 	if err := s.tools.Register(tool.Func(name, s.call)); err != nil {
 		// Registered by another Sandbox over the same registry: the tool body
 		// is this package's either way, so adopt it rather than failing.
-		s.logger.Debug("mandatum/runtime: legatus tool already registered", "tool", name, "error", err)
+		s.logger.Debug("fiber/runtime: playscape tool already registered", "tool", name, "error", err)
 	}
 	s.registered[name] = true
 	return nil
@@ -505,7 +505,7 @@ func (s *Sandbox) attach(key string, t *turn) error {
 	defer s.mu.Unlock()
 	if _, exists := s.turns[key]; exists {
 		// Two attempts of one run publishing into two sinks would interleave
-		// on the same topic. duraturo's fencing already stops a zombie; this
+		// on the same topic. anchor's fencing already stops a zombie; this
 		// stops the in-process case it cannot see.
 		return fmt.Errorf("%w: run %s is already executing in this process", ErrInvalid, key)
 	}
@@ -531,7 +531,7 @@ func (s *Sandbox) turn(key string) *turn {
 	return s.turns[key]
 }
 
-// call is the legatus tool: one agent turn, inside the sandbox.
+// call is the playscape tool: one agent turn, inside the sandbox.
 //
 // It runs on a node's goroutine, with a context that carries neither the run's
 // replay frame nor the caller's cancellation, and with a workspace already scoped
@@ -805,7 +805,7 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			}
 			// The sub-task is cancelled when this call stops waiting on it,
 			// for whatever reason: the parent was stopped, failed, or was
-			// abandoned. legatus has no cancel of its own, so without this a
+			// abandoned. playscape has no cancel of its own, so without this a
 			// stopped parent would leave its helpers working on answers
 			// nobody will read.
 			sub := fmt.Sprintf("sub-%d", s.subs.Add(1))

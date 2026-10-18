@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // Role is one agent in a scaffolded system: what it is called and what it is

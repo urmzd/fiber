@@ -9,9 +9,9 @@ import (
 
 	"connectrpc.com/connect"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // fakeAnswerer records what the edge asked the runtime to record.

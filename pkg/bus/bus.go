@@ -14,7 +14,7 @@
 //   - It does not authorize. Tenant is an authorization scope carried by the
 //     caller's credential and applied above; a Subscription names a topic,
 //     never a tenant.
-//   - It is not the record. duraturo's ledger is truth. The bus retains a
+//   - It is not the record. anchor's ledger is truth. The bus retains a
 //     bounded, recent window per run so a consumer can reconnect without
 //     missing the last few seconds — not so it can reconstruct a run from the
 //     beginning. A consumer that needs the whole history reads the ledger and
@@ -24,7 +24,7 @@
 //
 // Event.Seq orders events within a run and starts at 1. The bus assigns it at
 // publish time when the caller leaves it 0, and honours it when the caller
-// sets it — duraturo replays a workflow from the top, so the runtime must be
+// sets it — anchor replays a workflow from the top, so the runtime must be
 // able to re-publish the same event with the same number and get the same
 // stream back. Re-publishing a sequence a run has already reached is an
 // idempotent no-op, not a duplicate: within a run sequences only ever move
@@ -86,7 +86,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Errors returned by every backend. Callers match with errors.Is.
@@ -143,6 +143,7 @@ const (
 	// DefaultMaxRuns bounds how many runs Memory retains at once.
 	DefaultMaxRuns = 4096
 	// DefaultKeyPrefix namespaces every Redis key the bus owns.
+	// Keep the original namespace so a rename does not hide retained events.
 	DefaultKeyPrefix = "mandatum"
 	// DefaultPollInterval bounds how long a Redis subscriber blocks in one
 	// XREAD, and so how quickly it notices a new run or a closed stream.
@@ -221,7 +222,7 @@ func WithMaxRuns(n int) Option {
 	}
 }
 
-// WithKeyPrefix namespaces the Redis keys the bus owns (default "mandatum").
+// WithKeyPrefix namespaces the Redis keys the bus owns (default "mandatum", retained for storage compatibility).
 // Memory ignores it.
 func WithKeyPrefix(p string) Option {
 	return func(o *options) {

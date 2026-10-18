@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connector"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connector"
 )
 
 // ContextAPI reads the conversation the agent is authorized to answer on.

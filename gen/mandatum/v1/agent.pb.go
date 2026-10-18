@@ -1,4 +1,4 @@
-// mandatum.v1 is the wire contract every mandatum client speaks. This file is
+// mandatum.v1 is the wire contract every fiber client speaks. This file is
 // the control plane: what an agent is, how its history is kept, and the RPCs
 // that manage it.
 //
@@ -236,7 +236,7 @@ type Source struct {
 	// back to the reader.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Uri locates the corpus. Address URIs name mesh surfaces
-	// ("github://urmzd/mandatum/docs"); ordinary URLs name anything else.
+	// ("github://urmzd/fiber/docs"); ordinary URLs name anything else.
 	Uri string `protobuf:"bytes,2,opt,name=uri,proto3" json:"uri,omitempty"`
 	// Options carry retriever-specific configuration, such as a chunk size or a
 	// branch name. Unknown keys are ignored by retrievers that do not use them.
@@ -368,7 +368,7 @@ func (x *Access) GetWorkspaceAreas() []string {
 //
 // Revisions are the unit the rest of the system references. A run pins one, an
 // Event reports one, and a canary comparison is a filter over two of them on
-// the same topic (see Filter.rev in bus.proto). Nothing in mandatum references
+// the same topic (see Filter.rev in bus.proto). Nothing in fiber references
 // "the agent" without also resolving which revision of it.
 type Revision struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1130,7 +1130,7 @@ const file_mandatum_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"ListAgents\x12\x1e.mandatum.v1.ListAgentsRequest\x1a\x1f.mandatum.v1.ListAgentsResponse\"\x00\x12^\n" +
 	"\x0fGetAgentHistory\x12#.mandatum.v1.GetAgentHistoryRequest\x1a$.mandatum.v1.GetAgentHistoryResponse\"\x00\x12R\n" +
-	"\vDeleteAgent\x12\x1f.mandatum.v1.DeleteAgentRequest\x1a .mandatum.v1.DeleteAgentResponse\"\x00B6Z4github.com/urmzd/mandatum/gen/mandatum/v1;mandatumv1b\x06proto3"
+	"\vDeleteAgent\x12\x1f.mandatum.v1.DeleteAgentRequest\x1a .mandatum.v1.DeleteAgentResponse\"\x00B3Z1github.com/urmzd/fiber/gen/mandatum/v1;mandatumv1b\x06proto3"
 
 var (
 	file_mandatum_v1_agent_proto_rawDescOnce sync.Once

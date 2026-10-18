@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
 )
 
 // GuideAPI maintains a PR-scoped guide separately from run-scoped answers.
@@ -20,7 +20,7 @@ type GuideAPI interface {
 // BotLogin is the authenticated bot's login, used when recovering its comment.
 type Guide struct{ Agent, BotLogin, HeadSHA, Body string }
 
-func guideMarker(agent string) string { return "<!-- mandatum:pr-guide:" + agent + " -->" }
+func guideMarker(agent string) string { return "<!-- fiber:pr-guide:" + agent + " -->" }
 
 // UpdateGuide finds the bot-authored guide even after a restart. A human copying
 // its hidden marker cannot make the connector overwrite the human's comment.

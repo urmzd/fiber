@@ -12,16 +12,16 @@ import (
 	"testing"
 	"time"
 
-	drun "github.com/urmzd/duraturo/pkg/run"
-	"github.com/urmzd/duraturo/pkg/worker"
+	drun "github.com/urmzd/anchor/pkg/run"
+	"github.com/urmzd/anchor/pkg/worker"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // The hash is compared across processes, restarts and replays, so it must be a

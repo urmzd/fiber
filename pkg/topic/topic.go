@@ -1,4 +1,4 @@
-// Package topic is the addressing scheme of the mandatum bus.
+// Package topic is the addressing scheme of the fiber bus.
 //
 // The mental model is one line: users listen to an agent.
 //

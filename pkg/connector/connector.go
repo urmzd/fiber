@@ -33,8 +33,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Errors returned by connectors and by the registry.

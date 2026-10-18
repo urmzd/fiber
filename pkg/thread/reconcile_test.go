@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/thread"
-	"github.com/urmzd/mandatum/pkg/thread/threadtest"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/thread/threadtest"
 )
 
 var slackSource = address.MustParse("slack://T01/C02?thread=1699.001")

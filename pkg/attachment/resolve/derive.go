@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/saige/agent/types"
 )
 

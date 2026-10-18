@@ -43,17 +43,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/connectors"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/files"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/httpjson"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/inbound"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/sink"
-	"github.com/urmzd/mandatum/pkg/connectors/mention"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/connectors"
+	"github.com/urmzd/fiber/pkg/connectors/internal/files"
+	"github.com/urmzd/fiber/pkg/connectors/internal/httpjson"
+	"github.com/urmzd/fiber/pkg/connectors/internal/inbound"
+	"github.com/urmzd/fiber/pkg/connectors/internal/render"
+	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Name is the address scheme this connector owns.

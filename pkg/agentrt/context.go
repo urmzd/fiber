@@ -7,14 +7,14 @@ import (
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
 )
 
 // This file is the context policy of a turn: how the request is laid out so a
 // provider's prompt cache can reuse it, and when the history is compacted.
 // The mechanisms are saige's (its compaction strategies, its Anthropic cache
 // breakpoints, its usage deltas). What lives here is the choice of which ones
-// a mandatum turn uses and the reasons, because a wrong choice is invisible:
+// a fiber turn uses and the reasons, because a wrong choice is invisible:
 // the run still answers, it just pays full price for every token on every
 // call.
 
@@ -208,7 +208,7 @@ func newCompactionGuard(keepTurns int) *compactionGuard {
 
 func (g *compactionGuard) hooks() saige.Hooks {
 	return saige.Hooks{
-		Name:             "mandatum-compaction-guard",
+		Name:             "fiber-compaction-guard",
 		BeforeCompaction: g.before,
 		AfterCompaction:  g.after,
 	}

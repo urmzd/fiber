@@ -7,14 +7,14 @@ import (
 
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Retriever grounds a turn in a corpus.
 //
 // It is the narrow half of saige's rag Pipeline: a turn retrieves, it does not
-// ingest, so mandatum depends on one method instead of on a pipeline with a
+// ingest, so fiber depends on one method instead of on a pipeline with a
 // store, an embedder, and a chunker behind it. A deployment with a real RAG
 // pipeline adapts it in four lines (Search, then take .Context); a deployment
 // with none passes nothing and the agent answers from the model alone.
@@ -29,9 +29,9 @@ type Retriever interface {
 // Citations converts an assembled RAG context into citation event bodies, in
 // the order the context lists them.
 //
-// This is where mandatum's citations come from, and it is worth being explicit
+// This is where fiber's citations come from, and it is worth being explicit
 // about why. saige's CitationDelta reports what a model or tool cited, which
-// mandatum does not translate. The retrieval result already carries exactly what
+// fiber does not translate. The retrieval result already carries exactly what
 // a footnote needs: the exact source text, the inline label the assembled
 // prompt used, and resolvable provenance. Deriving citations from retrieval rather than from the model also
 // makes them honest: they report what the turn was GIVEN, which a model cannot

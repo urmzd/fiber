@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/knowledge"
 )
 
 const tenantA, tenantB = "acme", "globex"
@@ -19,7 +19,7 @@ const tenantA, tenantB = "acme", "globex"
 //
 // Which store is decided by the environment, not by the test: every property
 // in this file is a property of the Store contract, so the suite runs unchanged
-// against Postgres when $MANDATUM_POSTGRES_TEST_URL names one (see
+// against Postgres when $FIBER_POSTGRES_TEST_URL names one (see
 // postgres_test.go) and against Memory otherwise.
 func newStore(t *testing.T, embedder knowledge.Embedder, opts ...knowledge.Option) knowledge.Store {
 	t.Helper()

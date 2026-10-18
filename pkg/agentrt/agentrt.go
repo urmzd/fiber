@@ -1,7 +1,7 @@
 // Package agentrt builds a running agent from a pinned agent revision.
 //
 // It is the seam between two vocabularies. saige speaks providers, messages,
-// tools, and a stream of typed deltas; mandatum speaks revisions, kinds, and
+// tools, and a stream of typed deltas; fiber speaks revisions, kinds, and
 // events. agentrt translates in exactly one direction — a Revision in, event
 // bodies out — and knows nothing about how the revision was stored, which run
 // it is executing, or where its events end up. That ignorance is the point: the
@@ -127,11 +127,11 @@ import (
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/attachment/resolve"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment/resolve"
 )
 
 // DefaultMaxIter bounds the agent loop's tool-calling iterations per turn. It

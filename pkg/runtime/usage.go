@@ -10,12 +10,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // # Usage
@@ -26,7 +26,7 @@ import (
 // stopped halfway, and a total built from them always equals the sum of the
 // calls a subscriber saw.
 //
-// What is counted, across duraturo's retries and replays:
+// What is counted, across anchor's retries and replays:
 //
 //   - Every model call any attempt made, once. Each attempt writes the calls
 //     it relayed to the ledger (usageRecordName) before it returns, whether it
@@ -137,7 +137,7 @@ func (r *Runtime) priorUsage(ctx context.Context, runID string, attempt int) ([]
 	}
 	_, records, err := r.recordsOf(ctx, runID, false, prefixUsage)
 	if err != nil {
-		r.logger.Warn("mandatum/runtime: could not read the usage of earlier attempts; the total counts this one",
+		r.logger.Warn("fiber/runtime: could not read the usage of earlier attempts; the total counts this one",
 			"run_id", runID, "error", err)
 		return nil, nil
 	}
@@ -187,7 +187,7 @@ func (r *Runtime) recordSpent(ctx context.Context, runID string, s spent) bool {
 		})
 	}
 	if err != nil && !errors.Is(err, run.ErrAlreadyRecorded) {
-		r.logger.Warn("mandatum/runtime: could not record an attempt's usage; if the attempt is executed again its calls are not in the total",
+		r.logger.Warn("fiber/runtime: could not record an attempt's usage; if the attempt is executed again its calls are not in the total",
 			"run_id", runID, "attempt", s.Attempt, "calls", len(s.Calls), "error", err)
 		return false
 	}
@@ -208,11 +208,11 @@ func (r *Runtime) claimUsage(ctx context.Context, in Input, attempts []int, clai
 			continue
 		}
 		claimed[a] = true
-		_, err := duraturo.Event[json.RawMessage](ctx, usageRecordName+strconv.Itoa(a))
+		_, err := anchor.Event[json.RawMessage](ctx, usageRecordName+strconv.Itoa(a))
 		switch {
 		case err == nil, errors.Is(err, run.ErrParked):
 		default:
-			r.logger.Warn("mandatum/runtime: could not claim a usage record",
+			r.logger.Warn("fiber/runtime: could not claim a usage record",
 				"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "attempt", a, "error", err)
 		}
 	}

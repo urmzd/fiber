@@ -1,17 +1,17 @@
 // Package runtime is the durable turn: where a tag becomes a run.
 //
-// It is the composition root of the three libraries mandatum is built on, and it
+// It is the composition root of the three libraries fiber is built on, and it
 // exists because each of them owns exactly one thing and none of them owns this:
 //
-//	duraturo  the run survives a crash and replays from its ledger
-//	legatus  the turn executes inside a sandbox that enforces the agent's policy
+//	anchor  the run survives a crash and replays from its ledger
+//	playscape  the turn executes inside a sandbox that enforces the agent's policy
 //	saige     the turn is an agent loop (through pkg/agentrt)
 //	pkg/bus   every event fans out live to observers and sinks
 //
 // # Idempotency
 //
 // A run's id is the tag's id (see RunID). Slack retries its event, GitHub
-// redelivers its webhook, a cron fires twice on a leader flap — and duraturo
+// redelivers its webhook, a cron fires twice on a leader flap — and anchor
 // treats starting a run that already exists as a no-op returning the existing
 // run. A redelivery therefore JOINS the run it duplicated instead of starting a
 // second one, and no component downstream has to deduplicate anything.
@@ -22,11 +22,11 @@
 // the run's input. Every execution of that run, forever, resolves that number.
 // Nothing inside the workflow body ever asks for "latest".
 //
-// This is not a nicety. duraturo replays a workflow from the top: on the second
+// This is not a nicety. anchor replays a workflow from the top: on the second
 // attempt the body re-executes and its recorded calls are matched by name and
 // input hash. If the body resolved "latest" and someone revised the agent
 // between attempts, the replayed call would carry a different input, the hashes
-// would not match, and duraturo would fail the run with ErrNonDeterministic —
+// would not match, and anchor would fail the run with ErrNonDeterministic —
 // after the model had already been paid for the first attempt. Worse, if it did
 // somehow proceed, half a conversation would be answered by one definition and
 // half by another, and the transcript would be a lie.
@@ -65,7 +65,7 @@
 //
 // # Every event is published twice, to two different systems
 //
-//	duraturo.Emit    the run's own durable journal: replayable, per-run,
+//	anchor.Emit    the run's own durable journal: replayable, per-run,
 //	                 attempt-tagged, and readable by the engine that owns the
 //	                 run. It survives the process. It is how an interrupted
 //	                 stream can be reconstructed and how a resuming attempt can
@@ -92,7 +92,7 @@
 // # A run can park on a person
 //
 // A turn that needs a person (an approval, a choice, a reply) ends at the
-// question. The run publishes it on lifecycle.parked, waits on a duraturo
+// question. The run publishes it on lifecycle.parked, waits on a anchor
 // event record holding no worker, and continues the turn with the first
 // answer recorded (Answer), the question's default once it expires, or ends
 // stopped if it is stopped while it waits. See park.go.
@@ -108,9 +108,9 @@
 //
 // # Single goroutine
 //
-// duraturo v1 workflow bodies are single-goroutine. Nothing in this package
-// forks the workflow, and every duraturo call — Call, Emit — happens on the
-// goroutine the worker invoked. Parallelism lives inside the legatus task,
+// anchor v1 workflow bodies are single-goroutine. Nothing in this package
+// forks the workflow, and every anchor call — Call, Emit — happens on the
+// goroutine the worker invoked. Parallelism lives inside the playscape task,
 // where it cannot confuse replay.
 package runtime
 
@@ -126,16 +126,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/thread"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/topic"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment"
 )
 
 // Activity names. They are the correlation contract with the ledger: records
@@ -182,7 +182,7 @@ type Specs interface {
 // Executor runs one turn in isolation and streams what it produces.
 //
 // It is an interface because isolation is a deployment decision: Sandbox runs
-// the turn as a legatus task under the pinned revision's NGAC policy, and that
+// the turn as a playscape task under the pinned revision's NGAC policy, and that
 // is the implementation a deployment should use. A caller that has already
 // isolated its process differently can supply another.
 //
@@ -194,11 +194,11 @@ type Executor interface {
 
 // Input is a run's durable input: the tag, plus the revision pinned to it.
 //
-// It must be byte-identical on every attempt, because duraturo hashes it to
+// It must be byte-identical on every attempt, because anchor hashes it to
 // match a replayed call against its record. Nothing derived from the moment of
 // execution may appear here — not a timestamp, not an attempt number, not a
 // sequence number. The attempt-varying values a turn needs are read from the
-// replay frame instead (see duraturo.FromContext).
+// replay frame instead (see anchor.FromContext).
 type Input struct {
 	// Tag is the request as the trigger raised it.
 	Tag envelope.Tag `json:"tag"`
@@ -296,7 +296,7 @@ type Request struct {
 	Attachments []attachment.Attachment `json:"attachments,omitempty"`
 	// Revision is the pinned definition to execute.
 	Revision agentrt.Revision `json:"revision"`
-	// Service is set by the Sandbox: the legatus deployment this turn runs
+	// Service is set by the Sandbox: the playscape deployment this turn runs
 	// in, so a delegated sub-task can be awaited in the right place.
 	Service string `json:"service,omitempty"`
 	// Accounting is the prefix the turn's model calls are keyed under when
@@ -388,7 +388,7 @@ type Acceptance struct {
 	AcceptedAt time.Time
 }
 
-// Entry is one event in a run's durable journal, as duraturo.Emit records it.
+// Entry is one event in a run's durable journal, as anchor.Emit records it.
 //
 // It exists because envelope.Event does not survive JSON: topic.Topic keeps its
 // segments unexported so a malformed topic cannot be constructed, which is the
@@ -432,7 +432,7 @@ func (n Entry) Event() (envelope.Event, error) {
 
 // Runtime accepts tags and runs them durably.
 type Runtime struct {
-	client *duraturo.Client
+	client *anchor.Client
 	specs  Specs
 	bus    Bus
 	exec   Executor
@@ -462,9 +462,9 @@ type Runtime struct {
 	childRuns   bool
 
 	registry *run.Registry
-	turn     *duraturo.ActivityFn[Input, Output]
-	agent    *duraturo.ActivityFn[Input, Outcome]
-	resume   *duraturo.ActivityFn[Continue, Outcome]
+	turn     *anchor.ActivityFn[Input, Output]
+	agent    *anchor.ActivityFn[Input, Outcome]
+	resume   *anchor.ActivityFn[Continue, Outcome]
 }
 
 // Option configures a Runtime.
@@ -539,14 +539,14 @@ func WithMessageID(fn func(envelope.Tag) string) Option {
 // New composes a runtime.
 //
 // The durable activities are registered in a registry OWNED BY THIS INSTANCE
-// rather than duraturo's default one. Two runtimes in one process (a test suite,
+// rather than anchor's default one. Two runtimes in one process (a test suite,
 // a fleet serving two tenants' agents with different executors) would otherwise
 // panic on a duplicate activity name at construction. Pass Registry() to the
 // worker that consumes these runs.
-func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Option) (*Runtime, error) {
+func New(client *anchor.Client, specs Specs, b Bus, exec Executor, opts ...Option) (*Runtime, error) {
 	switch {
 	case client == nil:
-		return nil, fmt.Errorf("%w: no duraturo client", ErrInvalid)
+		return nil, fmt.Errorf("%w: no anchor client", ErrInvalid)
 	case specs == nil:
 		return nil, fmt.Errorf("%w: no spec source; a run cannot pin a revision it cannot resolve", ErrInvalid)
 	case b == nil:
@@ -579,12 +579,12 @@ func New(client *duraturo.Client, specs Specs, b Bus, exec Executor, opts ...Opt
 	if r.control == nil {
 		// Said once, here, rather than discovered at the first stop: a bus
 		// wrapper that only forwards Publish quietly removes the fast path.
-		r.logger.Warn("mandatum/runtime: the bus cannot be subscribed to, so a running turn hears a stop only through the ledger poll",
+		r.logger.Warn("fiber/runtime: the bus cannot be subscribed to, so a running turn hears a stop only through the ledger poll",
 			"stop_ledger", r.stops != nil)
 	}
-	r.turn = duraturo.ActivityIn(r.registry, ActivityTurn, r.runTurn)
-	r.agent = duraturo.ActivityIn(r.registry, ActivityAgent, r.runAgent)
-	r.resume = duraturo.ActivityIn(r.registry, ActivityResume, r.runResume)
+	r.turn = anchor.ActivityIn(r.registry, ActivityTurn, r.runTurn)
+	r.agent = anchor.ActivityIn(r.registry, ActivityAgent, r.runAgent)
+	r.resume = anchor.ActivityIn(r.registry, ActivityResume, r.runResume)
 	return r, nil
 }
 
@@ -611,11 +611,11 @@ func (r *Runtime) Registry() *run.Registry { return r.registry }
 // announcement it already made is the announcement it makes again.
 //
 // Accept is idempotent on Tag.ID: a redelivery cannot change what the run pinned,
-// because duraturo returns the existing run untouched and the bus keeps the first
+// because anchor returns the existing run untouched and the bus keeps the first
 // write of sequence 1. (A redelivery does re-resolve the current revision for its
 // own accepted event, which the bus then discards. The run's own events all
 // report the pinned revision, which is the one that matters.) The same holds for
-// the history pin: a redelivery reads a newer head and duraturo discards it.
+// the history pin: a redelivery reads a newer head and anchor discards it.
 func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
 	return r.accept(ctx, tag, nil)
 }
@@ -661,11 +661,11 @@ func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRe
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", tag.ID, err)
 	}
 
-	startOpts := []duraturo.StartOption{duraturo.WithRunID(runID)}
+	startOpts := []anchor.StartOption{anchor.WithRunID(runID)}
 	if parent != nil {
-		startOpts = append(startOpts, duraturo.WithParent(parent.RunID))
+		startOpts = append(startOpts, anchor.WithParent(parent.RunID))
 	}
-	if _, err := duraturo.Start(ctx, r.client, r.turn, in, startOpts...); err != nil {
+	if _, err := anchor.Start(ctx, r.client, r.turn, in, startOpts...); err != nil {
 		// Start returns a handle alongside an enqueue failure: the run is
 		// durable and the janitor will drive it anyway. Report the error —
 		// the caller asked for an acknowledgement it did not fully get — but
@@ -677,7 +677,7 @@ func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRe
 
 // Result blocks until a run is terminal and returns its output.
 func (r *Runtime) Result(ctx context.Context, runID string) (Output, error) {
-	return duraturo.HandleFor[Output](r.client, runID).Result(ctx)
+	return anchor.HandleFor[Output](r.client, runID).Result(ctx)
 }
 
 // runTurn is the workflow body: one durable turn.
@@ -686,12 +686,12 @@ func (r *Runtime) Result(ctx context.Context, runID string) (Output, error) {
 // either derived from the pinned input or read from the replay frame, so a
 // replay produces the same decisions; nothing here resolves, reads a clock for a
 // decision, or forks. A turn that parks on a question waits for the answer as
-// a duraturo event record and continues in a later attempt (see park.go).
+// a anchor event record and continues in a later attempt (see park.go).
 func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	attempt := attemptOf(ctx)
 	b, err := newBand(r.stride, attempt)
 	if err != nil {
-		return Output{}, duraturo.NonRetryable(err)
+		return Output{}, anchor.NonRetryable(err)
 	}
 	at := &attemptLog{r: r, in: in, band: b, attempt: attempt}
 	// The agent activity opens the attempt when it executes for real; a
@@ -739,7 +739,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		return Output{}, err
 
 	case err != nil:
-		// Retry budget belongs to duraturo, not here, so terminality is
+		// Retry budget belongs to anchor, not here, so terminality is
 		// reported as what this package can actually know: a non-retryable
 		// error will not be attempted again, anything else may be. A run that
 		// later exhausts its budget has its last failure on the bus marked
@@ -807,7 +807,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 }
 
 // claimStop claims a recorded stop request, for the one case where it
-// matters: duraturo replays from the records it loaded when the attempt
+// matters: anchor replays from the records it loaded when the attempt
 // began, and logs any of those that no call read. A request recorded before
 // this attempt began is among them and is claimed here. One recorded during
 // the attempt is not among them; it reads as an event that has not happened
@@ -815,11 +815,11 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 // body carries on. The claim is advisory either way: the outcome is already
 // decided.
 func (r *Runtime) claimStop(ctx context.Context, in Input) {
-	_, err := duraturo.Event[json.RawMessage](ctx, stopRecordName)
+	_, err := anchor.Event[json.RawMessage](ctx, stopRecordName)
 	switch {
 	case err == nil, errors.Is(err, run.ErrParked):
 	default:
-		r.logger.Warn("mandatum/runtime: could not claim the recorded stop request",
+		r.logger.Warn("fiber/runtime: could not claim the recorded stop request",
 			"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
 	}
 }
@@ -879,7 +879,7 @@ func (a *attemptLog) publish(ctx context.Context, kind envelope.Kind, body any) 
 // announcement of it is worth a log line, not a different error.
 func (a *attemptLog) report(ctx context.Context, kind envelope.Kind, body any) {
 	if err := a.publish(ctx, kind, body); err != nil {
-		a.r.logger.Warn("mandatum/runtime: could not publish lifecycle event",
+		a.r.logger.Warn("fiber/runtime: could not publish lifecycle event",
 			"run_id", RunID(a.in.Tag.Tenant, a.in.Tag.ID), "kind", string(kind), "seq", a.band.close, "error", err)
 	}
 }
@@ -915,7 +915,7 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	attempt := attemptOf(ctx)
 	b, err := newBand(r.stride, attempt)
 	if err != nil {
-		return Outcome{}, duraturo.NonRetryable(err)
+		return Outcome{}, anchor.NonRetryable(err)
 	}
 
 	history, err := r.pinnedHistory(ctx, in)
@@ -962,7 +962,7 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 		if err != nil {
 			// The band is spent. Retrying would produce the same flood, so
 			// this is terminal rather than another paid attempt.
-			return duraturo.NonRetryable(err)
+			return anchor.NonRetryable(err)
 		}
 		return r.publishRaw(ctx, in, seq, c.Kind, c.Payload)
 	})
@@ -1011,15 +1011,15 @@ func (r *Runtime) pinned(ctx context.Context, in Input) (agentrt.Revision, error
 		return agentrt.Revision{}, fmt.Errorf("runtime: resolve agent %q revision %d: %w", in.Tag.Agent, in.Rev, err)
 	}
 	if err := rev.Validate(); err != nil {
-		return agentrt.Revision{}, duraturo.NonRetryable(err)
+		return agentrt.Revision{}, anchor.NonRetryable(err)
 	}
 	if rev.Rev != in.Rev {
-		return agentrt.Revision{}, duraturo.NonRetryable(fmt.Errorf(
+		return agentrt.Revision{}, anchor.NonRetryable(fmt.Errorf(
 			"%w: run pinned agent %q revision %d but the control plane returned revision %d",
 			ErrInvalid, in.Tag.Agent, in.Rev, rev.Rev))
 	}
 	if in.Hash != "" && rev.Hash != "" && in.Hash != rev.Hash {
-		return agentrt.Revision{}, duraturo.NonRetryable(fmt.Errorf(
+		return agentrt.Revision{}, anchor.NonRetryable(fmt.Errorf(
 			"%w: agent %q revision %d hash is %s, but this run pinned %s; an immutable revision changed",
 			ErrInvalid, in.Tag.Agent, in.Rev, rev.Hash, in.Hash))
 	}
@@ -1046,7 +1046,7 @@ func (r *Runtime) pinHistory(ctx context.Context, tag envelope.Tag) (uint64, err
 			skip = append(skip, id)
 		}
 		if err := thread.Reconcile(ctx, r.threads, r.lister, key, tag.Source, skip...); err != nil {
-			r.logger.Warn("mandatum/runtime: could not reconcile the thread with its surface; pinning what the journal holds",
+			r.logger.Warn("fiber/runtime: could not reconcile the thread with its surface; pinning what the journal holds",
 				"run_id", RunID(tag.Tenant, tag.ID), "thread", key.String(), "error", err)
 		}
 	}
@@ -1071,14 +1071,14 @@ func (r *Runtime) pinnedHistory(ctx context.Context, in Input) ([]agentrt.Messag
 	}
 	key := thread.KeyOf(in.Tag)
 	if r.threads == nil {
-		return nil, duraturo.NonRetryable(fmt.Errorf(
+		return nil, anchor.NonRetryable(fmt.Errorf(
 			"%w: run pinned %d entries of thread %s but this runtime has no thread store",
 			ErrInvalid, in.HistorySeq, key))
 	}
 	entries, err := r.threads.History(ctx, key, in.HistorySeq)
 	switch {
 	case errors.Is(err, thread.ErrGap), errors.Is(err, thread.ErrInvalid):
-		return nil, duraturo.NonRetryable(fmt.Errorf("runtime: history of %s up to %d: %w", key, in.HistorySeq, err))
+		return nil, anchor.NonRetryable(fmt.Errorf("runtime: history of %s up to %d: %w", key, in.HistorySeq, err))
 	case err != nil:
 		return nil, fmt.Errorf("runtime: history of %s up to %d: %w", key, in.HistorySeq, err)
 	}
@@ -1197,7 +1197,7 @@ func (r *Runtime) publish(ctx context.Context, in Input, seq uint64, kind envelo
 // chunks arrive that way and re-encoding them would be a round trip for nothing.
 //
 // The bus comes first and its failure fails the turn. The journal is written
-// after and best-effort: duraturo.Emit is a no-op outside a run and when the
+// after and best-effort: anchor.Emit is a no-op outside a run and when the
 // queue has no delta log, and a journal that lost an entry costs observability,
 // never correctness — the ledger holds the truth. The one Emit error that is not
 // advisory is ErrSuperseded: it means another attempt owns this run now, and a
@@ -1208,11 +1208,11 @@ func (r *Runtime) publishRaw(ctx context.Context, in Input, seq uint64, kind env
 	if err := r.bus.Publish(ctx, e); err != nil {
 		return fmt.Errorf("runtime: publish %s seq %d on %s: %w", kind, seq, e.Topic, err)
 	}
-	if err := duraturo.Emit(ctx, EntryOf(e)); err != nil {
+	if err := anchor.Emit(ctx, EntryOf(e)); err != nil {
 		if errors.Is(err, run.ErrSuperseded) {
 			return fmt.Errorf("runtime: journal %s seq %d: %w", kind, seq, err)
 		}
-		r.logger.Warn("mandatum/runtime: journal append failed; the bus has the event",
+		r.logger.Warn("fiber/runtime: journal append failed; the bus has the event",
 			"run_id", e.RunID, "seq", seq, "kind", string(kind), "error", err)
 	}
 	return nil
@@ -1228,7 +1228,7 @@ func (r *Runtime) event(in Input, seq uint64, kind envelope.Kind) envelope.Event
 		// Accept validated this topic before the run existed, so a failure
 		// here is impossible; the zero topic makes the bus reject the event
 		// rather than publishing it somewhere unintended.
-		r.logger.Error("mandatum/runtime: run topic is invalid", "agent", in.Tag.Agent, "run_id", runID, "error", err)
+		r.logger.Error("fiber/runtime: run topic is invalid", "agent", in.Tag.Agent, "run_id", runID, "error", err)
 	}
 	return envelope.Event{
 		Seq:    seq,
@@ -1250,7 +1250,7 @@ func (r *Runtime) event(in Input, seq uint64, kind envelope.Kind) envelope.Event
 // not part of the input and cannot change what the input hashes to. Outside a
 // run there is exactly one attempt.
 func attemptOf(ctx context.Context) int {
-	info, ok := duraturo.FromContext(ctx)
+	info, ok := anchor.FromContext(ctx)
 	if !ok || info.Attempt < 1 {
 		return 1
 	}

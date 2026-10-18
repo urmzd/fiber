@@ -1,4 +1,4 @@
-// mandatum.v1 is the wire contract every mandatum client speaks. This file is
+// mandatum.v1 is the wire contract every fiber client speaks. This file is
 // the control plane: what an agent is, how its history is kept, and the RPCs
 // that manage it.
 //
@@ -26,7 +26,7 @@ import (
 	connect "connectrpc.com/connect"
 	context "context"
 	errors "errors"
-	v1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	v1 "github.com/urmzd/fiber/gen/mandatum/v1"
 	http "net/http"
 	strings "strings"
 )

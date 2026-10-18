@@ -4,12 +4,12 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/fiber/pkg/address"
 )
 
 func TestParseRoundTrip(t *testing.T) {
 	for _, in := range []string{
-		"github://urmzd/mandatum/issues/42",
+		"github://urmzd/fiber/issues/42",
 		"slack://T0123/C0456",
 		"jira://acme/PROJ-5",
 		"cron://acme/nightly-review",
@@ -27,7 +27,7 @@ func TestParseRoundTrip(t *testing.T) {
 }
 
 func TestParseFields(t *testing.T) {
-	a, err := address.Parse("github://urmzd/mandatum/issues/42")
+	a, err := address.Parse("github://urmzd/fiber/issues/42")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestParseFields(t *testing.T) {
 	if a.Workspace != "urmzd" {
 		t.Errorf("Workspace = %q", a.Workspace)
 	}
-	if got := a.Resource(); got != "mandatum/issues/42" {
+	if got := a.Resource(); got != "fiber/issues/42" {
 		t.Errorf("Resource() = %q", got)
 	}
 }
@@ -85,7 +85,7 @@ func TestWithParamDoesNotMutate(t *testing.T) {
 func TestParseRejectsMalformed(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"empty", ""},
-		{"no scheme", "urmzd/mandatum"},
+		{"no scheme", "urmzd/fiber"},
 		{"no workspace", "github://"},
 		{"scheme only", "github:"},
 	}
@@ -105,7 +105,7 @@ func TestParseRejectsMalformed(t *testing.T) {
 func TestParseRejectsUnsafeWorkspace(t *testing.T) {
 	for _, in := range []string{
 		"jira://acme.atlassian.net/PROJ-5",
-		"github://urmzd:mandatum/issues",
+		"github://urmzd:fiber/issues",
 	} {
 		if _, err := address.Parse(in); err == nil {
 			t.Fatalf("Parse(%q) accepted an unsafe workspace", in)
@@ -141,7 +141,7 @@ func TestPathSegmentsSurviveEncodedSeparators(t *testing.T) {
 		{"percent", []string{"50%"}},
 		{"space and hash", []string{"design doc #4"}},
 		{"question mark", []string{"a?b", "c"}},
-		{"mixed", []string{"mandatum", "pull/7", "files"}},
+		{"mixed", []string{"fiber", "pull/7", "files"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

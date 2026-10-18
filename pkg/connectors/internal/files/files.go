@@ -12,9 +12,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/connectors"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/connectors"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // HandoffGrace bounds how long a tag that carries files waits to be taken

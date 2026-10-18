@@ -8,7 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
 )
 
 // Spec is an agent definition as the edge carries it: a document the server

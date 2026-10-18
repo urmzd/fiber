@@ -9,7 +9,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
 )
 
 func specMsg(name string) *mandatumv1.AgentSpec {
@@ -22,7 +22,7 @@ func specMsg(name string) *mandatumv1.AgentSpec {
 		Tools:        []string{"github_comment"},
 		Sources: []*mandatumv1.Source{{
 			Name:    "docs",
-			Uri:     "github://urmzd/mandatum/docs",
+			Uri:     "github://urmzd/fiber/docs",
 			Options: map[string]string{"branch": "main"},
 		}},
 		Access: &mandatumv1.Access{

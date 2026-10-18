@@ -33,7 +33,7 @@
 // this file".
 //
 // The caller supplies the tenant from the run's authorization scope. As
-// everywhere else in mandatum, it is never read from a request body.
+// everywhere else in fiber, it is never read from a request body.
 //
 // # What this package is not
 //

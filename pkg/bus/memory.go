@@ -8,8 +8,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // Memory is a complete single-process bus, not a stub: it is what the

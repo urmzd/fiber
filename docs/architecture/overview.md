@@ -5,7 +5,7 @@
 > designed but not yet finished, it is called out in
 > [Limitations](#limitations) rather than described as though it exists.
 
-mandatum is an agent platform and a low-latency pub/sub bus. Create an agent from
+fiber is an agent platform and a low-latency pub/sub bus. Create an agent from
 a spec, tag it from anywhere, get its events streamed to anyone and delivered
 anywhere.
 
@@ -17,19 +17,19 @@ below follows from it.
 
 ## What each layer owns
 
-mandatum composes three libraries and adds the parts that make them a product.
+fiber composes three libraries and adds the parts that make them a product.
 
 | Concern | Owner |
 |---------|-------|
 | The agent loop, typed deltas, RAG and citations | [saige](https://github.com/urmzd/saige) |
-| Durability, replay, exactly-once effects, per-run journal | [duraturo](https://github.com/urmzd/duraturo) |
-| Sandboxed execution nodes, NGAC access control | [legatus](https://github.com/urmzd/legatus) |
-| Agent specs, revisions, registry | mandatum |
-| Topics, the bus, delivery routing, transports | mandatum |
-| Connectors: triggers, sinks, and native actions | mandatum |
+| Durability, replay, exactly-once effects, per-run journal | [anchor](https://github.com/urmzd/anchor) |
+| Sandboxed execution nodes, NGAC access control | [playscape](https://github.com/urmzd/playscape) |
+| Agent specs, revisions, registry | fiber |
+| Topics, the bus, delivery routing, transports | fiber |
+| Connectors: triggers, sinks, and native actions | fiber |
 
-The division is strict. duraturo owns whether work survives a crash; legatus
-owns what a tool is allowed to touch; saige owns what the model does. mandatum
+The division is strict. anchor owns whether work survives a crash; playscape
+owns what a tool is allowed to touch; saige owns what the model does. fiber
 owns addressing, distribution, and the control plane, and delegates the rest.
 
 ## Topics: one namespace, matched by prefix
@@ -137,10 +137,10 @@ An `AgentSpec` is immutable. Revising appends revision N+1 and never modifies
 what is already there. A run pins its revision at accept time and executes
 against that revision forever.
 
-This is a correctness requirement, not bookkeeping. duraturo replays a workflow
+This is a correctness requirement, not bookkeeping. anchor replays a workflow
 from the top on every attempt. If a run resolved "latest" inside its workflow
 body and someone revised the agent between attempts, the replay would run
-against a different prompt and diverge, which duraturo detects as
+against a different prompt and diverge, which anchor detects as
 `ErrNonDeterministic`. Pinning the revision in the run's durable input is what
 makes replay safe.
 
@@ -158,14 +158,14 @@ Two consequences worth knowing:
 
 ## Durability
 
-duraturo owns durability; legatus does not. legatus's queue is at-most-once in
+anchor owns durability; playscape does not. playscape's queue is at-most-once in
 its current beta, so a node that dies mid-task drops it. That is acceptable here
-only because the durable run wrapping the task is duraturo's, and duraturo
+only because the durable run wrapping the task is anchor's, and anchor
 replays it.
 
 Each event is published twice, to two systems with different jobs:
 
-- `duraturo.Emit` writes the durable per-run journal, which is what replay and
+- `anchor.Emit` writes the durable per-run journal, which is what replay and
   cursor resume are built on.
 - `bus.Publish` writes the live cross-run bus, which is what observers and
   delivery read.
@@ -217,7 +217,7 @@ its own tenant.
 ### Where the request lives
 
 **The ledger is the truth.** `Stop` writes the request on the run as a
-write-once event record (`event:mandatum.stop#0`) in the duraturo ledger the
+write-once event record (`event:mandatum.stop#0`) in the anchor ledger the
 run already lives in: per run, scoped by the run's tenant, read in one round
 trip when an attempt starts, and on Postgres the same tables as every other
 record (`pkg/durable`), so there is no new schema. It records only for a run
@@ -225,7 +225,7 @@ that exists in that ledger, is the caller's tenant's and has not ended, so the
 ledger holds at most one stop record per run, and it lives exactly as long as
 the run's other records. A request for anything else writes nothing and
 publishes nothing. When a request was recorded before an attempt began, that
-attempt's workflow body claims it, so duraturo does not report it as a record
+attempt's workflow body claims it, so anchor does not report it as a record
 no call read; one recorded during an attempt is not in that attempt's replay
 set and needs no claim.
 
@@ -265,9 +265,9 @@ one missed read. Someone who can time the call closely can tell whether a run
 with that id exists in some tenant, though not whose it is or what it holds.
 Because run ids are computable, that can reveal whether a known tag (a
 schedule's occurrence, say) started a run in another tenant. Closing it needs
-a ledger lookup keyed by tenant, which duraturo's ledger does not have.
+a ledger lookup keyed by tenant, which anchor's ledger does not have.
 
-**The decision is a recorded result.** duraturo replays the workflow body, and
+**The decision is a recorded result.** anchor replays the workflow body, and
 whether somebody has asked for a stop changes between attempts, so the body
 never asks. The memoized agent activity reads the ledger and listens, and
 returns a stopped outcome instead of an error. The ledger records the run as
@@ -338,7 +338,7 @@ keys); a deployment that needs Redis bounded sets an eviction policy.
 
 Every run reports what it spent: tokens, the prompt cache's share, cost where
 it can be known, and how full the context was. The figures are saige's;
-mandatum forwards them, keys them, and adds them up without counting anything
+fiber forwards them, keys them, and adds them up without counting anything
 twice.
 
 ### What is reported, and where
@@ -366,13 +366,13 @@ before usage existed, and an event per model call that such a receiver
 refuses, or fails on and has retried in the run's ordered delivery lane, would
 delay its `lifecycle.completed`. "Everything" does not cover accounting, as
 the root topic does not cover the control namespace. Subscriptions are not
-routes: a subscription with no filter (`mandatum listen`, SSE) sees usage like
+routes: a subscription with no filter (`fiber listen`, SSE) sees usage like
 any other kind.
 
 Sinks that render a chat surface (Slack, GitHub, Jira) ignore usage even when a
 route names it: token counts and cost are for whoever pays, not for everyone
 in a channel or on an issue. A webhook route that selects `usage` receives it.
-`mandatum listen` prints one line per call, and `mandatum tag` prints the
+`fiber listen` prints one line per call, and `fiber tag` prints the
 run's total on stderr once the run ends. `BusService.Publish` refuses the
 family: only the attempt that spent the tokens writes them.
 
@@ -380,7 +380,7 @@ family: only the attempt that spent the tokens writes them.
 
 Cost comes from saige's price catalog and nowhere else. saige's adapters
 resolve a model's rate card from the catalog (`ModelCapabilities.Pricing`,
-with its `AsOf` date and currency), and mandatum prices each call with
+with its `AsOf` date and currency), and fiber prices each call with
 `Pricing.Cost` over saige's billing tiers (`UsageFromDelta`). A model with no
 rate card, a modality the card does not price, or a call whose provider
 reported no tokens gets no cost: its tokens are counted, the call is counted in
@@ -405,14 +405,14 @@ any was priced from a card with no date.
 
 ### Counted once, across retries and replays
 
-duraturo retries a failed attempt and replays the workflow body from the top,
+anchor retries a failed attempt and replays the workflow body from the top,
 and a delivery can repeat any event. The rule:
 
 - **Every model call any attempt made is counted, once.** Before the agent
   activity returns, failed or succeeded, it writes the calls it relayed to the
   run's ledger as a write-once event record,
   `event:mandatum.usage.a<attempt>#0`. A failure is retried, and so is a
-  success whose result duraturo never managed to record; either way the
+  success whose result anchor never managed to record; either way the
   attempt that finally records an outcome reads the earlier attempts' records
   inside the agent activity, adds its own calls, and the total is memoized
   with the outcome. The workflow body claims the records the outcome counted,
@@ -422,7 +422,7 @@ and a delivery can repeat any event. The rule:
 - **A stopped turn is counted.** saige settles the call a stop cut short and
   reports its usage when the provider had reported any, and the stopped
   outcome carries the total like a completed one.
-- **Each report has a key.** `accounting_id` is always mandatum's,
+- **Each report has a key.** `accounting_id` is always fiber's,
   `<run>/a<attempt>[/<agent>.<sub>]/<n>`, which no other call of any attempt or
   any delegation can share. saige's own `AccountingID` is carried as
   `saige_accounting_id` and never counted by, because saige keeps it stable
@@ -511,7 +511,7 @@ Runtime.Answer                   checks the answer, writes the resolution (first
   -> mandatum.turn.resume          continues the turn with the answer (memoized)
 ```
 
-The resolution is a write-once duraturo event record, and it is the only
+The resolution is a write-once anchor event record, and it is the only
 thing the workflow body decides from. An answer writes it, a stop writes it,
 an expiry writes it; each reads back whichever was first. That is what makes
 an answer exactly-once under concurrent answers (every caller is told the
@@ -524,7 +524,7 @@ asked parks even when an answer lands a moment later, and the answer's
 wake-up starts the next attempt, so each attempt's sequence band, usage
 record and accounting keys stay its own.
 
-`Runtime.Answer` (`InvokeService.Answer`, `mandatum answer`) is scoped to the
+`Runtime.Answer` (`InvokeService.Answer`, `fiber answer`) is scoped to the
 caller's tenant: a question of another tenant's run is reported exactly like
 one that does not exist. Who answered comes from the credential, as for a tag
 or a stop (see "Who may answer" below). An answer is checked against its question before it is recorded:
@@ -657,7 +657,7 @@ transports, storage, or agents.
 ```
 leaves (stdlib only)
   pkg/topic        agent:name[:run], prefix containment, the control namespace
-  pkg/address      github://urmzd/mandatum/issues/42, slack://T01/C02?thread=...
+  pkg/address      github://urmzd/fiber/issues/42, slack://T01/C02?thread=...
   pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription
   pkg/signature    HMAC verification for inbound webhooks
   pkg/agentspec    immutable specs, content-addressed revisions
@@ -669,7 +669,7 @@ seams
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations
-  pkg/runtime      the durable duraturo turn, legatus sandbox, stop, usage, parking
+  pkg/runtime      the durable anchor turn, playscape sandbox, stop, usage, parking
   pkg/router       delivery fan-out to sinks
   pkg/connectors   slack, github, jira, cron, webhook
   internal/server  Connect handlers, SSE, webhook ingress
@@ -718,7 +718,7 @@ valid as long as the secret does. That defense lives downstream in `Tag.ID`
 idempotency instead, and the package documents this rather than implying a
 protection it cannot provide.
 
-**The NGAC policy path** is legatus's. An agent's `Access` block compiles into a
+**The NGAC policy path** is playscape's. An agent's `Access` block compiles into a
 policy graph enforced by the sandbox with default deny, covering both workspace
 areas and the spawn allowlist that governs agent-tags-agent.
 
@@ -726,22 +726,22 @@ areas and the spawn allowlist that governs agent-tags-agent.
 
 Verified against the code, and honest.
 
-- **The bus needs Redis or memory, not Postgres.** duraturo's `pgqueue` does not
+- **The bus needs Redis or memory, not Postgres.** anchor's `pgqueue` does not
   implement the `DeltaLog` capability, stated explicitly at
   `adapters/postgres/pgqueue/pgqueue.go`. A Postgres-only deployment runs
   durably but cannot stream.
-- **duraturo's Redis and Postgres adapter submodules are not depended on.** They
-  currently fail checksum verification against `sum.golang.org`, so mandatum
-  depends only on duraturo's root module and ships its own Redis Streams bus
-  backend. duraturo's in-memory ledger and queue are complete systems and are
+- **anchor's Redis and Postgres adapter submodules are not depended on.** They
+  currently fail checksum verification against `sum.golang.org`, so fiber
+  depends only on anchor's root module and ships its own Redis Streams bus
+  backend. anchor's in-memory ledger and queue are complete systems and are
   what the single-binary deployment uses.
-- **legatus's queue is at-most-once** in beta. Durability comes from duraturo.
+- **playscape's queue is at-most-once** in beta. Durability comes from anchor.
 - **Citations are derived from retrieval.** Citations are extracted from RAG
-  `AssembledContext` blocks and emitted as mandatum's own `delta.citation`
+  `AssembledContext` blocks and emitted as fiber's own `delta.citation`
   events. saige's `CitationDelta`, which reports what a model or tool cited, is
   not translated into events yet.
-- **duraturo v1 workflow bodies are single-goroutine.** Parallelism belongs
-  inside a legatus task, not in a forked workflow.
+- **anchor v1 workflow bodies are single-goroutine.** Parallelism belongs
+  inside a playscape task, not in a forked workflow.
 - **The bus is at-least-once with no consumer groups.** Subjects, filters, and
   cursors cover real-time consumers. If durable competing consumers with
   independent offsets become a requirement, the honest answer is NATS JetStream
@@ -767,7 +767,7 @@ Verified against the code, and honest.
   starting from now, which the bus does not have.
 - **Stopping reaches a turn through the in-process sandbox.** The stop signal
   and the abort of an abandoned task cross from the waiting goroutine to the
-  legatus tool in memory. A remote legatus node would need them carried over
+  playscape tool in memory. A remote playscape node would need them carried over
   its own transport; only the in-process plane is supported and tested.
 - **Stop is an HTTP route, not an RPC.** `POST /v1/runs/{id}/stop`. A run's
   stopped status is on the wire (`RUN_STATUS_STOPPED`); asking for a stop is
@@ -808,7 +808,7 @@ Verified against the code, and honest.
   limit from the catalog, 0 when the catalog does not declare one, and the
   prompt size is the provider's count for the latest call. Nothing estimates a
   prompt before it is sent.
-- **Roll-up of delegated runs is the host's call.** mandatum cannot see a run
+- **Roll-up of delegated runs is the host's call.** fiber cannot see a run
   a Delegator started until the host reports it with
   `runtime.ReportChildUsage`, and the host must report it after it ended.
 - **Parking needs the ledger.** A question and its answer are records on the
@@ -859,6 +859,6 @@ use arbitrary caller text as privileged instructions.
 
 `WithCallTool` lets a host replace per-target tag tools with one catalog tool
 for agents with `Access.Spawn`. The host tool must check the caller's pinned
-spawn grant. Without that option, mandatum retains its existing per-target tools.
+spawn grant. Without that option, fiber retains its existing per-target tools.
 The runtime still owns execution, streaming and sandboxing; the host owns its
 input references, output contracts and answer delivery policy.

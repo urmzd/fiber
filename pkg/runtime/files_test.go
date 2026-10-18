@@ -8,22 +8,22 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/legatus/pkg/controlplane"
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/legatus/pkg/node/inproc"
-	"github.com/urmzd/legatus/pkg/tool"
-	"github.com/urmzd/legatus/pkg/workspace"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/playscape/pkg/controlplane"
+	"github.com/urmzd/playscape/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/node/inproc"
+	"github.com/urmzd/playscape/pkg/tool"
+	"github.com/urmzd/playscape/pkg/workspace"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/attachment/resolve"
-	"github.com/urmzd/mandatum/pkg/blob"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/attachment/resolve"
+	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // A file attached in one turn is part of the conversation from then on: the
@@ -62,7 +62,7 @@ func TestAFileAttachedInOneTurnIsStillSeenInTheNextWithAByteIdenticalPrefix(t *t
 
 	w := newWorld(t)
 	w.specs = sp
-	rt, err := runtime.New(duraturo.New(w.ledger, w.queue), sp, w.bus, sandbox, runtime.WithThreads(w.threads))
+	rt, err := runtime.New(anchor.New(w.ledger, w.queue), sp, w.bus, sandbox, runtime.WithThreads(w.threads))
 	if err != nil {
 		t.Fatal(err)
 	}

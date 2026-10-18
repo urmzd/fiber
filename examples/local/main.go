@@ -1,4 +1,4 @@
-// Command local is mandatum, end to end, in one process.
+// Command local is fiber, end to end, in one process.
 //
 //	go run ./examples/local
 //
@@ -8,7 +8,7 @@
 //
 //	control plane   pkg/registry.Memory        (a real registry would be Postgres)
 //	bus             pkg/bus.Memory             (a real bus would be Redis Streams)
-//	ledger + queue  duraturo's ledger.Memory   (a real ledger would be Postgres)
+//	ledger + queue  anchor's ledger.Memory   (a real ledger would be Postgres)
 //	                and queue.Memory
 //	model           saige's agenttest.ScriptedProvider, reached through the
 //	                agent's own "offline" provider — the agent loop, the typed
@@ -17,7 +17,7 @@
 //
 // None of those are stubs standing in for the design. They are the design,
 // with the storage swapped. The seven sections below are the seven claims
-// mandatum makes, each one demonstrated rather than described.
+// fiber makes, each one demonstrated rather than described.
 //
 //  1. an agent is a declarative spec
 //  2. a revision is immutable; revising creates the next one
@@ -39,21 +39,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/duraturo/pkg/ledger"
-	dqueue "github.com/urmzd/duraturo/pkg/queue"
-	"github.com/urmzd/duraturo/pkg/worker"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/anchor/pkg/ledger"
+	dqueue "github.com/urmzd/anchor/pkg/queue"
+	"github.com/urmzd/anchor/pkg/worker"
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/registry"
-	"github.com/urmzd/mandatum/pkg/router"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/router"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // tenant is the authorization scope. It comes from the caller's credential in
@@ -175,7 +175,7 @@ func run() error {
 	// accept time, and At, called with the pinned number on every execution
 	// forever.
 	rt, err := runtime.New(
-		duraturo.New(lgr, queue),
+		anchor.New(lgr, queue),
 		registry.NewSpecs(store),
 		published,
 		exec,
@@ -247,7 +247,7 @@ func run() error {
 
 	// Both numbers still resolve, and revision 1 is byte-for-byte what it was
 	// before the edit. This is not a nicety: a run PINS its revision at accept
-	// time and replays under it forever, because duraturo replays a workflow
+	// time and replays under it forever, because anchor replays a workflow
 	// from the top and a definition that moved between attempts would make the
 	// replay diverge from its own ledger.
 	got1, err := store.Get(ctx, tenant, "docs-bot", 1)
@@ -459,7 +459,7 @@ func run() error {
 
 	// Arm one failure: the first attempt's lifecycle.completed will not reach
 	// the bus. The runtime treats a failed publish as a failed turn — a run
-	// whose events nobody can see has not done its job — so duraturo will
+	// whose events nobody can see has not done its job — so anchor will
 	// replay the turn. Everything the turn recorded before that point is
 	// already in the ledger, including the ENTIRE agent execution.
 	published.failOnce(cronRun, envelope.KindCompleted)
@@ -523,7 +523,7 @@ func run() error {
 	fmt.Printf("  model calls         %d\n", after)
 	fmt.Println()
 	fmt.Println("  swap registry.Memory for Postgres, bus.Memory for Redis Streams,")
-	fmt.Println("  ledger.Memory for duraturo's pgledger, the two fakes for")
+	fmt.Println("  ledger.Memory for anchor's pgledger, the two fakes for")
 	fmt.Println("  pkg/connectors/slack and pkg/connectors/webhook, and the executor for")
 	fmt.Println("  runtime.NewSandbox — and this file does not otherwise change.")
 	fmt.Println()
@@ -543,7 +543,7 @@ const rule = "──────────────────────
 
 func banner() {
 	fmt.Println()
-	fmt.Println("  mandatum — tag an agent from anywhere, run it durably, stream it to")
+	fmt.Println("  fiber — tag an agent from anywhere, run it durably, stream it to")
 	fmt.Println("            everyone, deliver it anywhere.")
 	fmt.Println()
 	fmt.Println("  one process, no API key, no network, no infrastructure.")

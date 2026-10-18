@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/connectors/internal/render"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // A run waiting on a person reads as waiting, in words: the question, what

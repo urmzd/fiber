@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/mandatum/pkg/durable"
+	"github.com/urmzd/fiber/pkg/durable"
 )
 
 // A prefix read returns the records whose key starts with a prefix and
@@ -44,7 +44,7 @@ func TestRecordsWithPrefixReadsOnlyTheRecordsAsked(t *testing.T) {
 	if len(keys) != 2 || keys[0] != "event:mandatum.answer.q1#0" || keys[1] != "mandatum.question.q1#0" {
 		t.Fatalf("keys = %v", keys)
 	}
-	if none, err := durable.NewRecords(pool).RecordsWithPrefix(ctx, "r1", "event:mandatum%"); err != nil || len(none) != 0 {
+	if none, err := durable.NewRecords(pool).RecordsWithPrefix(ctx, "r1", "event:fiber%"); err != nil || len(none) != 0 {
 		t.Fatalf("a wildcard in a prefix matched %v (%v)", none, err)
 	}
 }

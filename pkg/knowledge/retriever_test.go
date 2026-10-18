@@ -8,7 +8,7 @@ import (
 
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/mandatum/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/knowledge"
 )
 
 // retriever restates pkg/agentrt.Retriever. The adapter exists to satisfy that

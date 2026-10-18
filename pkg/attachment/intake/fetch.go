@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/blob"
 )
 
 // Errors a Fetcher returns. Callers match with errors.Is.
@@ -358,7 +358,7 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrNotAllowed, err)
 	}
-	req.Header.Set("User-Agent", "mandatum-attachment-intake")
+	req.Header.Set("User-Agent", "fiber-attachment-intake")
 	req.Header.Set("Accept", "*/*")
 	if f.headers != nil {
 		for k, vs := range f.headers(u) {

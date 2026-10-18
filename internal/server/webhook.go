@@ -7,10 +7,10 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/signature"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/signature"
+	"github.com/urmzd/playscape/pkg/metrics"
 )
 
 // Webhook ingress is the untrusted edge of the system: anyone who learns the URL

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 // AgentName is the built-in agent's name. It matches the connector's, so the

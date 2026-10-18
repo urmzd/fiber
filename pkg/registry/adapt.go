@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/urmzd/mandatum/internal/server"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/internal/server"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // The two seams a registry has to reach, and the direction of the dependency.

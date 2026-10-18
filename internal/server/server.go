@@ -1,4 +1,4 @@
-// Package server is mandatum's transport edge.
+// Package server is fiber's transport edge.
 //
 // It owns three things, and deliberately nothing else:
 //
@@ -65,13 +65,13 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect"
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/blob"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/gen/mandatum/v1/mandatumv1connect"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/playscape/pkg/metrics"
 )
 
 // Errors a dependency returns to tell the edge which answer to give. They are
@@ -123,7 +123,7 @@ const (
 	// DefaultRetry is the reconnection delay advertised to SSE clients.
 	DefaultRetry = 3 * time.Second
 
-	// DefaultMaxBodyBytes caps a webhook body. Every surface mandatum ingests
+	// DefaultMaxBodyBytes caps a webhook body. Every surface fiber ingests
 	// from sends payloads far below this, and the cap exists because the body
 	// must be buffered whole before it can be authenticated.
 	DefaultMaxBodyBytes = 1 << 20

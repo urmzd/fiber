@@ -5,8 +5,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connector"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connector"
 )
 
 // readTarget permits explicit GitHub references from any connector, but only

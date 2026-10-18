@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // valid returns a definition every test can start from and mutate.

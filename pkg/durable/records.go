@@ -7,11 +7,11 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor/pkg/run"
 )
 
 // Records reads a run's records by key prefix, from the tables Open maps the
-// ledger onto. It exists because duraturo's ledger reads a run's records only
+// ledger onto. It exists because anchor's ledger reads a run's records only
 // all at once, and some of them are large (a parked turn's transcript): a
 // poll that wants one small record should not read every other one.
 type Records struct {

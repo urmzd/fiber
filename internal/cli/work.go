@@ -61,14 +61,14 @@ func runWork(ctx context.Context, ui *ui, tenant string, verbose bool) error {
 
 	names := c.sinks.Names()
 	if len(names) == 0 {
-		return usagef("no connectors are configured, so there is nowhere to deliver to; see `mandatum serve --help` for the environment variables that enable one")
+		return usagef("no connectors are configured, so there is nowhere to deliver to; see `fiber serve --help` for the environment variables that enable one")
 	}
-	ui.logf("%s delivering to %s\n", ui.bold("mandatum work"), strings.Join(names, ", "))
+	ui.logf("%s delivering to %s\n", ui.bold("fiber work"), strings.Join(names, ", "))
 
 	var g group
 	c.startDelivery(ctx, &g)
 
 	<-ctx.Done()
-	ui.logf("\n%s draining\n", ui.dim("mandatum work"))
+	ui.logf("\n%s draining\n", ui.dim("fiber work"))
 	return g.wait(serveGrace)
 }

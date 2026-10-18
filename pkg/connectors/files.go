@@ -3,8 +3,8 @@ package connectors
 import (
 	"log/slog"
 
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/blob"
 )
 
 // Files is how a trigger brings in the files on the message that raised a

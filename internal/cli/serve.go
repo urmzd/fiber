@@ -14,14 +14,14 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/urmzd/legatus/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/metrics"
 
-	"github.com/urmzd/mandatum/internal/server"
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/internal/server"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 // DefaultTenant is the authorization scope a single-tenant deployment runs
-// under when $MANDATUM_TENANT is unset. It is a real scope rather than a blank
+// under when $FIBER_TENANT is unset. It is a real scope rather than a blank
 // one, so that turning multi-tenancy on later is a configuration change and not
 // a data migration.
 const DefaultTenant = "default"
@@ -42,7 +42,7 @@ func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the whole system: control plane, bus, runtime, router, connectors",
-		Long: "serve runs mandatum in one process: the agent registry, the broker, the durable\n" +
+		Long: "serve runs fiber in one process: the agent registry, the broker, the durable\n" +
 			"runtime and its worker, the delivery router, and every connector the environment\n" +
 			"configures. It is the composition root, and the only command that owns state.\n\n" +
 			"With no configuration it uses the in-memory registry, bus, ledger and queue.\n" +
@@ -72,7 +72,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tenant, "tenant", envOr(EnvTenant, DefaultTenant),
 		"Authorization scope this deployment serves ($"+EnvTenant+")")
 	cmd.Flags().BoolVar(&noWorker, "no-worker", false,
-		"Accept and stream, but execute nothing; run `mandatum work` elsewhere")
+		"Accept and stream, but execute nothing; run `fiber work` elsewhere")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Log at debug level")
 	return cmd
 }
@@ -145,6 +145,7 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		}
 	}
 	auth, err := server.NewTokens(map[string]server.Identity{
+		// Keep the principal stable across the rename for persisted requester checks.
 		token: {Tenant: opts.tenant, Subject: "mandatum"},
 	})
 	if err != nil {
@@ -228,16 +229,16 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 	})
 
 	<-ctx.Done()
-	ui.logf("\n%s draining\n", ui.dim("mandatum"))
+	ui.logf("\n%s draining\n", ui.dim("fiber"))
 	return g.wait(serveGrace)
 }
 
-// announce reports what was built, on stderr, so that `mandatum serve | tee` and
+// announce reports what was built, on stderr, so that `fiber serve | tee` and
 // a piped --format json both stay clean. Everything printed here is something
 // an operator has to know and cannot derive: the address, the credential, and
 // which optional halves are actually running.
 func announce(ui *ui, c *core, opts serveOptions, addr, token string, generated bool) {
-	ui.logf("%s listening on %s\n", ui.bold("mandatum"), ui.cyan("http://"+addr))
+	ui.logf("%s listening on %s\n", ui.bold("fiber"), ui.cyan("http://"+addr))
 	ui.logf("  tenant     %s\n", opts.tenant)
 	reg := "memory"
 	if os.Getenv(EnvPostgres) != "" {

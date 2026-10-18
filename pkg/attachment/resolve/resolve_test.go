@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/attachment/resolve"
-	"github.com/urmzd/mandatum/pkg/attachment/resolve/resolvetest"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/attachment/resolve"
+	"github.com/urmzd/fiber/pkg/attachment/resolve/resolvetest"
+	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/saige/agent/types"
 )
 

@@ -9,12 +9,12 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/topic"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
-// newTagCmd builds `mandatum tag`, the command that hands an agent its commission.
+// newTagCmd builds `fiber tag`, the command that hands an agent its commission.
 //
 // It is the mesh in one line: tag an agent here, and say where the answer
 // should go. With no --deliver the answer streams to this terminal and nowhere
@@ -39,9 +39,9 @@ func newTagCmd() *cobra.Command {
 			"the mesh: where a tag is raised and where its answer lands are independent.\n" +
 			"Each --deliver may carry a kind filter after '|', so one destination can take\n" +
 			"the whole stream while another takes only the outcome.",
-		Example: "  mandatum tag docs-bot \"what is RAG?\"\n" +
-			"  mandatum tag review-bot \"review this\" --deliver github://urmzd/mandatum/issues/42\n" +
-			"  mandatum tag nightly \"summarise\" \\\n" +
+		Example: "  fiber tag docs-bot \"what is RAG?\"\n" +
+			"  fiber tag review-bot \"review this\" --deliver github://urmzd/fiber/issues/42\n" +
+			"  fiber tag nightly \"summarise\" \\\n" +
 			"    --deliver 'slack://T01/C02?thread=1699.001|delta' \\\n" +
 			"    --deliver 'webhook://acme/deploys|lifecycle.completed'",
 		Args: cobra.MinimumNArgs(2),
@@ -138,7 +138,7 @@ func newTagCmd() *cobra.Command {
 			// matters: the answer above is a prefix, not the whole thing, and
 			// the run can still be followed by id.
 			if !ended {
-				u.warnf("stream ended before the run did; follow it with: mandatum listen agent:%s:%s\n",
+				u.warnf("stream ended before the run did; follow it with: fiber listen agent:%s:%s\n",
 					tag.Agent, tag.Id)
 			}
 			// The answer arrived as unterminated fragments so it would read as

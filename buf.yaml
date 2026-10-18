@@ -1,4 +1,4 @@
-# buf.yaml is the module and lint configuration for the mandatum wire contract.
+# buf.yaml is the module and lint configuration for the fiber wire contract.
 #
 # One module rooted at proto/, so that every import path in a .proto file is the
 # path a generated Go import will mirror ("mandatum/v1/bus.proto" ->

@@ -11,8 +11,8 @@
 ## Getting Started
 
 ```sh
-git clone https://github.com/urmzd/mandatum
-cd mandatum
+git clone https://github.com/urmzd/fiber
+cd fiber
 make init
 ```
 

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 const (
@@ -27,7 +27,7 @@ const (
 //
 // Which store is decided by the environment, not by the test: every property
 // in this file is a property of the Store contract, so the suite runs
-// unchanged against Postgres when $MANDATUM_POSTGRES_TEST_URL names one (see
+// unchanged against Postgres when $FIBER_POSTGRES_TEST_URL names one (see
 // postgres_test.go) and against Memory otherwise.
 func newStore(t *testing.T) thread.Store {
 	t.Helper()

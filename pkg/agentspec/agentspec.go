@@ -14,7 +14,7 @@
 //
 // A revision is immutable. Editing an agent never mutates a Spec; it appends
 // revision N+1, and a run pins the revision it accepted at accept time and
-// replays under that revision forever. duraturo replays a workflow from the
+// replays under that revision forever. anchor replays a workflow from the
 // top, so a definition that moved between attempts would make the second
 // attempt diverge from the ledger that is supposed to be the truth about the
 // first.
@@ -69,7 +69,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // ErrInvalid reports a definition that will not be accepted. Callers match with

@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // schema is everything the Postgres store owns: one row per thread, one row
@@ -75,7 +75,7 @@ ALTER TABLE mandatum_thread_entries
 	ADD COLUMN IF NOT EXISTS attachments jsonb NOT NULL DEFAULT '[]'::jsonb;
 `
 
-// migrateLock is the advisory lock Migrate holds, the same one every mandatum
+// migrateLock is the advisory lock Migrate holds, the same one every fiber
 // store takes. CREATE TABLE IF NOT EXISTS is not safe against itself: two
 // processes starting together can both pass the existence check and one then
 // fails on the catalog's unique index.
@@ -85,7 +85,7 @@ const migrateLock = 0x6d616e64 // "mand"
 //
 // It keeps every rule Memory documents and is held to them by the same tests:
 // the suite in this package runs against Postgres whenever
-// $MANDATUM_POSTGRES_TEST_URL is set.
+// $FIBER_POSTGRES_TEST_URL is set.
 //
 // It does not own the pool. The caller opened it and the caller closes it,
 // because a deployment that already has a pool should not be made to hold two.

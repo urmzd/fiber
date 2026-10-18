@@ -43,9 +43,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/blob"
 )
 
 // DefaultMaxBytes bounds one file when the caller names no limit. It admits a

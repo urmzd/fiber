@@ -7,8 +7,8 @@ import (
 
 	"connectrpc.com/connect"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
 )
 
 // AnswerRequest answers one question a run is parked on, as the edge hands it

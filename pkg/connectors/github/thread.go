@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // Comment is one conversation comment on an issue or pull request, as the
@@ -198,7 +198,7 @@ func (f *Fake) ListComments(_ context.Context, ref Ref) ([]Comment, error) {
 }
 
 // FakeAppLogin is the login the fake posts the app's own comments as.
-const FakeAppLogin = "mandatum[bot]"
+const FakeAppLogin = "fiber[bot]"
 
 // AddComment posts a comment as someone else and returns its id.
 func (f *Fake) AddComment(ref Ref, login, body, bodyHTML string) int64 {

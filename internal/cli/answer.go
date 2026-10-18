@@ -6,11 +6,11 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
 )
 
-// newAnswerCmd builds `mandatum answer`, which answers a question a run is
+// newAnswerCmd builds `fiber answer`, which answers a question a run is
 // parked on.
 //
 // It prints the answer the question has, which is this one unless somebody
@@ -29,15 +29,15 @@ func newAnswerCmd() *cobra.Command {
 		Long: "Answer a question a run is parked on, and wake the run.\n\n" +
 			"A run parks when a tool call needs approval or the agent asks a person\n" +
 			"something with ask_person. lifecycle.parked carries the question and its id\n" +
-			"(`mandatum listen` prints them). An approval takes --approve or --deny, and\n" +
+			"(`fiber listen` prints them). An approval takes --approve or --deny, and\n" +
 			"--args to approve the call with edited arguments; a choice takes --choose\n" +
 			"with one of the options offered; a reply takes --reply.\n\n" +
 			"The first answer recorded is the answer. A second one is told what it was.",
-		Example: "  mandatum answer r0f3a... int_9c1e... --approve\n" +
-			"  mandatum answer r0f3a... int_9c1e... --deny --note \"freeze week\"\n" +
-			"  mandatum answer r0f3a... int_9c1e... --approve --args '{\"env\":\"staging\"}'\n" +
-			"  mandatum answer r0f3a... int_4b2d... --choose staging\n" +
-			"  mandatum answer r0f3a... int_77aa... --reply \"the fix is urgent\"",
+		Example: "  fiber answer r0f3a... int_9c1e... --approve\n" +
+			"  fiber answer r0f3a... int_9c1e... --deny --note \"freeze week\"\n" +
+			"  fiber answer r0f3a... int_9c1e... --approve --args '{\"env\":\"staging\"}'\n" +
+			"  fiber answer r0f3a... int_4b2d... --choose staging\n" +
+			"  fiber answer r0f3a... int_77aa... --reply \"the fix is urgent\"",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, argv []string) error {
 			u, err := resolveUI(cmd)

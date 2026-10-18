@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
 )
 
 // ServeFilesFrom points the connector's downloads at a local server: each

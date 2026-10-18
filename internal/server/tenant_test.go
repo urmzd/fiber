@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // Tenant is an authorization scope, and the whole point of deriving it from the

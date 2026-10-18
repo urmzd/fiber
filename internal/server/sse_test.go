@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // sseReader reads one frame at a time from a live SSE response. Frames are

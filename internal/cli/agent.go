@@ -11,10 +11,10 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
 )
 
-// newAgentCmd builds `mandatum agent`, the control plane in a terminal.
+// newAgentCmd builds `fiber agent`, the control plane in a terminal.
 //
 // Creating an agent is submitting a document, which is what makes the platform
 // self-serve: no redeploy, no code, no restart. The subcommands mirror the
@@ -120,7 +120,7 @@ func newAgentCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "create -f <spec.json>",
 		Short:   "Create an agent as revision 1",
-		Example: "  mandatum agent create -f docs-bot.json",
+		Example: "  fiber agent create -f docs-bot.json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			u, err := resolveUI(cmd)
 			if err != nil {
@@ -161,8 +161,8 @@ func newAgentReviseCmd() *cobra.Command {
 			"--expect makes the append conditional on the current revision, so two editors\n" +
 			"racing cannot silently overwrite each other: the loser is told the revision\n" +
 			"moved instead of quietly winning.",
-		Example: "  mandatum agent revise -f docs-bot.json\n" +
-			"  mandatum agent revise -f docs-bot.json --expect 6",
+		Example: "  fiber agent revise -f docs-bot.json\n" +
+			"  fiber agent revise -f docs-bot.json --expect 6",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			u, err := resolveUI(cmd)
 			if err != nil {
@@ -201,7 +201,7 @@ func newAgentGetCmd() *cobra.Command {
 		Long: "Read an agent definition, defaulting to the latest revision.\n\n" +
 			"A pinned revision stays readable after the agent is deleted, because a run\n" +
 			"that executed under it must remain explicable.",
-		Example: "  mandatum agent get docs-bot\n  mandatum agent get docs-bot --rev 6",
+		Example: "  fiber agent get docs-bot\n  fiber agent get docs-bot --rev 6",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			u, err := resolveUI(cmd)

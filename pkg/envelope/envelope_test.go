@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 func TestKindFamilyAndMatches(t *testing.T) {
@@ -48,7 +48,7 @@ func TestKindFamilyAndMatches(t *testing.T) {
 // shipped.
 func TestRouteSelectivity(t *testing.T) {
 	stream := envelope.Route{
-		Target: address.MustParse("github://urmzd/mandatum/issues/42"),
+		Target: address.MustParse("github://urmzd/fiber/issues/42"),
 		Kinds:  []string{"delta", "lifecycle.completed"},
 	}
 	notify := envelope.Route{
@@ -86,7 +86,7 @@ func TestRouteSelectivity(t *testing.T) {
 func TestTagValidate(t *testing.T) {
 	valid := envelope.Tag{
 		ID: "ev1", Agent: "docs-bot", Origin: "github",
-		Source: address.MustParse("github://urmzd/mandatum/issues/42"),
+		Source: address.MustParse("github://urmzd/fiber/issues/42"),
 		At:     time.Now(),
 	}
 	if err := valid.Validate(); err != nil {
@@ -123,7 +123,7 @@ func TestTagValidate(t *testing.T) {
 func TestRoutesDecoupleOriginFromDestination(t *testing.T) {
 	tag := envelope.Tag{
 		ID: "ev1", Agent: "review-bot", Origin: "github",
-		Source:  address.MustParse("github://urmzd/mandatum/pull/7"),
+		Source:  address.MustParse("github://urmzd/fiber/pull/7"),
 		Deliver: []envelope.Route{{Target: address.MustParse("jira://acme/PROJ-5")}},
 	}
 	routes := tag.Routes()

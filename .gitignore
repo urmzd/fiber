@@ -3,7 +3,7 @@ bin/
 build/
 
 # Runtime state
-.mandatum/
+.fiber/
 
 # Coverage
 *.out

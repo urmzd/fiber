@@ -11,7 +11,7 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt"
 )
 
 // threadRun runs one turn of a thread and returns every model request it made
