@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.0 (2026-10-18)
+
+### Breaking
+
+- rename mandatum to fiber (#19) ([78aa579](https://github.com/urmzd/fiber/commit/78aa5799001388fb2226f9c0ef14c25ad758f1eb))
+
+### Misc
+
+- **deps**: upgrade saige to v0.37.0 (#18) ([97e11d3](https://github.com/urmzd/fiber/commit/97e11d3480368d539868cbd5394550438d486362))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.12.0...v0.13.0)
+
+
 ## 0.12.0 (2026-10-16)
 
 ### Features
