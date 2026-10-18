@@ -33,6 +33,8 @@ sandboxing and access control.
 | `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`. |
 | `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
+| `pkg/toolprovider` | MCP tool providers as versioned records: how to reach a server, its credential reference, and the admin-accepted, numbered tool snapshots. Changed tools stay pending; read/write class defaults to write. `Memory` and `Postgres`. |
+| `pkg/mcptools` | MCP client (stdio, streamable HTTP) over `toolprovider`: lists and diffs a server's tools, exposes only accepted ones as saige tools, enforces the grant's class per call, and redacts the resolved credential everywhere. |
 | `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`. |
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
 | `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
