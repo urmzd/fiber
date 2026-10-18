@@ -40,8 +40,12 @@ type Translator struct {
 	redact ToolArguments
 
 	mu sync.Mutex
-	// args holds each call's arguments, rendered, by scoped call id.
-	args map[string]rendered
+	// asked holds the arguments the model sent for each call, and ran the
+	// ones each call ran with, rendered, by scoped call id. They are kept
+	// apart because a tool can start running (and an approval can have
+	// edited its arguments) before its executing event is translated.
+	asked map[string]rendered
+	ran   map[string]rendered
 	// parts maps an open tool call part to its call id and the argument
 	// fragments streamed for it, by scoped part index.
 	parts map[string]*openCall
@@ -79,8 +83,11 @@ func newTranslator(redact ToolArguments) *Translator {
 
 // maps makes the zero value usable. The caller holds mu.
 func (t *Translator) maps() {
-	if t.args == nil {
-		t.args = map[string]rendered{}
+	if t.asked == nil {
+		t.asked = map[string]rendered{}
+	}
+	if t.ran == nil {
+		t.ran = map[string]rendered{}
 	}
 	if t.parts == nil {
 		t.parts = map[string]*openCall{}
@@ -156,14 +163,14 @@ func (t *Translator) delta(scope string, d saigetypes.Delta) (Chunk, bool) {
 		return Chunk{}, false
 
 	case saigetypes.ToolExecStartDelta:
-		args := t.arguments(v.ToolCallID, false)
+		args := t.requested(callKey(scope, v.ToolCallID))
 		return chunk(envelope.KindToolCall, payload.ToolCall{
 			ID: v.ToolCallID, Name: v.Name, Phase: payload.PhaseExecuting,
 			Arguments: args.json, ArgumentsBytes: args.bytes,
 		})
 
 	case saigetypes.ToolExecEndDelta:
-		args := t.arguments(v.ToolCallID, true)
+		args := t.executed(callKey(scope, v.ToolCallID))
 		return chunk(envelope.KindToolDone, payload.ToolDone{
 			ID:             v.ToolCallID,
 			Name:           v.Name,
@@ -184,27 +191,45 @@ func (t *Translator) delta(scope string, d saigetypes.Delta) (Chunk, bool) {
 	}
 }
 
-// Ran records the arguments a tool call is about to run with. They replace
-// the ones the model sent, because an approval may have edited them, and they
-// are what the ToolDone for the call carries. A call that never reaches its
-// tool (its arguments did not parse, say) is reported with the model's.
-func (t *Translator) Ran(callID, tool string, args map[string]any) {
+// Ran records the arguments a tool call is about to run with. They are what
+// the ToolDone for the call carries, because an approval may have edited the
+// ones the model sent; the executing ToolCall keeps carrying the model's. A
+// call that never reaches its tool (its arguments did not parse, say) is
+// reported with the model's. path is the tool call ids from the root agent
+// down to the agent that made the call, empty for the root's own calls, as
+// saige's hooks report it (saige.HookRun.Path).
+func (t *Translator) Ran(callID, tool string, args map[string]any, path ...string) {
 	if callID == "" {
 		return
 	}
 	r := t.render(tool, args)
 	t.mu.Lock()
 	t.maps()
-	t.args[callID] = r
+	t.ran[callKey(scopeOf(path), callID)] = r
 	t.mu.Unlock()
 }
+
+// scopeOf is the scope delta gives the agent at path: one "/<call id>" per
+// ToolExecDelta its deltas arrive wrapped in.
+func scopeOf(path []string) string {
+	var b strings.Builder
+	for _, id := range path {
+		b.WriteString("/")
+		b.WriteString(id)
+	}
+	return b.String()
+}
+
+// callKey keys a call's arguments by the agent that made it, since call ids
+// are only unique within one agent's stream.
+func callKey(scope, callID string) string { return scope + "|" + callID }
 
 // hooks feeds the translator the arguments each tool runs with.
 func (t *Translator) hooks() saige.Hooks {
 	return saige.Hooks{
 		Name: "fiber-tool-arguments",
 		BeforeTool: func(_ context.Context, ev *saige.BeforeToolEvent) error {
-			t.Ran(ev.Call.ID, ev.Call.Name, ev.Arguments)
+			t.Ran(ev.Call.ID, ev.Call.Name, ev.Arguments, ev.Path...)
 			return nil
 		},
 	}
@@ -264,20 +289,28 @@ func (t *Translator) close(scope string, end saigetypes.PartEnd) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.maps()
-	if _, ran := t.args[id]; !ran {
-		t.args[id] = r
-	}
+	t.asked[callKey(scope, id)] = r
 }
 
-// arguments returns what the events of a call carry. done forgets the call,
-// since nothing is published about it after its ToolDone.
-func (t *Translator) arguments(callID string, done bool) rendered {
+// requested returns the arguments the model sent for a call.
+func (t *Translator) requested(key string) rendered {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	r := t.args[callID]
-	if done {
-		delete(t.args, callID)
+	return t.asked[key]
+}
+
+// executed returns the arguments a call ran with, or the model's when it
+// never ran, and forgets the call: nothing is published about it after its
+// ToolDone.
+func (t *Translator) executed(key string) rendered {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r, ok := t.ran[key]
+	if !ok {
+		r = t.asked[key]
 	}
+	delete(t.ran, key)
+	delete(t.asked, key)
 	return r
 }
 
