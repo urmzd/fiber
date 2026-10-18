@@ -355,3 +355,44 @@ func countKind(chunks []agentrt.Chunk, k envelope.Kind) int {
 	}
 	return n
 }
+
+// A continuation's tool events carry the call's arguments like any turn's,
+// though the model message that asked for the call is not streamed again:
+// the executing event has what the model asked for, the done event what the
+// approval let the tool run with.
+func TestAContinuationsToolEventsCarryTheParkedCallsArguments(t *testing.T) {
+	t.Parallel()
+	f := newParkFixture(t, []string{"deploy"},
+		toolCalls(saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}),
+		agenttest.TextResponse("Deployed."))
+	_, parked := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a1"})
+	resume := *parked.Parked
+	resume.Answers = map[string]payload.Answer{"c1": {Decision: payload.DecisionApprove, Arguments: json.RawMessage(`{"env":"staging"}`)}}
+	got, _ := f.run(t, agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a2", Resume: &resume})
+
+	var executing, done string
+	for _, c := range got {
+		switch c.Kind {
+		case envelope.KindToolCall:
+			var body payload.ToolCall
+			if err := json.Unmarshal(c.Payload, &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Phase == payload.PhaseExecuting {
+				executing = string(body.Arguments)
+			}
+		case envelope.KindToolDone:
+			var body payload.ToolDone
+			if err := json.Unmarshal(c.Payload, &body); err != nil {
+				t.Fatal(err)
+			}
+			done = string(body.Arguments)
+		}
+	}
+	if executing != `{"env":"prod"}` {
+		t.Errorf("the continuation's executing event carries %q, want the model's arguments", executing)
+	}
+	if done != `{"env":"staging"}` {
+		t.Errorf("the continuation's done event carries %q, want the edited arguments", done)
+	}
+}

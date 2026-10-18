@@ -292,6 +292,22 @@ func (t *Translator) close(scope string, end saigetypes.PartEnd) {
 	t.asked[callKey(scope, id)] = r
 }
 
+// seed records the arguments of the root agent's tool calls in msg, a model
+// message whose deltas the translator will not see.
+func (t *Translator) seed(msg saigetypes.AssistantMessage) {
+	for _, part := range msg.Parts {
+		p, ok := part.(saigetypes.ToolCallPart)
+		if !ok || p.ID == "" || p.ArgumentsError != "" {
+			continue
+		}
+		r := t.render(p.Name, p.Arguments)
+		t.mu.Lock()
+		t.maps()
+		t.asked[callKey("", p.ID)] = r
+		t.mu.Unlock()
+	}
+}
+
 // requested returns the arguments the model sent for a call.
 func (t *Translator) requested(key string) rendered {
 	t.mu.Lock()
