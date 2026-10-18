@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.1 (2026-10-18)
+
+### Bug Fixes
+
+- **runtime**: run in-turn sub-tasks on the delegating turn's node (#20) ([d3438db](https://github.com/urmzd/fiber/commit/d3438dbc0bf829e8d7f06f0554087b4be4d65327))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.14.0...v0.14.1)
+
+
 ## 0.14.0 (2026-10-18)
 
 ### Features
