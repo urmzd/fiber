@@ -156,7 +156,10 @@ func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (co
 		defer close(done)
 		sub := envelope.Subscription{Topic: tp, Filter: envelope.Filter{Kinds: []string{string(envelope.KindCompact)}}}
 		for listenCtx.Err() == nil {
-			err := r.relayCompact(listenCtx, sub, in.Tag.Tenant, runID, since, signal)
+			// A resubscription resumes after the last request read, so a
+			// request already relayed is not relayed again: each one would
+			// cost a summary.
+			err := r.relayCompact(listenCtx, &sub, in.Tag.Tenant, runID, since, signal)
 			if listenCtx.Err() != nil {
 				return
 			}
@@ -176,9 +179,10 @@ func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (co
 }
 
 // relayCompact reads one subscription and relays every request this attempt
-// should honour, until the subscription ends.
-func (r *Runtime) relayCompact(ctx context.Context, sub envelope.Subscription, tenant, runID string, since time.Time, signal chan<- agentrt.CompactRequest) error {
-	stream, err := r.control.Subscribe(ctx, sub)
+// should honour, until the subscription ends. It advances sub.From past every
+// event it reads, so the caller resubscribes where it left off.
+func (r *Runtime) relayCompact(ctx context.Context, sub *envelope.Subscription, tenant, runID string, since time.Time, signal chan<- agentrt.CompactRequest) error {
+	stream, err := r.control.Subscribe(ctx, *sub)
 	if err != nil {
 		return err
 	}
@@ -187,6 +191,9 @@ func (r *Runtime) relayCompact(ctx context.Context, sub envelope.Subscription, t
 		e, err := stream.Recv(ctx)
 		if err != nil {
 			return err
+		}
+		if e.Seq > sub.From {
+			sub.From = e.Seq
 		}
 		if e.Kind != envelope.KindCompact || e.Tenant != tenant {
 			continue
