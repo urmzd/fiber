@@ -983,8 +983,8 @@ func TestStoppingAParentCancelsTheSubTaskItIsWaitingOn(t *testing.T) {
 		agenttest.ToolCallResponse("call-1", runtime.DelegateToolName("helper"), map[string]any{"text": "Count the failing tests"}),
 		agenttest.TextResponse("never reached"),
 	}}
-	// Two nodes: the lead's turn holds one while the helper runs on the other.
-	exec := sandboxOf(t, w.specs, map[string]saigetypes.Provider{"lead": lead, "helper": helper}, runtime.WithReplicas(2))
+	// One node: the helper runs on the node the lead's turn holds.
+	exec := sandboxOf(t, w.specs, map[string]saigetypes.Provider{"lead": lead, "helper": helper}, runtime.WithReplicas(1))
 	rt := w.runtime(t, exec)
 	w.work(t, rt, nil)
 

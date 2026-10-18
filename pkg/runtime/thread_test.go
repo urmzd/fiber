@@ -747,7 +747,7 @@ func TestTheSandboxReplaysHistoryToTheModelAndNotToADelegatedAgent(t *testing.T)
 		},
 		"helper": {agenttest.TextResponse("Three tests fail.")},
 	}
-	s, err := runtime.NewSandbox(plane, tools, history, runtime.WithReplicas(2),
+	s, err := runtime.NewSandbox(plane, tools, history, runtime.WithReplicas(1),
 		runtime.WithAgentOptions(agentrt.WithProvider(agentrt.ProviderOffline, func(spec agentrt.Spec) (saigetypes.Provider, error) {
 			mu.Lock()
 			defer mu.Unlock()
