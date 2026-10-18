@@ -41,7 +41,8 @@
 // results) lives in the request message, never in the system prompt, so it
 // cannot sit ahead of content that would otherwise be shared. Inside a turn
 // each model call sends the previous call's request plus what was added since.
-// The single exception is a compaction, which is off unless a budget is set;
+// The single exception is a compaction, which is off unless a budget is set
+// or a host may ask for one (Compaction.OnRequest);
 // see WithCompaction for what it rewrites and why it is rare, and
 // WithPromptCache for where the cache breakpoints go.
 //
@@ -125,6 +126,7 @@ import (
 	"time"
 
 	saige "github.com/urmzd/saige/agent"
+	"github.com/urmzd/saige/agent/convert"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
@@ -204,6 +206,14 @@ type Turn struct {
 	// only cancelled through its context. Nothing is read from it once the
 	// turn has returned.
 	Stop <-chan Stop
+	// Compact carries a host's requests to compact the turn's history. Each
+	// value asks for a compaction before the turn's next model call; values
+	// that arrive before that call fold into one. A request after the last
+	// model call changes nothing, and so does one when there is nothing old
+	// enough to summarize (see Compaction.KeepTurns). It needs
+	// Compaction.OnRequest; without it values are read and ignored. Nil is
+	// a turn nobody can ask.
+	Compact <-chan CompactRequest
 	// Attachments are the files that arrived with the request. They need
 	// WithAttachments, and Tenant, which scopes every read of them.
 	Attachments []attachment.Attachment
@@ -264,8 +274,9 @@ type Result struct {
 	// to are not in it; they are reported as usage.call events of their own.
 	Usage payload.Usage
 	// Compactions lists each time the turn's history was summarized, in
-	// order. It is empty unless WithCompaction set a budget and the turn
-	// crossed it.
+	// order, as each was also published (envelope.KindCompacted). It is
+	// empty unless WithCompaction set a budget the turn crossed, or let a
+	// host ask and one did.
 	Compactions []payload.Compaction
 	// Stopped is set when the turn ended because it was asked to stop, and
 	// says why and by whom. Text is then what had been answered so far, which
@@ -590,9 +601,24 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		Logger:       r.logger,
 		Hooks:        []saige.Hooks{park.hooks()},
 	}
+	// requests is how a host's request to compact reaches the agent loop;
+	// nil when this deployment does not take them.
+	var requests *compactRequests
+	if r.compaction.OnRequest {
+		base := saigetypes.EstimatingTokenizer{}
+		if o, ok := convert.Target(r.provider); ok {
+			base.Offering = &o
+		}
+		requests = newCompactRequests(base, r.compaction.budget())
+		agentCfg.Tokenizer = requests
+	}
 	if cc := r.compaction.config(); cc != nil {
 		agentCfg.CompactCfg = cc
-		agentCfg.Hooks = append(agentCfg.Hooks, newCompactionGuard(r.compaction.keepTurns()).hooks())
+		var guard *compactionGuard
+		if r.compaction.MaxInputTokens > 0 {
+			guard = newCompactionGuard(r.compaction.keepTurns())
+		}
+		agentCfg.Hooks = append(agentCfg.Hooks, compactionHooks(guard, requests))
 	}
 	// The translator's hook goes last, so the arguments it records are the
 	// ones every other hook has finished with: what the tool runs with.
@@ -616,10 +642,25 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	watched := make(chan struct{})
 	go func() {
 		defer close(watched)
-		select {
-		case stop := <-t.Stop:
-			stopping.apply(stop)
-		case <-finished:
+		compact := t.Compact
+		for {
+			select {
+			case stop := <-t.Stop:
+				stopping.apply(stop)
+				return
+			case req, ok := <-compact:
+				switch {
+				case !ok:
+					compact = nil
+				case requests != nil:
+					requests.request(req)
+				default:
+					r.logger.Debug("fiber/agentrt: a request to compact was ignored; this deployment does not take them",
+						"agent", r.rev.Spec.Name)
+				}
+			case <-finished:
+				return
+			}
 		}
 	}()
 	// settle is deferred as well as called: a panic anywhere below (an emit
@@ -677,7 +718,22 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			}
 			continue
 		case saigetypes.CompactionDelta:
-			res.Compactions = append(res.Compactions, compactionRecord(v))
+			rec := compactionRecord(v)
+			if requests != nil {
+				rec = requests.record(rec)
+			}
+			res.Compactions = append(res.Compactions, rec)
+			c, ok := chunk(envelope.KindCompacted, rec)
+			if !ok {
+				continue
+			}
+			if err := send(c); err != nil {
+				stream.Cancel()
+				drain(stream)
+				settle()
+				return res, err
+			}
+			continue
 		case saigetypes.MarkerDelta:
 			// A tool call waits for approval. A call this turn was given the
 			// answer to is answered with it. Any other is refused: the turn is

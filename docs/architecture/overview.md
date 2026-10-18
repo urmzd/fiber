@@ -334,6 +334,31 @@ memory they are evicted with every other stream. On Redis they never expire,
 which is the same as every run's own stream today (the bus sets no TTL on run
 keys); a deployment that needs Redis bounded sets an eviction policy.
 
+## Compacting a run on request
+
+A host can ask a running turn to summarize the older part of its history now,
+instead of waiting for the deployment's budget (`FIBER_COMPACT_TOKENS`). The
+deployment has to take requests (`agentrt.Compaction.OnRequest`,
+`FIBER_COMPACT_ON_REQUEST`).
+
+```
+POST /v1/runs/{id}/compact         a host calls runtime.Compact instead
+  -> control.compact               published to the asker's compact stream
+     -> the executing attempt      listens on the bus for as long as its turn runs
+        -> the next model call     is preceded by the compaction the budget would make
+           -> context.compacted    trigger "requested", who asked, tokens before and after
+```
+
+The compaction is saige's, with the strategy, the cut and the anti-thrash
+rule a budget uses; a request is never held back by that rule. Requests made
+before the next model call fold into one. A request is live only: it is not
+recorded in the ledger, and one made while the run is queued, parked, between
+attempts or over does nothing, because the turn it would compact is not the
+one that runs. A turn with nothing older than `KeepTurns` turns has nothing to
+summarize, and a request then does nothing either. `context.compacted` is
+published for every compaction, budgeted ones included, and is opt-in for
+routes like `usage`.
+
 ## Usage
 
 Every run reports what it spent: tokens, the prompt cache's share, cost where
@@ -690,10 +715,11 @@ set, so gRPC clients and browsers share one contract and one codegen path.
 | `InvokeService.Invoke` | Tag an agent, return the run id once durable |
 | `InvokeService.InvokeStream` | Invoke and tail in one RPC, with no race between accept and subscribe |
 | `BusService.Subscribe` | Topic plus filter plus cursor, long-lived |
-| `BusService.Publish` | Append an event to a run's topic; lifecycle, control and usage kinds are the run's and the control plane's, and are refused |
+| `BusService.Publish` | Append an event to a run's topic; lifecycle, control, usage and context kinds are the run's and the control plane's, and are refused |
 | `AgentService.*` | Agent spec control plane |
 | `GET /v1/sse` | The same stream, browser-native, resumable via `Last-Event-ID` |
 | `POST /v1/runs/{id}/stop` | Ask a run to stop; answers 202 for every run id. `GetRun` reports `RUN_STATUS_STOPPED` |
+| `POST /v1/runs/{id}/compact` | Ask a running turn to compact its history; answers 202 for every run id. The run's stream reports `context.compacted` |
 | `InvokeService.GetRun` | A run's record, its usage included (`Run.usage`), and the question a parked run waits on (`Run.pending_question`) |
 | `InvokeService.Answer` | Answer a parked run's question; the first answer recorded is the answer |
 | `POST /v1/webhooks/{connector}` | HMAC-verified ingress |
@@ -772,6 +798,17 @@ Verified against the code, and honest.
 - **Stop is an HTTP route, not an RPC.** `POST /v1/runs/{id}/stop`. A run's
   stopped status is on the wire (`RUN_STATUS_STOPPED`); asking for a stop is
   not yet a Connect method.
+- **A request to compact is live only, and is an HTTP route.** It is not
+  recorded, so it reaches only the attempt running when it is made, judged by
+  the asking process's clock against when that attempt began to listen; a
+  request within a clock skew of an attempt starting can be dropped. The
+  summary is model output, so a retried turn does not reproduce it.
+- **Tool arguments are published.** The executing `delta.tool.call` and
+  `delta.tool.done` carry the call's arguments as compact JSON, up to
+  `payload.MaxToolArguments` (8 KiB); larger arguments are left out whole and
+  sized in `arguments_bytes`. They go to every subscriber and route, chat
+  sinks render a short prefix of them, and only `agentrt.WithToolArguments`
+  scrubs them first. fiber emits no tracing spans of its own.
 - **A stop wraps up the turn, not its side effects.** Tool calls already
   finished stay done, and a tool that ignores its context delays the stop until
   the grace period (ten seconds by default) cancels the turn. A turn that is

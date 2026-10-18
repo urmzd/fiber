@@ -91,8 +91,10 @@ func (s *busService) Publish(ctx context.Context, req *connect.Request[mandatumv
 	// A run's lifecycle is the run's to report. A client publishing one by
 	// hand could show a run as finished, failed, or parked on a question it
 	// never asked, and a host that answers what lifecycle.parked shows would
-	// be answering a forgery. Control kinds are the control plane's.
-	if f := e.Kind.Family(); f == "lifecycle" || f == "control" {
+	// be answering a forgery. Control kinds are the control plane's. A
+	// compaction is the run's to report too: a forged one would tell a host
+	// the agent is working from a summary it never wrote.
+	if f := e.Kind.Family(); f == "lifecycle" || f == "control" || f == "context" {
 		return nil, fail(s.log, "publish", fmt.Errorf("%w: %q events are published by the run or the control plane, not directly", ErrInvalid, e.Kind))
 	}
 	e.Tenant = id.Tenant

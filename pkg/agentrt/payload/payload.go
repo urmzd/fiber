@@ -342,6 +342,19 @@ type StopRequest struct {
 	At time.Time `json:"at,omitzero"`
 }
 
+// CompactRequest is the body of envelope.KindCompact: a request that one run
+// compact its history before its next model call. Like StopRequest it is
+// published to the run's control topic, never to the run's own.
+type CompactRequest struct {
+	// RunID is the run asked. It repeats what the topic says, and a request
+	// whose body disagrees with its topic is not obeyed.
+	RunID string `json:"run_id"`
+	// By is who asked. Optional.
+	By string `json:"by,omitempty"`
+	// At is when it was asked.
+	At time.Time `json:"at"`
+}
+
 // Action is the body of envelope.KindActionTaken: a connector's native verb
 // ran. This is the "the work got done" signal, distinct from the agent saying
 // it would.
@@ -709,9 +722,9 @@ func (u Usage) CacheReadRatio() float64 {
 	return float64(u.CachedPromptTokens) / float64(u.PromptTokens)
 }
 
-// Compaction records one time a turn replaced the older part of its history
-// with a summary. Like Usage it has no envelope.Kind yet and is returned to
-// the caller of the turn.
+// Compaction is the body of envelope.KindCompacted: one time a turn replaced
+// the older part of its history with a summary. The turn's caller also gets
+// every record back (agentrt.Result.Compactions).
 //
 // It exists because a compaction is the one point where a run's request prefix
 // is rewritten: the prompt cache misses once and the model continues from a
@@ -721,8 +734,12 @@ func (u Usage) CacheReadRatio() float64 {
 type Compaction struct {
 	// Trigger is why it ran: "input_pressure" when the input crossed the
 	// budget, "context_length" when the provider rejected the request as too
-	// long.
+	// long, "requested" when a host asked.
 	Trigger string `json:"trigger,omitempty"`
+	// By is who asked, for a compaction that answered a host's request. A
+	// request that coincided with a provider's rejection keeps Trigger
+	// "context_length" and still names who asked.
+	By string `json:"by,omitempty"`
 	// Strategy is the compaction strategy that ran.
 	Strategy string `json:"strategy,omitempty"`
 	// TokensBefore and TokensAfter are the estimated size of the
@@ -797,6 +814,10 @@ func Of(e envelope.Event) (body any, known bool, err error) {
 		return decodeOr[UsageCall](e)
 	case envelope.KindUsageChild:
 		return decodeOr[UsageChild](e)
+	case envelope.KindCompacted:
+		return decodeOr[Compaction](e)
+	case envelope.KindCompact:
+		return decodeOr[CompactRequest](e)
 	default:
 		return json.RawMessage(e.Payload), false, nil
 	}

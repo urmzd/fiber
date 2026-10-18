@@ -85,6 +85,14 @@ const (
 	// so the run that delegated to it can count it.
 	KindUsageChild Kind = "usage.child"
 
+	// KindCompacted reports that a run's turn replaced the older part of its
+	// history with a summary, because its input crossed the deployment's
+	// budget or because a host asked. It is how a host shows that the agent
+	// now works from a summary. Like usage it is about the run rather than
+	// the conversation, and a route receives it only by selecting "context"
+	// or the kind itself.
+	KindCompacted Kind = "context.compacted"
+
 	// Control-plane changes, on the same bus as the data so a dashboard sees
 	// an agent get revised in the same stream as the runs that follow it.
 	KindAgentCreated Kind = "control.created"
@@ -96,10 +104,15 @@ const (
 	// run's own, and the run answers it with lifecycle.stopped only if it was
 	// still working when the request reached it.
 	KindStop Kind = "control.stop"
+
+	// KindCompact asks a run to compact its history before its next model
+	// call. Like KindStop it is a request on the run's control topic, and it
+	// is answered with context.compacted only if the turn compacted.
+	KindCompact Kind = "control.compact"
 )
 
 // Family returns the leading component of a kind: "delta", "lifecycle",
-// "action", "usage", or "control".
+// "action", "usage", "context", or "control".
 func (k Kind) Family() string {
 	for i := 0; i < len(k); i++ {
 		if k[i] == '.' {
@@ -133,7 +146,7 @@ type Actor struct {
 // Route is one delivery instruction: where to send events, and which ones.
 //
 // Kinds is a set of selectors matched against Event.Kind. An empty Kinds
-// means every kind except the usage family (see OptIn). This is what makes a
+// means every kind except the usage and context families (see OptIn). This is what makes a
 // single run serve both a connector rendering a live stream and a webhook
 // that only wants the outcome.
 type Route struct {
@@ -147,8 +160,16 @@ type Route struct {
 // and an event per model call that such a receiver refuses, or fails on and
 // has retried in the run's ordered delivery lane, would cost every route that
 // never asked for it. As the root topic does not cover the control namespace,
-// "everything" does not cover accounting.
-func (k Kind) OptIn() bool { return k.Family() == "usage" }
+// "everything" does not cover accounting. The context family is opt-in for the
+// same reason: it arrived later, and it reports on the run's context rather
+// than on the conversation a receiver renders.
+func (k Kind) OptIn() bool {
+	switch k.Family() {
+	case "usage", "context":
+		return true
+	}
+	return false
+}
 
 // Wants reports whether an event of kind k should be delivered on this route.
 // An opt-in kind is delivered only to a route that names it or its family.
