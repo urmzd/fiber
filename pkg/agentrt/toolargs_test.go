@@ -212,3 +212,56 @@ func TestAZeroTranslatorStillTranslates(t *testing.T) {
 		t.Fatalf("zero translator produced %s, %v", c.Payload, ok)
 	}
 }
+
+// A tool can start running, with arguments an approval edited, before the
+// delta saying it began executing is translated. The executing event still
+// reports what the model asked for, and the done event what the tool ran with.
+func TestTheExecutingEventKeepsTheModelsArgumentsWhenTheToolRanFirst(t *testing.T) {
+	t.Parallel()
+
+	tr := agentrt.NewTranslator()
+	tr.Delta(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "deploy"})
+	tr.Delta(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}})
+	tr.Ran("c1", "deploy", map[string]any{"env": "staging"})
+
+	c, _ := tr.Delta(saigetypes.ToolExecStartDelta{ToolCallID: "c1", Name: "deploy"})
+	if got := string(decodeCall(t, c).Arguments); got != `{"env":"prod"}` {
+		t.Errorf("executing call carries %s, want what the model asked for", got)
+	}
+	c, _ = tr.Delta(saigetypes.ToolExecEndDelta{ToolCallID: "c1", Name: "deploy"})
+	if got := string(decodeDone(t, c).Arguments); got != `{"env":"staging"}` {
+		t.Errorf("done carries %s, want what the tool ran with", got)
+	}
+}
+
+// Call ids are unique only within one agent's stream. A sub-agent's call that
+// reuses its parent's id gets its own arguments, and finishing it leaves the
+// parent's in place.
+func TestANestedCallsArgumentsAreKeptApartFromItsParents(t *testing.T) {
+	t.Parallel()
+
+	nested := func(d saigetypes.Delta) saigetypes.Delta {
+		return saigetypes.ToolExecDelta{ToolCallID: "c1", Inner: d}
+	}
+	tr := agentrt.NewTranslator()
+	tr.Delta(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "delegate"})
+	tr.Delta(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "delegate", Arguments: map[string]any{"who": "parent"}}})
+	tr.Delta(saigetypes.ToolExecStartDelta{ToolCallID: "c1", Name: "delegate"})
+
+	tr.Delta(nested(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "grep"}))
+	tr.Delta(nested(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "grep", Arguments: map[string]any{"who": "child"}}}))
+	c, _ := tr.Delta(nested(saigetypes.ToolExecStartDelta{ToolCallID: "c1", Name: "grep"}))
+	if got := string(decodeCall(t, c).Arguments); got != `{"who":"child"}` {
+		t.Errorf("the child's executing call carries %s, want its own", got)
+	}
+	tr.Ran("c1", "grep", map[string]any{"who": "child ran"}, "c1")
+	c, _ = tr.Delta(nested(saigetypes.ToolExecEndDelta{ToolCallID: "c1", Name: "grep"}))
+	if got := string(decodeDone(t, c).Arguments); got != `{"who":"child ran"}` {
+		t.Errorf("the child's done carries %s, want what it ran with", got)
+	}
+
+	c, _ = tr.Delta(saigetypes.ToolExecEndDelta{ToolCallID: "c1", Name: "delegate"})
+	if got := string(decodeDone(t, c).Arguments); got != `{"who":"parent"}` {
+		t.Errorf("the parent's done carries %s, want the parent's own", got)
+	}
+}
