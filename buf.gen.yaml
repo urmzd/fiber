@@ -1,4 +1,4 @@
-# buf.gen.yaml drives code generation for the mandatum wire contract.
+# buf.gen.yaml drives code generation for the fiber wire contract.
 #
 #   buf generate
 #
@@ -6,8 +6,8 @@
 # gen/mandatum/v1/mandatumv1connect/*.connect.go (handlers and clients), giving the
 # Go import paths
 #
-#   github.com/urmzd/mandatum/gen/mandatum/v1
-#   github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect
+#   github.com/urmzd/fiber/gen/mandatum/v1
+#   github.com/urmzd/fiber/gen/mandatum/v1/mandatumv1connect
 #
 # gen/ is generated, never edited, and never committed; `make proto` recreates
 # it. Managed mode is off on purpose: every .proto file states its own

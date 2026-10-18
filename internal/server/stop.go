@@ -84,7 +84,7 @@ func (s *Server) handleStop(stopper Stopper) http.HandlerFunc {
 		}
 		id, err := s.auth.Authenticate(r.Context(), r.Header)
 		if err != nil {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="mandatum"`)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="fiber"`)
 			s.httpFail(w, "stop", err)
 			return
 		}

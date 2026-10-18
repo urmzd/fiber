@@ -1,4 +1,4 @@
-# The whole system on one machine: mandatum, the Postgres its agent registry
+# The whole system on one machine: fiber, the Postgres its agent registry
 # lives in, and the Redis its bus runs on.
 #
 #   docker compose up --build --wait
@@ -6,9 +6,9 @@
 #
 # Everything that has to outlive the process does: agent definitions and the
 # run ledger and queue are in Postgres, and the bus is on Redis. A run in flight
-# when mandatum stops is reclaimed when its lease expires.
+# when fiber stops is reclaimed when its lease expires.
 
-name: mandatum
+name: fiber
 
 services:
   postgres:
@@ -16,15 +16,15 @@ services:
     # tables; the extension is there for retrieval work and costs nothing unused.
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: mandatum
-      POSTGRES_PASSWORD: mandatum
-      POSTGRES_DB: mandatum
+      POSTGRES_USER: fiber
+      POSTGRES_PASSWORD: fiber
+      POSTGRES_DB: fiber
     ports:
-      - "127.0.0.1:${MANDATUM_POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${FIBER_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mandatum -d mandatum"]
+      test: ["CMD-SHELL", "pg_isready -U fiber -d fiber"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -33,7 +33,7 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "127.0.0.1:${MANDATUM_REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${FIBER_REDIS_PORT:-6379}:6379"
     volumes:
       - redis:/data
     healthcheck:
@@ -42,7 +42,7 @@ services:
       timeout: 3s
       retries: 30
 
-  mandatum:
+  fiber:
     build: .
     depends_on:
       postgres:
@@ -50,16 +50,16 @@ services:
       redis:
         condition: service_healthy
     environment:
-      MANDATUM_POSTGRES_URL: postgres://mandatum:mandatum@postgres:5432/mandatum
-      MANDATUM_REDIS_URL: redis://redis:6379/0
+      FIBER_POSTGRES_URL: postgres://fiber:fiber@postgres:5432/fiber
+      FIBER_REDIS_URL: redis://redis:6379/0
       # A fixed development credential so the CLI and the server agree. Set a
       # real one in the environment for anything that is not a laptop.
-      MANDATUM_TOKEN: ${MANDATUM_TOKEN:-mandatum-dev-token}
-      MANDATUM_TENANT: ${MANDATUM_TENANT:-default}
+      FIBER_TOKEN: ${FIBER_TOKEN:-fiber-dev-token}
+      FIBER_TENANT: ${FIBER_TENANT:-default}
       # Optional. Without it, agents on the "offline" provider still run.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
-      - "127.0.0.1:${MANDATUM_PORT:-8383}:8383"
+      - "127.0.0.1:${FIBER_PORT:-8383}:8383"
     volumes:
       - workspace:/data
     healthcheck:

@@ -8,9 +8,9 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/sink"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connectors/internal/render"
+	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
 )
 
 // CheckAPI owns one check per agent run on the pinned commit.
@@ -19,7 +19,7 @@ type CheckAPI interface {
 	UpdateCheck(context.Context, Ref, int64, Check) error
 }
 
-// Check is the GitHub check-run payload. ExternalID is the stable mandatum run ID.
+// Check is the GitHub check-run payload. ExternalID is the stable fiber run ID.
 type Check struct {
 	Name       string      `json:"name"`
 	HeadSHA    string      `json:"head_sha,omitempty"`
@@ -113,7 +113,7 @@ func validSHA(s string) bool {
 }
 
 func (c *Connector) checkBody(v render.View) string {
-	check := Check{Name: "mandatum/" + v.Agent, ExternalID: v.RunID, Status: "in_progress", Output: CheckOutput{Title: sink.StatusLabel(v.Status)}}
+	check := Check{Name: "fiber/" + v.Agent, ExternalID: v.RunID, Status: "in_progress", Output: CheckOutput{Title: sink.StatusLabel(v.Status)}}
 	if check.Output.Title == "" {
 		check.Output.Title = "working"
 	}

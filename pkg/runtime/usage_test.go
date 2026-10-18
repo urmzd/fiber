@@ -12,16 +12,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/duraturo"
-	drun "github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor"
+	drun "github.com/urmzd/anchor/pkg/run"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ func (s *spender) Execute(ctx context.Context, req runtime.Request, emit func(co
 	if n <= s.fail {
 		err := fmt.Errorf("provider unavailable after call %d", n)
 		if s.permanent && n == s.fail {
-			return runtime.Outcome{}, duraturo.NonRetryable(err)
+			return runtime.Outcome{}, anchor.NonRetryable(err)
 		}
 		return runtime.Outcome{}, err
 	}
@@ -541,7 +541,7 @@ func TestReportingAChildRunOutsideADelegationIsRefused(t *testing.T) {
 }
 
 // dropsTheAgentsResult is a ledger whose first write of the agent's successful
-// result fails: the attempt answered, and duraturo never recorded it.
+// result fails: the attempt answered, and anchor never recorded it.
 type dropsTheAgentsResult struct {
 	durableLedger
 	mu      sync.Mutex

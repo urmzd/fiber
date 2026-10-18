@@ -3,8 +3,8 @@ package blob_test
 import (
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/blob"
-	"github.com/urmzd/mandatum/pkg/blob/blobtest"
+	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/blob/blobtest"
 )
 
 func TestMemorySatisfiesTheStoreContract(t *testing.T) {

@@ -12,13 +12,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // Stopping a run.
@@ -96,7 +96,7 @@ import (
 //
 // # Why it is the agent activity that listens
 //
-// duraturo replays a workflow body from the top, and a body may only decide
+// anchor replays a workflow body from the top, and a body may only decide
 // things from its input and its records. Whether somebody has asked for a stop
 // is neither: it changes between attempts. So the body never asks. The nested
 // agent activity listens, and what it returns (a stopped Outcome, or an
@@ -165,14 +165,14 @@ const MaxStopText = 512
 const stopVerb = "stop"
 
 // stopRecordKey is the ledger record a stop request is written to. It has the
-// shape of a duraturo event record, which is the kind of record the ledger
+// shape of a anchor event record, which is the kind of record the ledger
 // expects to be written from outside a run.
 const (
 	stopRecordName = "mandatum.stop"
 	stopRecordKey  = "event:" + stopRecordName + "#0"
 )
 
-// StopLedger is the part of a duraturo ledger a stop is recorded in: a point
+// StopLedger is the part of a anchor ledger a stop is recorded in: a point
 // load of a run with its records, and a write-once record. Every
 // ledger.Ledger implements it.
 type StopLedger interface {
@@ -182,7 +182,7 @@ type StopLedger interface {
 
 // WithStopLedger records stop requests in the run ledger as well as
 // publishing them, so a request made before a turn starts is honoured however
-// long the turn takes to start. Pass the ledger the runtime's duraturo client
+// long the turn takes to start. Pass the ledger the runtime's anchor client
 // uses. See "A request that arrives before the turn" in stop.go.
 //
 // Without it a request that waits for a turn is held only by the bus, and is
@@ -484,7 +484,7 @@ func (r *Runtime) StopRequested(ctx context.Context, tenant, runID string) (Stop
 }
 
 // loadRun reads a run without its records when the ledger offers that point
-// read (every ledger in duraturo and pkg/durable does), and with them
+// read (every ledger in anchor and pkg/durable does), and with them
 // otherwise.
 func (r *Runtime) loadRun(ctx context.Context, runID string) (run.Run, error) {
 	if g, ok := r.stops.(interface {
@@ -509,7 +509,7 @@ func (r *Runtime) recordedStop(ctx context.Context, runID string) (agentrt.Stop,
 	}
 	_, records, err := r.recordsOf(ctx, runID, false, prefixStop)
 	if err != nil {
-		r.logger.Warn("mandatum/runtime: could not read recorded stop requests; relying on the bus",
+		r.logger.Warn("fiber/runtime: could not read recorded stop requests; relying on the bus",
 			"run_id", runID, "error", err)
 		return agentrt.Stop{}, false
 	}
@@ -631,7 +631,7 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 		defer grace.Stop()
 		select {
 		case <-grace.C:
-			r.logger.Warn("mandatum/runtime: turn did not wrap up after a stop request; cancelling it",
+			r.logger.Warn("fiber/runtime: turn did not wrap up after a stop request; cancelling it",
 				"run_id", req.RunID, "grace", r.stopGrace.String())
 			cancel()
 		case <-returned:
@@ -670,7 +670,7 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 		// request still waiting.
 		return out, err
 	}
-	r.logger.Warn("mandatum/runtime: turn ended with an error after a stop request; the run ends stopped",
+	r.logger.Warn("fiber/runtime: turn ended with an error after a stop request; the run ends stopped",
 		"run_id", req.RunID, "error", err)
 	// The executor never said what it sent, so the request is recorded as the
 	// agent renders it before retrieval: the same words a turn stopped before
@@ -712,7 +712,7 @@ func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan ag
 			// Accept built this run's own topic from the same id, so this
 			// cannot happen; a run that cannot be stopped is better than one
 			// that cannot start.
-			r.logger.Error("mandatum/runtime: stop topic is invalid", "run_id", runID, "error", err)
+			r.logger.Error("fiber/runtime: stop topic is invalid", "run_id", runID, "error", err)
 		} else {
 			sub := envelope.Subscription{Topic: tp, Filter: envelope.Filter{Kinds: []string{string(envelope.KindStop)}}}
 			wg.Add(1)
@@ -727,7 +727,7 @@ func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan ag
 					if ctx.Err() != nil {
 						return
 					}
-					r.logger.Warn("mandatum/runtime: lost the stop subscription; listening again",
+					r.logger.Warn("fiber/runtime: lost the stop subscription; listening again",
 						"run_id", runID, "error", err)
 					select {
 					case <-ctx.Done():

@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/connectors/internal/httpjson"
+	"github.com/urmzd/fiber/pkg/connectors/internal/httpjson"
 )
 
 // API is the slice of Slack's Web API this connector uses: post a message, edit

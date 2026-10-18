@@ -10,19 +10,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/duraturo/pkg/ledger"
-	dqueue "github.com/urmzd/duraturo/pkg/queue"
-	"github.com/urmzd/duraturo/pkg/replay"
-	drun "github.com/urmzd/duraturo/pkg/run"
-	"github.com/urmzd/duraturo/pkg/worker"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/anchor/pkg/ledger"
+	dqueue "github.com/urmzd/anchor/pkg/queue"
+	"github.com/urmzd/anchor/pkg/replay"
+	drun "github.com/urmzd/anchor/pkg/run"
+	"github.com/urmzd/anchor/pkg/worker"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -55,7 +55,7 @@ func (s *specs) revise(agent, prompt string) agentrt.Revision {
 }
 
 // at overwrites a stored revision, which only a broken control plane would do.
-// It exists so a test can prove that mandatum notices.
+// It exists so a test can prove that fiber notices.
 func (s *specs) corrupt(agent string, rev int, hash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -229,7 +229,7 @@ func textChunk(t *testing.T, s string) agentrt.Chunk {
 	return agentrt.Chunk{Kind: envelope.KindText, Payload: b}
 }
 
-// harness is a runtime wired to in-memory duraturo storage.
+// harness is a runtime wired to in-memory anchor storage.
 type harness struct {
 	rt     *runtime.Runtime
 	bus    *recorder
@@ -245,7 +245,7 @@ func newHarness(t *testing.T, exec *executor, opts ...runtime.Option) *harness {
 	q := dqueue.NewMemory()
 	bus := &recorder{}
 	sp := newSpecs()
-	rt, err := runtime.New(duraturo.New(lgr, q), sp, bus, exec, opts...)
+	rt, err := runtime.New(anchor.New(lgr, q), sp, bus, exec, opts...)
 	if err != nil {
 		t.Fatalf("runtime.New: %v", err)
 	}
@@ -279,7 +279,7 @@ func tag(agent, id, text string) envelope.Tag {
 		Tenant: "acme",
 		Agent:  agent,
 		Origin: "github",
-		Source: address.MustParse("github://urmzd/mandatum/issues/42"),
+		Source: address.MustParse("github://urmzd/fiber/issues/42"),
 		Text:   text,
 		At:     time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC),
 	}
@@ -641,7 +641,7 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 	t.Parallel()
 
 	exec := newExecutor("")
-	exec.err = duraturo.NonRetryable(errors.New("the model refused"))
+	exec.err = anchor.NonRetryable(errors.New("the model refused"))
 	h := newHarness(t, exec)
 	h.exec.chunks = []agentrt.Chunk{textChunk(t, "partial ")}
 	h.specs.revise("docs-bot", "v1")
@@ -687,7 +687,7 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 }
 
 // A retryable failure is NOT terminal, because the retry budget belongs to
-// duraturo. Reporting it as terminal would tell a sink to give up on a run that
+// anchor. Reporting it as terminal would tell a sink to give up on a run that
 // is about to succeed.
 func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) {
 	t.Parallel()

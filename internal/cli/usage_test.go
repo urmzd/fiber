@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/internal/server"
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/internal/server"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Through the composition root: a run's usage is delivered on its terminal

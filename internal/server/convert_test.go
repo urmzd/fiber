@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/address"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/address"
 )
 
 // The structured address on the wire is convenient, not trusted: it is rebuilt
@@ -34,9 +34,9 @@ func TestAddressesAreRevalidatedOnTheWayIn(t *testing.T) {
 			in: &mandatumv1.Address{
 				Connector: "github",
 				Workspace: "urmzd",
-				Path:      []string{"mandatum", "issues", "42"},
+				Path:      []string{"fiber", "issues", "42"},
 			},
-			want: "github://urmzd/mandatum/issues/42",
+			want: "github://urmzd/fiber/issues/42",
 		},
 		{
 			name:  "workspace is not token safe",

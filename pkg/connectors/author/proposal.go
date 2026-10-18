@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // Operations a proposal can stage.

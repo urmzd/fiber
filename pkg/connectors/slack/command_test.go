@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/connectors/mention"
-	"github.com/urmzd/mandatum/pkg/connectors/slack"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/connectors/slack"
 )
 
 // invocation is a slash command request as Slack documents it.

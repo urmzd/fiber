@@ -54,9 +54,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connectors/internal/render"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Defaults for the engine.

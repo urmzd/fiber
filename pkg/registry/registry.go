@@ -13,7 +13,7 @@
 //
 // A revision is immutable and revising an agent appends revision N+1. That is
 // not fastidiousness about history, it is what makes durable execution
-// possible: a run pins the revision it accepted and duraturo replays that run
+// possible: a run pins the revision it accepted and anchor replays that run
 // from the top on every attempt, so a definition that changed under a run would
 // make the replay diverge from the ledger that is supposed to be the truth
 // about it. Three rules follow, and they are the whole design:
@@ -56,7 +56,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // Sentinels every implementation reports. They are matched with errors.Is, and

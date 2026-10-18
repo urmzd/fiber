@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/registry"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/registry"
 )
 
 const tenantA, tenantB = "acme", "globex"
@@ -36,7 +36,7 @@ func spec(name, prompt string) agentspec.AgentSpec {
 //
 // Which store is decided by the environment, not by the test: every property
 // in this file is a property of the Store contract, so the suite runs unchanged
-// against Postgres when $MANDATUM_POSTGRES_TEST_URL names one (see
+// against Postgres when $FIBER_POSTGRES_TEST_URL names one (see
 // postgres_test.go) and against Memory otherwise.
 func newStore(t *testing.T) registry.Store {
 	t.Helper()
@@ -279,7 +279,7 @@ func TestTenantsAreIsolated(t *testing.T) {
 }
 
 // THE REPLAY PROPERTY. Deleting an agent retires the name; it does not strand
-// the runs that pinned a revision of it, because duraturo replays from the top
+// the runs that pinned a revision of it, because anchor replays from the top
 // and a run whose definition became unresolvable could never finish.
 func TestDeleteTombstonesButPinnedRevisionsStillResolve(t *testing.T) {
 	t.Parallel()

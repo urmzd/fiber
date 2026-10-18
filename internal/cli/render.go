@@ -5,16 +5,16 @@ import (
 	"strings"
 	"time"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // eventJSON is the shape the streaming commands emit under --format json.
 //
 // It is a hand-written struct rather than protojson of the wire Event for one
 // reason: payload is bytes on the wire, and protojson would base64 it. A
-// consumer piping `mandatum listen` into jq wants the citation it can read, not
+// consumer piping `fiber listen` into jq wants the citation it can read, not
 // a blob it has to decode in a second step. Kind-specific bodies are decoded
 // here and inlined, and anything unrecognised falls back to the raw string so
 // a new kind is still legible to an old client.
@@ -69,10 +69,10 @@ func asEnvelope(e *mandatumv1.Event) envelope.Event {
 
 // renderEventText writes one event for a human.
 //
-// answerOnly is what makes `mandatum tag` feel like a conversation rather than a
+// answerOnly is what makes `fiber tag` feel like a conversation rather than a
 // log: text fragments are written bare and unterminated so they accumulate into
 // the answer as it arrives, and everything else goes to stderr as a diagnostic.
-// `mandatum listen` sets it false and gets one labelled line per event, because
+// `fiber listen` sets it false and gets one labelled line per event, because
 // there a stream of many runs concatenated into one paragraph would be
 // unreadable.
 func renderEventText(u *ui, e *mandatumv1.Event, answerOnly bool) {

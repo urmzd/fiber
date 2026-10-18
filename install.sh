@@ -1,20 +1,20 @@
 #!/bin/sh
-# install.sh — Installs mandatum from GitHub releases.
+# install.sh — Installs fiber from GitHub releases.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/urmzd/mandatum/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/urmzd/fiber/main/install.sh | sh
 #
 # Environment variables:
-#   MANDATUM_VERSION     — version to install (default: latest)
-#   MANDATUM_INSTALL_DIR — installation directory (default: $HOME/.local/bin)
-#   MANDATUM_SHA256      — optional SHA256 checksum to verify against
+#   FIBER_VERSION     — version to install (default: latest)
+#   FIBER_INSTALL_DIR — installation directory (default: $HOME/.local/bin)
+#   FIBER_SHA256      — optional SHA256 checksum to verify against
 
 set -eu
 
-REPO="urmzd/mandatum"
-BINARY="mandatum"
-VERSION="${MANDATUM_VERSION:-latest}"
-INSTALL_DIR="${MANDATUM_INSTALL_DIR:-$HOME/.local/bin}"
+REPO="urmzd/fiber"
+BINARY="fiber"
+VERSION="${FIBER_VERSION:-latest}"
+INSTALL_DIR="${FIBER_INSTALL_DIR:-$HOME/.local/bin}"
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
@@ -51,8 +51,8 @@ trap 'rm -rf "$tmp"' EXIT
 echo "downloading $url" >&2
 curl -fsSL "$url" -o "$tmp/$BINARY"
 
-if [ -n "${MANDATUM_SHA256:-}" ]; then
-  echo "${MANDATUM_SHA256}  $tmp/$BINARY" | (sha256sum -c - 2>/dev/null || shasum -a 256 -c -) >&2
+if [ -n "${FIBER_SHA256:-}" ]; then
+  echo "${FIBER_SHA256}  $tmp/$BINARY" | (sha256sum -c - 2>/dev/null || shasum -a 256 -c -) >&2
 fi
 
 chmod +x "$tmp/$BINARY"

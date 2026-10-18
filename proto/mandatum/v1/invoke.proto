@@ -1,4 +1,4 @@
-// mandatum.v1 is the wire contract every mandatum client speaks. This file is the
+// mandatum.v1 is the wire contract every fiber client speaks. This file is the
 // write path: how a tag gets raised, where its output is sent, and how the run
 // it created is inspected afterwards.
 //
@@ -25,13 +25,13 @@ package mandatum.v1;
 import "google/protobuf/timestamp.proto";
 import "mandatum/v1/bus.proto";
 
-option go_package = "github.com/urmzd/mandatum/gen/mandatum/v1;mandatumv1";
+option go_package = "github.com/urmzd/fiber/gen/mandatum/v1;mandatumv1";
 
 // Address is a stable URI for any place a tag can come from or be delivered to.
 // It is the naming layer of the mesh, and it is structured rather than a bare
 // string so that a server can authorize a target without re-parsing it:
 //
-//   github://urmzd/mandatum/issues/42
+//   github://urmzd/fiber/issues/42
 //   slack://T0123/C0456?thread=1699123456.001
 //   jira://acme/PROJ-5
 //   cron://acme/nightly-review

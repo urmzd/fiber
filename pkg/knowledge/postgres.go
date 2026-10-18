@@ -90,7 +90,7 @@ const migrateLock = 0x6b6e6f77 // "know"
 // Postgres is a Store that outlives the process.
 //
 // It keeps the contract Memory documents and is held to it by the same tests,
-// which run against Postgres whenever $MANDATUM_POSTGRES_TEST_URL is set.
+// which run against Postgres whenever $FIBER_POSTGRES_TEST_URL is set.
 //
 // The dense arm is pgvector cosine distance. The lexical arm is Postgres full
 // text search ranked by ts_rank_cd. Fusion and reranking are the shared Go

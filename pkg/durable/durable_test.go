@@ -13,12 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/urmzd/mandatum/pkg/durable"
+	"github.com/urmzd/fiber/pkg/durable"
 )
 
 // postgresEnv names the Postgres these tests run against. Without it they
 // skip: a schema has no in-memory twin to fall back on.
-const postgresEnv = "MANDATUM_POSTGRES_TEST_URL"
+const postgresEnv = "FIBER_POSTGRES_TEST_URL"
 
 // schemas numbers each schema the tests build, so tests sharing one database
 // cannot see each other's tables.
@@ -41,7 +41,7 @@ func newPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := postgresURL(t)
 	ctx := context.Background()
-	schema := fmt.Sprintf("mandatumtest_durable_%d_%d", time.Now().UnixNano(), schemas.Add(1))
+	schema := fmt.Sprintf("fibertest_durable_%d_%d", time.Now().UnixNano(), schemas.Add(1))
 
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
@@ -152,7 +152,7 @@ func TestMigrateLeavesExistingRunsInPlace(t *testing.T) {
 	}
 }
 
-// The constraints are the schema's half of duraturo's invariants. Each case is
+// The constraints are the schema's half of anchor's invariants. Each case is
 // a row the adapters never write, and one that would corrupt a run if anything
 // else did.
 func TestSchemaRefusesRowsThatBreakTheLedgerContract(t *testing.T) {
@@ -172,7 +172,7 @@ func TestSchemaRefusesRowsThatBreakTheLedgerContract(t *testing.T) {
 			code: unique,
 		},
 		{
-			name: "a status duraturo cannot finish",
+			name: "a status anchor cannot finish",
 			sql:  `INSERT INTO mandatum_runs (run_id, status, envelope, created_at) VALUES ('run-2', 'running', '{}', now())`,
 			code: check,
 		},

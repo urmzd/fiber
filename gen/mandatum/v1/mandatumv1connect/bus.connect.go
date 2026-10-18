@@ -1,4 +1,4 @@
-// mandatum.v1 is the wire contract every mandatum client speaks. This file is the
+// mandatum.v1 is the wire contract every fiber client speaks. This file is the
 // read path, and it is the product surface: everything an agent produces leaves
 // the system through here.
 //
@@ -34,7 +34,7 @@ import (
 	connect "connectrpc.com/connect"
 	context "context"
 	errors "errors"
-	v1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	v1 "github.com/urmzd/fiber/gen/mandatum/v1"
 	http "net/http"
 	strings "strings"
 )

@@ -64,16 +64,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/connectors"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/files"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/inbound"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/render"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/sink"
-	"github.com/urmzd/mandatum/pkg/connectors/mention"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/connectors"
+	"github.com/urmzd/fiber/pkg/connectors/internal/files"
+	"github.com/urmzd/fiber/pkg/connectors/internal/inbound"
+	"github.com/urmzd/fiber/pkg/connectors/internal/render"
+	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Name is the address scheme this connector owns.
@@ -118,7 +118,7 @@ type Config struct {
 	Bots map[string]string
 
 	// Agents enables naming an agent in the text alongside the app's own
-	// mention: "@mandatum @docs-bot summarize". Slack leaves "@docs-bot" as
+	// mention: "@fiber @docs-bot summarize". Slack leaves "@docs-bot" as
 	// literal text when no such Slack user exists, which is exactly the case
 	// for an agent, so the shared @name grammar applies.
 	//

@@ -14,13 +14,13 @@ import (
 
 	"connectrpc.com/connect"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
-	"github.com/urmzd/mandatum/gen/mandatum/v1/mandatumv1connect"
-	"github.com/urmzd/mandatum/internal/server"
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/agentspec"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
+	"github.com/urmzd/fiber/gen/mandatum/v1/mandatumv1connect"
+	"github.com/urmzd/fiber/internal/server"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
 )
 
 // inbox is a sink that records what was delivered where.

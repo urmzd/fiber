@@ -1,4 +1,4 @@
-// mandatum.v1 is the wire contract every mandatum client speaks. This file is the
+// mandatum.v1 is the wire contract every fiber client speaks. This file is the
 // write path: how a tag gets raised, where its output is sent, and how the run
 // it created is inspected afterwards.
 //
@@ -130,7 +130,7 @@ func (RunStatus) EnumDescriptor() ([]byte, []int) {
 // It is the naming layer of the mesh, and it is structured rather than a bare
 // string so that a server can authorize a target without re-parsing it:
 //
-//	github://urmzd/mandatum/issues/42
+//	github://urmzd/fiber/issues/42
 //	slack://T0123/C0456?thread=1699123456.001
 //	jira://acme/PROJ-5
 //	cron://acme/nightly-review
@@ -1898,7 +1898,7 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x06Invoke\x12\x10.mandatum.v1.Tag\x1a\x1b.mandatum.v1.InvokeResponse\"\x00\x128\n" +
 	"\fInvokeStream\x12\x10.mandatum.v1.Tag\x1a\x12.mandatum.v1.Event\"\x000\x01\x128\n" +
 	"\x06GetRun\x12\x1a.mandatum.v1.GetRunRequest\x1a\x10.mandatum.v1.Run\"\x00\x12C\n" +
-	"\x06Answer\x12\x1a.mandatum.v1.AnswerRequest\x1a\x1b.mandatum.v1.AnswerResponse\"\x00B6Z4github.com/urmzd/mandatum/gen/mandatum/v1;mandatumv1b\x06proto3"
+	"\x06Answer\x12\x1a.mandatum.v1.AnswerRequest\x1a\x1b.mandatum.v1.AnswerResponse\"\x00B3Z1github.com/urmzd/fiber/gen/mandatum/v1;mandatumv1b\x06proto3"
 
 var (
 	file_mandatum_v1_invoke_proto_rawDescOnce sync.Once

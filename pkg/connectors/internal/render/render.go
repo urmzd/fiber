@@ -53,8 +53,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // DefaultWindow is how many sequence numbers above the mark a document

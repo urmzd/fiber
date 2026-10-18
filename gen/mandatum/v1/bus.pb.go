@@ -1,4 +1,4 @@
-// mandatum.v1 is the wire contract every mandatum client speaks. This file is the
+// mandatum.v1 is the wire contract every fiber client speaks. This file is the
 // read path, and it is the product surface: everything an agent produces leaves
 // the system through here.
 //
@@ -105,20 +105,20 @@ type Event struct {
 	// on. Kinds are dotted so a selector can name a whole family ("delta") or one
 	// member ("delta.citation"):
 	//
-	//   delta.text, delta.thinking, delta.tool.call, delta.tool.done,
-	//   delta.citation             streaming output as the agent works
-	//   lifecycle.accepted, lifecycle.started, lifecycle.parked,
-	//   lifecycle.resumed, lifecycle.completed, lifecycle.failed,
-	//   lifecycle.stopped          run lifecycle
-	//   control.stop               a request that one run stop, published to
-	//                              agent:_control:stop-<key>, the key a hash of
-	//                              the asker's tenant and the run id, and not
-	//                              to the run's own topic
-	//   action.taken               the agent changed something on a real surface
-	//   control.created, control.revised, control.deleted
-	//                              control-plane changes, on the same bus as the
-	//                              data so a dashboard sees an agent get revised
-	//                              in the same stream as the runs that follow it
+	//	delta.text, delta.thinking, delta.tool.call, delta.tool.done,
+	//	delta.citation             streaming output as the agent works
+	//	lifecycle.accepted, lifecycle.started, lifecycle.parked,
+	//	lifecycle.resumed, lifecycle.completed, lifecycle.failed,
+	//	lifecycle.stopped          run lifecycle
+	//	control.stop               a request that one run stop, published to
+	//	                           agent:_control:stop-<key>, the key a hash of
+	//	                           the asker's tenant and the run id, and not
+	//	                           to the run's own topic
+	//	action.taken               the agent changed something on a real surface
+	//	control.created, control.revised, control.deleted
+	//	                           control-plane changes, on the same bus as the
+	//	                           data so a dashboard sees an agent get revised
+	//	                           in the same stream as the runs that follow it
 	//
 	// Kind is an open string rather than an enum so that a connector can emit a
 	// kind this contract has not been regenerated for, and so that an unknown
@@ -453,7 +453,7 @@ func (x *SubscribeRequest) GetSubscription() *Subscription {
 
 // PublishRequest submits one event to the bus.
 //
-// This is the seam that makes mandatum a bus rather than an agent runner: a
+// This is the seam that makes fiber a bus rather than an agent runner: a
 // connector, a sidecar, or a foreign runtime can put events onto an existing
 // run's topic, and every subscriber and every route sees them exactly as if the
 // agent loop had emitted them.
@@ -602,7 +602,7 @@ const file_mandatum_v1_bus_proto_rawDesc = "" +
 	"\n" +
 	"BusService\x12B\n" +
 	"\tSubscribe\x12\x1d.mandatum.v1.SubscribeRequest\x1a\x12.mandatum.v1.Event\"\x000\x01\x12F\n" +
-	"\aPublish\x12\x1b.mandatum.v1.PublishRequest\x1a\x1c.mandatum.v1.PublishResponse\"\x00B6Z4github.com/urmzd/mandatum/gen/mandatum/v1;mandatumv1b\x06proto3"
+	"\aPublish\x12\x1b.mandatum.v1.PublishRequest\x1a\x1c.mandatum.v1.PublishResponse\"\x00B3Z1github.com/urmzd/fiber/gen/mandatum/v1;mandatumv1b\x06proto3"
 
 var (
 	file_mandatum_v1_bus_proto_rawDescOnce sync.Once

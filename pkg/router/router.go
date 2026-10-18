@@ -12,7 +12,7 @@
 // The router owns exactly one piece of state, the map from a run to the routes
 // it was accepted with, and it is deliberately not durable. The bus owns
 // sequencing and retention, the connector owns how a surface is written, and
-// duraturo's ledger owns what happened. Losing a router loses in-flight
+// anchor's ledger owns what happened. Losing a router loses in-flight
 // renders, not runs: the runtime registers a run's routes at accept time and
 // registers them again when it replays.
 //
@@ -66,11 +66,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // Errors reported by the router. Callers match with errors.Is.
@@ -286,7 +286,7 @@ type binding struct {
 // run with no routes has nowhere to go and is dropped.
 //
 // Registering a run again replaces its routes and keeps its cursor, which is
-// what replay needs — duraturo re-runs a workflow from the top, and the routes
+// what replay needs — anchor re-runs a workflow from the top, and the routes
 // it re-registers are the same ones it pinned. Lanes for targets that are no
 // longer routed drain and exit.
 //

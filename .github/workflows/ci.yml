@@ -66,13 +66,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg17
         env:
-          POSTGRES_USER: mandatum
-          POSTGRES_PASSWORD: mandatum
-          POSTGRES_DB: mandatum
+          POSTGRES_USER: fiber
+          POSTGRES_PASSWORD: fiber
+          POSTGRES_DB: fiber
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U mandatum -d mandatum"
+          --health-cmd "pg_isready -U fiber -d fiber"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
@@ -86,8 +86,8 @@ jobs:
           --health-timeout 3s
           --health-retries 30
     env:
-      MANDATUM_POSTGRES_TEST_URL: postgres://mandatum:mandatum@localhost:5432/mandatum?sslmode=disable
-      MANDATUM_REDIS_ADDR: localhost:6379
+      FIBER_POSTGRES_TEST_URL: postgres://fiber:fiber@localhost:5432/fiber?sslmode=disable
+      FIBER_REDIS_ADDR: localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -104,15 +104,15 @@ jobs:
           # The Postgres queue does not implement the optional DeltaLog face.
           # Every other test must execute, including all backend setup tests.
           jq -s -e '[.[] | select(.Action == "skip")
-            | select(.Package != "github.com/urmzd/mandatum/pkg/durable"
-              or .Test != "TestQueueConformanceOnMandatumSchema/FencedAppend")]
+            | select(.Package != "github.com/urmzd/fiber/pkg/durable"
+              or .Test != "TestQueueConformanceOnFiberSchema/FencedAppend")]
             | length == 0' integration-results.jsonl
       - name: Require backend test coverage
         run: |
           jq -s -e '. as $events | [
             ["registry", "TestPostgresMigrateIsIdempotentAndConcurrent"],
-            ["durable", "TestLedgerConformanceOnMandatumSchema"],
-            ["durable", "TestQueueConformanceOnMandatumSchema"],
+            ["durable", "TestLedgerConformanceOnFiberSchema"],
+            ["durable", "TestQueueConformanceOnFiberSchema"],
             ["knowledge", "TestPostgresMigrateIsIdempotentAndConcurrent"],
             ["bus", "TestRedisConformance"],
             ["runtime", "TestStopTestsRunOnPostgresAndRedis"],
@@ -154,5 +154,5 @@ jobs:
             ["durable", "TestRecordsWithPrefixReadsOnlyTheRecordsAsked"]
           ] | all(. as $required | any($events[];
             .Action == "pass"
-            and .Package == ("github.com/urmzd/mandatum/pkg/" + $required[0])
+            and .Package == ("github.com/urmzd/fiber/pkg/" + $required[0])
             and .Test == $required[1]))' integration-results.jsonl

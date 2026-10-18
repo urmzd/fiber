@@ -1,6 +1,6 @@
 .PHONY: all init build test lint fmt check run proto install up down e2e
 
-MOD := mandatum
+MOD := fiber
 CMD := cmd/$(MOD)
 
 all: check

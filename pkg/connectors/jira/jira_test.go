@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/inbound"
-	"github.com/urmzd/mandatum/pkg/connectors/jira"
-	"github.com/urmzd/mandatum/pkg/connectors/mention"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/topic"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/connectors/internal/inbound"
+	"github.com/urmzd/fiber/pkg/connectors/jira"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/topic"
 )
 
 const (
@@ -484,7 +484,7 @@ func TestDeliveringTheSameEventsTwiceKeepsOneEditedComment(t *testing.T) {
 		event(1, envelope.KindAccepted, ""),
 		textEvent(2, "The retry path posts twice "),
 		textEvent(3, "because the handle was lost."),
-		event(4, envelope.KindCitation, `{"title":"sink.go","uri":"https://github.com/urmzd/mandatum/blob/main/sink.go"}`),
+		event(4, envelope.KindCitation, `{"title":"sink.go","uri":"https://github.com/urmzd/fiber/blob/main/sink.go"}`),
 		event(5, envelope.KindCompleted, ""),
 	}
 	for range 2 {
@@ -576,7 +576,7 @@ func TestDeliveryToAnUnservedTargetIsRefused(t *testing.T) {
 
 	tests := []struct{ name, target string }{
 		{"another site", "jira://someone-else/PROJ-1"},
-		{"another connector", "github://urmzd/mandatum/issues/1"},
+		{"another connector", "github://urmzd/fiber/issues/1"},
 		{"no issue key", "jira://acme"},
 		{"something that is not an issue key", "jira://acme/latest"},
 		{"a project with no number", "jira://acme/PROJ"},

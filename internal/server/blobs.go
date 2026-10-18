@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/blob"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/blob"
 )
 
 // handleBlobPut stores an uploaded file and answers with the reference a tag
@@ -31,7 +31,7 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.auth.Authenticate(r.Context(), r.Header)
 	if err != nil {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mandatum"`)
+		w.Header().Set("WWW-Authenticate", `Bearer realm="fiber"`)
 		s.httpFail(w, "blobs", err)
 		return
 	}

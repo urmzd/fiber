@@ -95,7 +95,7 @@ var _ Embedder = (*Hashing)(nil)
 func (h *Hashing) Dimensions() int { return h.dims }
 
 // Model names the algorithm and its width, both of which decide the space.
-func (h *Hashing) Model() string { return fmt.Sprintf("mandatum-hashing-v1/%d", h.dims) }
+func (h *Hashing) Model() string { return fmt.Sprintf("fiber-hashing-v1/%d", h.dims) }
 
 // Embed hashes each text. It never fails except on a cancelled context.
 func (h *Hashing) Embed(ctx context.Context, texts []string) ([][]float32, error) {

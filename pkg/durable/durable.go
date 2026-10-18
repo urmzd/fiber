@@ -1,28 +1,28 @@
-// Package durable owns the Postgres schema that duraturo's run ledger and queue
+// Package durable owns the Postgres schema that anchor's run ledger and queue
 // are stored in, so a run in flight outlives the process that accepted it.
 //
-// It is deliberately only a schema. duraturo already ships Postgres
+// It is deliberately only a schema. anchor already ships Postgres
 // implementations of ledger.Ledger and queue.Queue, pgledger and pgqueue in the
-// module github.com/urmzd/duraturo/adapters/postgres, and they are held to
-// duraturo's own conformance suites. What they refuse to do is own tables: an
+// module github.com/urmzd/anchor/adapters/postgres, and they are held to
+// anchor's own conformance suites. What they refuse to do is own tables: an
 // adapter maps onto tables the application names, validates them, and never
 // executes DDL. Something has to create those tables, and that something is the
-// application. This package is mandatum's half of that bargain and nothing
+// application. This package is fiber's half of that bargain and nothing
 // more: three tables, the reasons they are shaped as they are, and a Migrate
 // that is safe to run from every replica at startup.
 //
 // Writing a second ledger and queue here would have been the wrong kind of
 // thoroughness. The lease, the fence and the Attempt and Failures counters are
 // the parts of durable execution that are easy to get subtly wrong, and one
-// implementation that every duraturo user exercises is worth more than a
-// private copy only mandatum does.
+// implementation that every anchor user exercises is worth more than a
+// private copy only fiber does.
 //
 // # What the tables hold
 //
 // The ledger is truth and the queue is flow. Runs and Records are the ledger:
 // what was accepted, what each step returned, how it ended. Queue holds only
 // run ids, leases and counters, and all of it except the counters can be
-// rebuilt from the ledger by duraturo's janitor. They share a database here
+// rebuilt from the ledger by anchor's janitor. They share a database here
 // because a deployment that has one Postgres should not need a second system to
 // be durable, never because one depends on the other, which is why no foreign
 // key joins the queue to the ledger.
@@ -54,7 +54,7 @@ import (
 )
 
 // The tables this package owns. They are exported so the mapping handed to
-// duraturo's adapters names the same tables Migrate creates, and a rename is
+// anchor's adapters names the same tables Migrate creates, and a rename is
 // one edit instead of two that can disagree.
 const (
 	// RunsTable holds one row per accepted run.
@@ -80,10 +80,10 @@ var ErrNoPool = errors.New("durable: no connection pool")
 // arbitrate on. It is COLLATE "C" because the janitor pages through pending
 // runs in (created_at, run_id) order and resumes strictly after a cursor; a
 // locale-aware collation would order ids differently from the Go comparison
-// duraturo's in-memory ledger uses, and a cursor would mean a different
+// anchor's in-memory ledger uses, and a cursor would mean a different
 // position on each backend. status carries a CHECK because it is the column the
 // pending to terminal compare-and-set turns on, and a value outside the three
-// duraturo knows would be a run no worker can ever finish. created_at has no
+// anchor knows would be a run no worker can ever finish. created_at has no
 // default: the adapter always writes the time the run was accepted, and a
 // default would let a row inserted by hand claim a time nobody chose.
 //
@@ -104,7 +104,7 @@ var ErrNoPool = errors.New("durable: no connection pool")
 // deleted, because attempt is the fencing token and must stay monotonic across
 // a run's whole life: a parked run that resumes has to claim at attempt N+1,
 // not at 1, or a zombie from the first life could pass the fence. failures is a
-// separate counter for the same reason duraturo separates them: attempt counts
+// separate counter for the same reason anchor separates them: attempt counts
 // claims, failures counts executions that actually failed, and waiting must not
 // spend retry budget.
 //
@@ -148,7 +148,7 @@ CREATE INDEX IF NOT EXISTS mandatum_run_queue_lease_idx
 // migrateLock is the advisory lock Migrate holds. CREATE TABLE IF NOT EXISTS is
 // not safe against itself: two processes starting together can both pass the
 // existence check and one then fails on the catalog's unique index. The value
-// is arbitrary, only has to be the same in every mandatum, and differs from the
+// is arbitrary, only has to be the same in every fiber, and differs from the
 // registry's so the two migrations never wait on each other.
 const migrateLock = 0x64757261 // "dura"
 

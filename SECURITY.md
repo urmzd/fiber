@@ -3,13 +3,13 @@
 ## Reporting a Vulnerability
 
 Report security issues privately through
-[GitHub Security Advisories](https://github.com/urmzd/mandatum/security/advisories/new)
+[GitHub Security Advisories](https://github.com/urmzd/fiber/security/advisories/new)
 rather than in a public issue. Please include a description, the affected
 version or commit, and a reproduction if you have one.
 
 ## Security boundaries
 
-Two parts of mandatum are security boundaries. A change near either one needs
+Two parts of fiber are security boundaries. A change near either one needs
 tests proving confinement still holds, and a pull request that touches them
 without such tests will not be merged.
 
@@ -50,7 +50,7 @@ boundary, and a fuzz pass proving no input panics.
 
 ### The NGAC policy path
 
-An agent's `Access` block compiles into legatus's policy graph and is enforced
+An agent's `Access` block compiles into playscape's policy graph and is enforced
 by the sandbox with default deny. It governs both the workspace areas a tool may
 touch and the spawn allowlist that decides which agents an agent may delegate
 to.
@@ -67,4 +67,4 @@ spelling a tenant name, and there is a test asserting exactly that.
 
 ## Supported Versions
 
-mandatum is pre-1.0. Security fixes land on the latest minor release.
+fiber is pre-1.0. Security fixes land on the latest minor release.

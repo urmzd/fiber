@@ -9,18 +9,18 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/blob"
-	"github.com/urmzd/mandatum/pkg/connector"
-	"github.com/urmzd/mandatum/pkg/connectors"
-	"github.com/urmzd/mandatum/pkg/connectors/cron"
-	"github.com/urmzd/mandatum/pkg/connectors/github"
-	"github.com/urmzd/mandatum/pkg/connectors/jira"
-	"github.com/urmzd/mandatum/pkg/connectors/mention"
-	"github.com/urmzd/mandatum/pkg/connectors/slack"
-	"github.com/urmzd/mandatum/pkg/connectors/webhook"
-	"github.com/urmzd/mandatum/pkg/registry"
-	"github.com/urmzd/mandatum/pkg/signature"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/connectors"
+	"github.com/urmzd/fiber/pkg/connectors/cron"
+	"github.com/urmzd/fiber/pkg/connectors/github"
+	"github.com/urmzd/fiber/pkg/connectors/jira"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/connectors/slack"
+	"github.com/urmzd/fiber/pkg/connectors/webhook"
+	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/signature"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // listers collects the connectors that can list a thread's surface, keyed
@@ -49,35 +49,35 @@ func listers(reg *connector.Registry) thread.Listers {
 const (
 	// Slack. A signing secret is what makes the trigger safe; a bot token is
 	// what makes the sink able to write.
-	EnvSlackToken   = "MANDATUM_SLACK_TOKEN"
-	EnvSlackSecret  = "MANDATUM_SLACK_SIGNING_SECRET"
-	EnvSlackTeam    = "MANDATUM_SLACK_TEAM"
-	EnvSlackBots    = "MANDATUM_SLACK_BOTS"
-	EnvSlackDefault = "MANDATUM_SLACK_DEFAULT_AGENT"
+	EnvSlackToken   = "FIBER_SLACK_TOKEN"
+	EnvSlackSecret  = "FIBER_SLACK_SIGNING_SECRET"
+	EnvSlackTeam    = "FIBER_SLACK_TEAM"
+	EnvSlackBots    = "FIBER_SLACK_BOTS"
+	EnvSlackDefault = "FIBER_SLACK_DEFAULT_AGENT"
 	// EnvSlackAppID is the app's id ("A0123..."): what marks a message in a
 	// thread as one this deployment posted when the thread is reconciled.
-	EnvSlackAppID = "MANDATUM_SLACK_APP_ID"
+	EnvSlackAppID = "FIBER_SLACK_APP_ID"
 
 	// GitHub.
-	EnvGitHubReadRepositories = "MANDATUM_GITHUB_READ_REPOSITORIES"
-	EnvGitHubToken            = "MANDATUM_GITHUB_TOKEN"
-	EnvGitHubSecret           = "MANDATUM_GITHUB_WEBHOOK_SECRET"
-	EnvGitHubOwners           = "MANDATUM_GITHUB_OWNERS"
-	EnvGitHubBots             = "MANDATUM_GITHUB_BOTS"
-	EnvGitHubChecks           = "MANDATUM_GITHUB_CHECKS"
+	EnvGitHubReadRepositories = "FIBER_GITHUB_READ_REPOSITORIES"
+	EnvGitHubToken            = "FIBER_GITHUB_TOKEN"
+	EnvGitHubSecret           = "FIBER_GITHUB_WEBHOOK_SECRET"
+	EnvGitHubOwners           = "FIBER_GITHUB_OWNERS"
+	EnvGitHubBots             = "FIBER_GITHUB_BOTS"
+	EnvGitHubChecks           = "FIBER_GITHUB_CHECKS"
 
 	// Jira. Sites is a comma-separated list of short-key=base-URL pairs; the
 	// short key, not the hostname, is what appears in a jira:// address.
-	EnvJiraSites  = "MANDATUM_JIRA_SITES"
-	EnvJiraEmail  = "MANDATUM_JIRA_EMAIL"
-	EnvJiraToken  = "MANDATUM_JIRA_TOKEN"
-	EnvJiraSecret = "MANDATUM_JIRA_WEBHOOK_SECRET"
-	EnvJiraBots   = "MANDATUM_JIRA_BOTS"
+	EnvJiraSites  = "FIBER_JIRA_SITES"
+	EnvJiraEmail  = "FIBER_JIRA_EMAIL"
+	EnvJiraToken  = "FIBER_JIRA_TOKEN"
+	EnvJiraSecret = "FIBER_JIRA_WEBHOOK_SECRET"
+	EnvJiraBots   = "FIBER_JIRA_BOTS"
 
 	// Webhook. A comma-separated list of workspace=base-url=secret triples.
 	// The workspace is an indirection precisely so that a route written in an
 	// agent spec cannot name an arbitrary URL on the internet.
-	EnvWebhookEndpoints = "MANDATUM_WEBHOOK_ENDPOINTS"
+	EnvWebhookEndpoints = "FIBER_WEBHOOK_ENDPOINTS"
 )
 
 // buildConnectors registers every connector this deployment is configured for.
@@ -87,9 +87,9 @@ const (
 // out from the types. So this function only has to construct; nothing here says
 // what any connector is for.
 func buildConnectors(cfg coreConfig, store registry.Store, blobs blob.Store) (*connector.Registry, error) {
-	for _, name := range []string{"MANDATUM_GITHUB_AUTO_LABELS", "MANDATUM_GITHUB_GUIDES", "MANDATUM_GITHUB_MUTATIONS", "MANDATUM_SLACK_SESSIONS", "MANDATUM_SLACK_COMMANDS"} {
+	for _, name := range []string{"FIBER_GITHUB_AUTO_LABELS", "FIBER_GITHUB_GUIDES", "FIBER_GITHUB_MUTATIONS", "FIBER_SLACK_SESSIONS", "FIBER_SLACK_COMMANDS"} {
 		if os.Getenv(name) != "" {
-			return nil, usagef("%s moved to collegium; use COLLEGIUM_* with collegium serve", name)
+			return nil, usagef("%s moved to warp; use WARP_* with warp serve", name)
 		}
 	}
 	reg := connector.NewRegistry()
@@ -264,7 +264,7 @@ func newCron(cfg coreConfig, _ mention.Set, _ connectors.Files) (connector.Conne
 // HeaderJiraSecret carries the shared secret a Jira webhook is registered with.
 // Jira signs nothing, so the secret is whatever the person who configured the
 // URL put in a header; see jiraSecret.
-const HeaderJiraSecret = "X-Mandatum-Secret"
+const HeaderJiraSecret = "X-Fiber-Secret"
 
 // jiraSecret authenticates a Jira webhook by a shared secret in a header.
 //

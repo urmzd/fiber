@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/attachment/resolve"
+	"github.com/urmzd/fiber/pkg/attachment/resolve"
 )
 
 // Transcriber is a fake resolve.Transcriber.

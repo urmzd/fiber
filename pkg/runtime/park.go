@@ -10,14 +10,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/anchor/pkg/run"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Parking a run on a person.
@@ -27,17 +27,17 @@ import (
 // question and how a later turn continues it). This file makes that wait
 // durable.
 //
-// # The wait is a duraturo event
+// # The wait is a anchor event
 //
 // The agent activity returns a parked outcome: the question, and everything a
 // continuation needs. Its result is memoized like any other. The workflow body
 // then
 //
-//  1. announces the question once, as a duraturo step that publishes
+//  1. announces the question once, as a anchor step that publishes
 //     lifecycle.parked with the question, so the step's record is the question
 //     as the run asked it ("mandatum.question.<id>#0"), and a replay neither
 //     asks again nor announces again;
-//  2. reads the question's resolution, a duraturo event record
+//  2. reads the question's resolution, a anchor event record
 //     ("event:mandatum.answer.<id>#0"). With none, the body returns
 //     run.ErrParked: the worker settles the run, it holds no goroutine and no
 //     lease, it costs no retry budget, and it survives any restart, because
@@ -78,7 +78,7 @@ import (
 // A stop recorded while the turn was still running, before it parked, is found
 // the same way when the body reaches the question.
 
-// Record names. A question is a duraturo step the body records; its
+// Record names. A question is a anchor step the body records; its
 // resolution is an event record anything outside the run may write.
 const (
 	questionStepPrefix = "mandatum.question."
@@ -111,14 +111,14 @@ type resolution struct {
 	Stopped    *agentrt.Stop   `json:"stopped,omitempty"`
 }
 
-// Waker enqueues a run so a worker replays it. Every duraturo queue
+// Waker enqueues a run so a worker replays it. Every anchor queue
 // implements it.
 type Waker interface {
 	Enqueue(ctx context.Context, runID string, delay time.Duration) error
 }
 
 // WithWaker wakes a parked run as soon as its question is answered or it is
-// stopped. Pass the queue the runtime's duraturo client uses. Without it a
+// stopped. Pass the queue the runtime's anchor client uses. Without it a
 // parked run continues when the worker's janitor next polls it.
 func WithWaker(w Waker) Option {
 	return func(r *Runtime) { r.waker = w }
@@ -213,7 +213,7 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 		// The child run is started once, as a recorded step: a replay reads
 		// its id back, and a retried start lands on the same run, whose id
 		// is derived from this run and the question.
-		child, err := duraturo.Step(ctx, childStepPrefix+q.ID, func(ctx context.Context) (string, error) {
+		child, err := anchor.Step(ctx, childStepPrefix+q.ID, func(ctx context.Context) (string, error) {
 			return r.startChild(ctx, at.in, q)
 		})
 		if err != nil {
@@ -222,7 +222,7 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 		q.ChildRunID = child
 	}
 	fresh := false
-	if _, err := duraturo.Step(ctx, questionStepPrefix+q.ID, func(ctx context.Context) (payload.Question, error) {
+	if _, err := anchor.Step(ctx, questionStepPrefix+q.ID, func(ctx context.Context) (payload.Question, error) {
 		fresh = true
 		if err := at.publish(ctx, envelope.KindParked, payload.Lifecycle{
 			Attempt: at.attempt, Rev: at.in.Rev, Reason: "waiting on a person", Question: &q,
@@ -234,7 +234,7 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 		return resolution{}, err
 	}
 
-	raw, err := duraturo.Event[json.RawMessage](ctx, answerRecordName(q.ID))
+	raw, err := anchor.Event[json.RawMessage](ctx, answerRecordName(q.ID))
 	switch {
 	case err == nil:
 		return decodeResolution(raw)
@@ -248,7 +248,7 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 	if r.stops != nil {
 		// A stop recorded on the run ends the wait.
 		var stop *agentrt.Stop
-		if raw, err := duraturo.Event[json.RawMessage](ctx, stopRecordName); err == nil {
+		if raw, err := anchor.Event[json.RawMessage](ctx, stopRecordName); err == nil {
 			var body payload.StopRequest
 			if json.Unmarshal(raw, &body) == nil && body.RunID == runID {
 				stop = &agentrt.Stop{Reason: body.Reason, By: body.By}
@@ -340,10 +340,10 @@ func (r *Runtime) storedResolution(ctx context.Context, runID, questionID string
 func decodeResolution(raw []byte) (resolution, error) {
 	var res resolution
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return resolution{}, duraturo.NonRetryable(fmt.Errorf("runtime: decode a question's resolution: %w", err))
+		return resolution{}, anchor.NonRetryable(fmt.Errorf("runtime: decode a question's resolution: %w", err))
 	}
 	if res.Answer == nil && res.Stopped == nil {
-		return resolution{}, duraturo.NonRetryable(errors.New("runtime: a question's resolution holds neither an answer nor a stop"))
+		return resolution{}, anchor.NonRetryable(errors.New("runtime: a question's resolution holds neither an answer nor a stop"))
 	}
 	return res, nil
 }
@@ -606,7 +606,7 @@ func (r *Runtime) wake(ctx context.Context, runID string) {
 	}
 	ctx = context.WithoutCancel(ctx)
 	if err := r.waker.Enqueue(ctx, runID, 0); err != nil {
-		r.logger.Warn("mandatum/runtime: could not wake a parked run; the janitor will",
+		r.logger.Warn("fiber/runtime: could not wake a parked run; the janitor will",
 			"run_id", runID, "error", err)
 	}
 	go func() {
@@ -695,7 +695,7 @@ func (r *Runtime) stopParked(ctx context.Context, tenant, runID string, body []b
 		var child string
 		if json.Unmarshal(rec.Output, &child) == nil && child != "" {
 			if err := r.Stop(ctx, StopRequest{Tenant: tenant, RunID: child, Reason: req.Reason, By: req.By}); err != nil {
-				r.logger.Warn("mandatum/runtime: could not stop the child run of a stopped run", "run_id", runID, "child", child, "error", err)
+				r.logger.Warn("fiber/runtime: could not stop the child run of a stopped run", "run_id", runID, "child", child, "error", err)
 			}
 		}
 	}
@@ -910,7 +910,7 @@ func wholeTranscript(prev []json.RawMessage, parked *agentrt.Parked) ([]json.Raw
 		return parked.Transcript, nil
 	}
 	if parked.Since > len(prev) {
-		return nil, duraturo.NonRetryable(fmt.Errorf("runtime: a parked turn continues %d messages of a transcript that has %d", parked.Since, len(prev)))
+		return nil, anchor.NonRetryable(fmt.Errorf("runtime: a parked turn continues %d messages of a transcript that has %d", parked.Since, len(prev)))
 	}
 	out := make([]json.RawMessage, 0, parked.Since+len(parked.Transcript))
 	out = append(out, prev[:parked.Since]...)
@@ -936,11 +936,11 @@ func WithChildRuns() Option {
 // startChild accepts the child run a delegation waits on and returns its id.
 func (r *Runtime) startChild(ctx context.Context, parent Input, q payload.Question) (string, error) {
 	if q.Tool == nil {
-		return "", duraturo.NonRetryable(fmt.Errorf("%w: delegation %s names no tool call", ErrInvalid, q.ID))
+		return "", anchor.NonRetryable(fmt.Errorf("%w: delegation %s names no tool call", ErrInvalid, q.ID))
 	}
 	target, ok := strings.CutPrefix(q.Tool.Name, "tag_")
 	if !ok || target == "" {
-		return "", duraturo.NonRetryable(fmt.Errorf("%w: %q is not a delegation tool", ErrInvalid, q.Tool.Name))
+		return "", anchor.NonRetryable(fmt.Errorf("%w: %q is not a delegation tool", ErrInvalid, q.Tool.Name))
 	}
 	var args struct {
 		Text string `json:"text"`
@@ -1009,7 +1009,7 @@ func (r *Runtime) answerParent(ctx context.Context, in Input, text string, stopp
 		a.Note = "the delegated run was stopped: " + stopped.Reason
 	}
 	if _, err := r.resolve(ctx, in.Parent.RunID, resolution{QuestionID: in.Parent.QuestionID, Answer: &a}); err != nil {
-		r.logger.Warn("mandatum/runtime: could not answer the parent run; its poll will", "run_id", a.RunID, "parent", in.Parent.RunID, "error", err)
+		r.logger.Warn("fiber/runtime: could not answer the parent run; its poll will", "run_id", a.RunID, "parent", in.Parent.RunID, "error", err)
 		return
 	}
 	r.wake(ctx, in.Parent.RunID)

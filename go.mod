@@ -1,4 +1,4 @@
-module github.com/urmzd/mandatum
+module github.com/urmzd/fiber
 
 go 1.26.9
 
@@ -7,10 +7,10 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/spf13/cobra v1.10.2
-	github.com/urmzd/duraturo v0.1.1
-	github.com/urmzd/duraturo/adapters/postgres v0.1.1
-	github.com/urmzd/legatus v0.2.0
-	github.com/urmzd/saige v0.37.0
+	github.com/urmzd/anchor v0.2.0
+	github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261018021017-188198d7a00b
+	github.com/urmzd/playscape v0.3.0
+	github.com/urmzd/saige v0.38.0
 	google.golang.org/protobuf v1.36.11
 )
 

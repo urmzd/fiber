@@ -16,26 +16,26 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
-	"github.com/urmzd/duraturo"
-	"github.com/urmzd/duraturo/pkg/ledger"
-	dqueue "github.com/urmzd/duraturo/pkg/queue"
-	drun "github.com/urmzd/duraturo/pkg/run"
-	"github.com/urmzd/duraturo/pkg/worker"
-	"github.com/urmzd/legatus/pkg/controlplane"
-	"github.com/urmzd/legatus/pkg/metrics"
-	"github.com/urmzd/legatus/pkg/node/inproc"
-	"github.com/urmzd/legatus/pkg/tool"
-	"github.com/urmzd/legatus/pkg/workspace"
+	"github.com/urmzd/anchor"
+	"github.com/urmzd/anchor/pkg/ledger"
+	dqueue "github.com/urmzd/anchor/pkg/queue"
+	drun "github.com/urmzd/anchor/pkg/run"
+	"github.com/urmzd/anchor/pkg/worker"
+	"github.com/urmzd/playscape/pkg/controlplane"
+	"github.com/urmzd/playscape/pkg/metrics"
+	"github.com/urmzd/playscape/pkg/node/inproc"
+	"github.com/urmzd/playscape/pkg/tool"
+	"github.com/urmzd/playscape/pkg/workspace"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
-	"github.com/urmzd/mandatum/pkg/bus"
-	"github.com/urmzd/mandatum/pkg/durable"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/runtime"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/durable"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -43,12 +43,12 @@ import (
 // stopBusEnv names a Redis these tests run their bus on. Without it the bus is
 // in memory, which is a complete implementation of the same contract; with it,
 // the stop path is exercised over the broker a multi-process deployment uses.
-const stopBusEnv = "MANDATUM_REDIS_ADDR"
+const stopBusEnv = "FIBER_REDIS_ADDR"
 
 var stopBuses atomic.Uint64
 
 // newBroker returns an empty bus: Redis under a key prefix of its own when
-// $MANDATUM_REDIS_ADDR is set, Memory otherwise.
+// $FIBER_REDIS_ADDR is set, Memory otherwise.
 func newBroker(t *testing.T, opts ...bus.Option) bus.Bus {
 	t.Helper()
 	addr := os.Getenv(stopBusEnv)
@@ -56,7 +56,7 @@ func newBroker(t *testing.T, opts ...bus.Option) bus.Bus {
 		return bus.NewMemory(opts...)
 	}
 	client := redis.NewClient(&redis.Options{Addr: addr})
-	prefix := fmt.Sprintf("mandatumtest-stop-%d-%d", time.Now().UnixNano(), stopBuses.Add(1))
+	prefix := fmt.Sprintf("fibertest-stop-%d-%d", time.Now().UnixNano(), stopBuses.Add(1))
 	t.Cleanup(func() {
 		ctx := context.Background()
 		iter := client.Scan(ctx, 0, prefix+":*", 256).Iterator()
@@ -131,9 +131,9 @@ type durableLedger interface {
 
 var durableSchemas atomic.Uint64
 
-// newDurable returns an empty run ledger and queue: mandatum's Postgres schema
-// (pkg/durable) in a schema of its own when $MANDATUM_POSTGRES_TEST_URL is set,
-// duraturo's in-memory ones otherwise. It is the ledger a stop is recorded in.
+// newDurable returns an empty run ledger and queue: fiber's Postgres schema
+// (pkg/durable) in a schema of its own when $FIBER_POSTGRES_TEST_URL is set,
+// anchor's in-memory ones otherwise. It is the ledger a stop is recorded in.
 func newDurable(t *testing.T) (durableLedger, dqueue.Queue, runtime.RecordReader) {
 	t.Helper()
 	url := os.Getenv(threadsEnv)
@@ -141,7 +141,7 @@ func newDurable(t *testing.T) (durableLedger, dqueue.Queue, runtime.RecordReader
 		return ledger.NewMemory(), dqueue.NewMemory(), nil
 	}
 	ctx := context.Background()
-	schema := fmt.Sprintf("mandatumtest_stop_%d_%d", time.Now().UnixNano(), durableSchemas.Add(1))
+	schema := fmt.Sprintf("fibertest_stop_%d_%d", time.Now().UnixNano(), durableSchemas.Add(1))
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatalf("parse $%s: %v", threadsEnv, err)
@@ -231,7 +231,7 @@ func (w *world) runtime(t *testing.T, exec runtime.Executor, opts ...runtime.Opt
 		}
 	}
 	opts = append(base, opts...)
-	rt, err := runtime.New(duraturo.New(w.ledger, w.queue), w.specs, w.bus, exec, opts...)
+	rt, err := runtime.New(anchor.New(w.ledger, w.queue), w.specs, w.bus, exec, opts...)
 	if err != nil {
 		t.Fatalf("runtime.New: %v", err)
 	}

@@ -13,12 +13,12 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment/intake"
-	"github.com/urmzd/mandatum/pkg/blob"
-	"github.com/urmzd/mandatum/pkg/connectors"
-	"github.com/urmzd/mandatum/pkg/connectors/github"
-	"github.com/urmzd/mandatum/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment/intake"
+	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/connectors"
+	"github.com/urmzd/fiber/pkg/connectors/github"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
 )
 
 const (
@@ -167,7 +167,7 @@ func TestFilesInAPublicCommentBecomeTheTagsAttachments(t *testing.T) {
 	if tag.Tenant != "acme" || len(tag.Attachments) != 3 {
 		t.Fatalf("tag tenant %q attachments %+v", tag.Tenant, tag.Attachments)
 	}
-	if a := tag.Attachments[0]; a.MediaType != "image/png" || a.Alt != "build log" || a.Origin.String() != "github://urmzd/mandatum/issues/42" {
+	if a := tag.Attachments[0]; a.MediaType != "image/png" || a.Alt != "build log" || a.Origin.String() != "github://urmzd/fiber/issues/42" {
 		t.Errorf("screenshot = %+v", a)
 	}
 	if a := tag.Attachments[1]; a.MediaType != "video/mp4" {
@@ -188,7 +188,7 @@ func TestFilesInAPrivateCommentAreFetchedThroughSignedURLs(t *testing.T) {
 	store := blob.NewMemory()
 	srv, _ := assets(t, map[string]string{"/1502855/signed-0b1c.png": assetPNG})
 	api := github.NewFake()
-	ref := github.Ref{Owner: "urmzd", Repo: "mandatum", Number: 42}
+	ref := github.Ref{Owner: "urmzd", Repo: "fiber", Number: 42}
 	api.SetBodyHTML(ref, github.BodyComment, 2201234567,
 		`<p>why?</p><p><a href="https://private-user-images.githubusercontent.com/1502855/signed-0b1c.png?jwt=eyJhbGciOi.x.y"><img src="https://private-user-images.githubusercontent.com/1502855/signed-0b1c.png?jwt=eyJhbGciOi.x.y" alt="build log"></a></p>`)
 	c, tags := start(t, github.Config{API: api, Agents: mention.NewNames("docs-bot"), Tenant: "acme", Files: connectors.Files{Store: store}})
@@ -235,7 +235,7 @@ func TestTheGitHubConversationIsListedFromTheCommentsAPI(t *testing.T) {
 				case 0:
 					b.WriteString(`{"id":1,"user":{"login":"grace","type":"User"},"body":"see ![x](https://github.com/user-attachments/assets/aaaa)","body_html":"<p>see <img src=\"https://private-user-images.githubusercontent.com/1/signed.png?jwt=e.y.j\" alt=\"x\"></p>","created_at":"2026-10-01T10:00:00Z"}`)
 				case 1:
-					b.WriteString(`{"id":2,"user":{"login":"mandatum[bot]","type":"Bot"},"body":"Here is the summary.","created_at":"2026-10-01T10:01:00Z"}`)
+					b.WriteString(`{"id":2,"user":{"login":"fiber[bot]","type":"Bot"},"body":"Here is the summary.","created_at":"2026-10-01T10:01:00Z"}`)
 				default:
 					fmt.Fprintf(&b, `{"id":%d,"user":{"login":"ada","type":"User"},"body":"comment %d","created_at":"2026-10-01T11:00:00Z"}`, i+1, i+1)
 				}
@@ -250,7 +250,7 @@ func TestTheGitHubConversationIsListedFromTheCommentsAPI(t *testing.T) {
 
 	c, err := github.New(github.Config{
 		API:    github.NewHTTPAPIAt(api.URL, "ghs_test", api.Client()),
-		Bots:   map[string]string{"mandatum[bot]": "docs-bot"},
+		Bots:   map[string]string{"fiber[bot]": "docs-bot"},
 		Tenant: "acme",
 		Files:  connectors.Files{Store: store},
 	})

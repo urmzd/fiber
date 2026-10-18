@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/agentspec"
 )
 
 // Approvals came after revisions were already stored with their hashes. A

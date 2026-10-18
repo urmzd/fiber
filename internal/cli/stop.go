@@ -13,12 +13,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newStopCmd builds `mandatum stop`, which asks a run to end before it has
+// newStopCmd builds `fiber stop`, which asks a run to end before it has
 // finished.
 //
 // It prints that the request was made, never that the run stopped. The server
 // cannot know which of the two happened when it answers, and neither can this
-// command: the run's own stream says, and `mandatum listen` reads it.
+// command: the run's own stream says, and `fiber listen` reads it.
 func newStopCmd() *cobra.Command {
 	var reason string
 
@@ -29,12 +29,12 @@ func newStopCmd() *cobra.Command {
 			"The run wraps up its turn: the model call in flight is cancelled, what the\n" +
 			"agent had said so far is kept, and the run ends with lifecycle.stopped. The\n" +
 			"thread remembers the partial answer, so a reply continues from it.\n\n" +
-			"The run id is the one `mandatum tag --detach` prints and every event carries.\n" +
+			"The run id is the one `fiber tag --detach` prints and every event carries.\n" +
 			"A run that has already ended, or does not exist, is left alone, and the\n" +
 			"command still succeeds: a stop is a request, and the answer is the same for\n" +
 			"every run id.",
-		Example: "  mandatum stop r0f3a...\n" +
-			"  mandatum stop r0f3a... --reason \"wrong repository\"",
+		Example: "  fiber stop r0f3a...\n" +
+			"  fiber stop r0f3a... --reason \"wrong repository\"",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			u, err := resolveUI(cmd)

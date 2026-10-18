@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/attachment"
-	"github.com/urmzd/mandatum/pkg/envelope"
-	"github.com/urmzd/mandatum/pkg/thread"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // Surface is an in-memory surface. The zero value is not usable; call
@@ -75,7 +75,7 @@ func (s *Surface) Fetches() int {
 // PostOwn adds a message the deployment itself posted, such as an agent's
 // rendered answer.
 func (s *Surface) PostOwn(tenant string, surface address.Address, text string) string {
-	return s.post(tenant, surface, thread.Message{Text: text, Actor: envelope.Actor{ID: "mandatum", Bot: true}, Own: true})
+	return s.post(tenant, surface, thread.Message{Text: text, Actor: envelope.Actor{ID: "fiber", Bot: true}, Own: true})
 }
 
 func (s *Surface) post(tenant string, surface address.Address, m thread.Message) string {

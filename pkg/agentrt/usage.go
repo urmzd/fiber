@@ -5,7 +5,7 @@ import (
 
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/mandatum/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
 )
 
 // DefaultAccounting is the prefix a turn keys its calls under when the caller

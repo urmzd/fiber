@@ -8,7 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	mandatumv1 "github.com/urmzd/mandatum/gen/mandatum/v1"
+	mandatumv1 "github.com/urmzd/fiber/gen/mandatum/v1"
 )
 
 // Authentication is a property of the transport, not of a handler that remembers
@@ -130,7 +130,7 @@ func TestTokensResolveOnlyRegisteredCredentials(t *testing.T) {
 // header-smuggling bug: the gateway that set one and the client that set the
 // other must never be able to disagree about which is authoritative.
 func TestTrustedHeaderAcceptsExactlyOneValue(t *testing.T) {
-	auth := TrustedHeader{SubjectHeader: "X-Mandatum-Subject"}
+	auth := TrustedHeader{SubjectHeader: "X-Fiber-Subject"}
 	tests := []struct {
 		name   string
 		header http.Header
@@ -139,7 +139,7 @@ func TestTrustedHeaderAcceptsExactlyOneValue(t *testing.T) {
 	}{
 		{
 			name:   "one value",
-			header: headerOf(HeaderTenant, tenantAcme, "X-Mandatum-Subject", subjectAcme),
+			header: headerOf(HeaderTenant, tenantAcme, "X-Fiber-Subject", subjectAcme),
 			want:   Identity{Tenant: tenantAcme, Subject: subjectAcme},
 		},
 		{

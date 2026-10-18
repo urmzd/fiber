@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/urmzd/mandatum/pkg/address"
+	"github.com/urmzd/fiber/pkg/address"
 )
 
 // StopEvent is the Events API type Slack sends when a person presses stop on an

@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/urmzd/mandatum/pkg/address"
-	"github.com/urmzd/mandatum/pkg/connectors/internal/httpjson"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/connectors/internal/httpjson"
 )
 
 // CanWrite asks GitHub for effective repository permission, rather than trusting

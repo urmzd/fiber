@@ -33,7 +33,7 @@ var ErrSeqExhausted = errors.New("runtime: attempt sequence band exhausted")
 //
 // Event.Seq is per-run, and the bus treats a sequence at or below a run's
 // high-water mark as an idempotent no-op: first write wins. That rule is what
-// stops duraturo replay from duplicating a stream, and it means the runtime must
+// stops anchor replay from duplicating a stream, and it means the runtime must
 // choose sequence numbers with a clear head about what should be deduplicated
 // and what must not be.
 //

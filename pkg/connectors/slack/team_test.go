@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/connectors/slack"
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/connectors/slack"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 func TestVerifiedMessagesStayWithinTheConfiguredTeam(t *testing.T) {

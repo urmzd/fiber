@@ -1,8 +1,8 @@
-# mandatum
+# fiber
 
 Agent platform and low-latency pub/sub bus. Tag an agent from anywhere, stream
 its events to anyone, deliver them anywhere. Go module
-`github.com/urmzd/mandatum`, binary `mandatum`.
+`github.com/urmzd/fiber`, binary `fiber`.
 
 **Status: v0 alpha, pre-1.0, not recommended for production.** Interfaces are
 still moving and may change between minor versions. The single-binary deployment
@@ -17,19 +17,19 @@ structural.
 ## Architecture
 
 Composes three libraries and adds addressing, distribution and the control
-plane. saige owns the agent loop, duraturo owns durability, legatus owns
+plane. saige owns the agent loop, anchor owns durability, playscape owns
 sandboxing and access control.
 
 | Package | Role |
 |---------|------|
 | `pkg/topic` | Topic addressing: `agent`, `agent:<name>`, `agent:<name>:<run>`. Prefix containment, no wildcards. The reserved control namespace `agent:_control:<verb>-<key>`. Leaf. |
-| `pkg/address` | Mesh endpoint URIs: `github://urmzd/mandatum/issues/42`, `slack://T01/C02?thread=...`. Leaf. |
+| `pkg/address` | Mesh endpoint URIs: `github://urmzd/fiber/issues/42`, `slack://T01/C02?thread=...`. Leaf. |
 | `pkg/envelope` | Wire contract: `Tag`, `Event`, `Kind`, `Route`, `Filter`, `Subscription`. Leaf. |
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
 | `pkg/agentspec` | Immutable agent specs, content-addressed revisions. Leaf. |
 | `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
 | `pkg/registry` | Agent store and revision history. `Memory` and `Postgres` implementations, plus the adapter to `internal/server.Store`. |
-| `pkg/durable` | The Postgres schema for duraturo's ledger and queue adapters, and `Open`, which builds both on it. |
+| `pkg/durable` | The Postgres schema for anchor's ledger and queue adapters, and `Open`, which builds both on it. |
 | `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`. |
 | `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
@@ -38,7 +38,7 @@ sandboxing and access control.
 | `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. `payload/` holds typed event bodies. |
-| `pkg/runtime` | The durable duraturo turn: revision pinning, legatus sandbox, dual publish, stopping a run mid-turn, per-run usage, and parking a run on a person. |
+| `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, per-run usage, and parking a run on a person. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
 | `internal/server` | Connect handlers, SSE, webhook ingress, tenant interceptor. |
 | `internal/cli` | Command tree. `core.go` is the composition root. |
@@ -57,12 +57,12 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 | lint | `golangci-lint run` |
 | fmt | `gofmt -w .` |
 | quality gate | `make check` |
-| run server | `make run` (or `go run ./cmd/mandatum serve`) |
+| run server | `make run` (or `go run ./cmd/fiber serve`) |
 | regenerate proto | `make proto` (needs `buf` on PATH) |
 | end-to-end demo | `go run ./examples/local` |
-| compose stack | `make up` (Postgres, Redis, mandatum), `make down` |
+| compose stack | `make up` (Postgres, Redis, fiber), `make down` |
 | compose end-to-end | `make e2e` |
-| registry on Postgres | `MANDATUM_POSTGRES_TEST_URL=postgres://... go test ./pkg/registry/` |
+| registry on Postgres | `FIBER_POSTGRES_TEST_URL=postgres://... go test ./pkg/registry/` |
 
 ## Code Style
 
@@ -84,7 +84,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   confinement: constant-time comparison, verify-before-parse, replay window,
   malformed input, and duplicated headers. Default is always deny.
 - **The NGAC policy path is a security boundary.** An agent's `Access` block
-  compiles into legatus's policy graph with default deny. Changes need tests
+  compiles into playscape's policy graph with default deny. Changes need tests
   proving spawn gating and workspace confinement still hold.
 - **Preserve the DAG.** Leaves (`topic`, `address`, `envelope`, `signature`,
   `agentspec`, `attachment`) stay stdlib-only. Nothing under `pkg/` imports `internal/`.
@@ -97,10 +97,10 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   ids, retrieved passages, attachments) may sit ahead of something that does
   not.
 - **Revision pinning is load-bearing.** A run pins its revision at accept time
-  and must never re-resolve "latest" inside a workflow body: duraturo replays
+  and must never re-resolve "latest" inside a workflow body: anchor replays
   from the top, and an unpinned run diverges. Tests that assert this exist in
   `pkg/runtime`; do not weaken them.
-- **Durability comes from duraturo, never from legatus.** legatus's queue is
+- **Durability comes from anchor, never from playscape.** playscape's queue is
   at-most-once in beta.
 - **A run's topic has one writer.** Only the attempt executing a run publishes
   to `agent:<name>:<run>`, with sequence numbers it chose. Anything addressed
@@ -117,12 +117,12 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   constant. The reason and the asker go on `lifecycle.stopped`.
 - **Usage is counted from what an attempt relayed, once.** A run's total is
   built from the `usage.call` and `usage.child` events its attempts published,
-  keyed by mandatum's attempt-unique `accounting_id`, inside the memoized agent
+  keyed by fiber's attempt-unique `accounting_id`, inside the memoized agent
   activity. Every attempt records its calls on the run before it returns,
   success or failure; the workflow body never reads usage. Cost comes only
   from saige's price catalog, as integer micro-units, never converted or
   estimated. Usage is opt-in for routes and chat sinks do not render it.
-- **A parked run decides from its records.** A question is a duraturo step the
+- **A parked run decides from its records.** A question is a anchor step the
   body records once; its resolution is the write-once event record
   `event:mandatum.answer.<id>#0`, written by `Runtime.Answer`, by a stop, or by
   an expiry, and whichever was first is the answer. The body never reads the

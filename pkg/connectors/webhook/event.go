@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Body is the JSON an outbound POST carries: one envelope.Event, as a program
@@ -20,7 +20,7 @@ import (
 //
 // The field names are deliberately identical to the SSE stream's data frames
 // (see internal/server). A receiver that has parsed one has parsed the other,
-// and there is exactly one JSON shape for an mandatum event leaving the mesh.
+// and there is exactly one JSON shape for an fiber event leaving the mesh.
 type Body struct {
 	Seq    uint64 `json:"seq"`
 	Topic  string `json:"topic"`

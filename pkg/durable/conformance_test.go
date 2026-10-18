@@ -10,27 +10,27 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/urmzd/duraturo/adapters/postgres/pgledger"
-	"github.com/urmzd/duraturo/adapters/postgres/pgqueue"
-	"github.com/urmzd/duraturo/pkg/ledger"
-	"github.com/urmzd/duraturo/pkg/ledger/ledgertest"
-	"github.com/urmzd/duraturo/pkg/queue"
-	"github.com/urmzd/duraturo/pkg/queue/queuetest"
-	"github.com/urmzd/duraturo/pkg/run"
+	"github.com/urmzd/anchor/adapters/postgres/pgledger"
+	"github.com/urmzd/anchor/adapters/postgres/pgqueue"
+	"github.com/urmzd/anchor/pkg/ledger"
+	"github.com/urmzd/anchor/pkg/ledger/ledgertest"
+	"github.com/urmzd/anchor/pkg/queue"
+	"github.com/urmzd/anchor/pkg/queue/queuetest"
+	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/mandatum/pkg/durable"
+	"github.com/urmzd/fiber/pkg/durable"
 )
 
 var verifySchemas atomic.Uint64
 
 func openBackends(t *testing.T) (*pgxpool.Pool, *pgledger.Ledger, *pgqueue.Queue) {
 	t.Helper()
-	url := os.Getenv("MANDATUM_POSTGRES_TEST_URL")
+	url := os.Getenv("FIBER_POSTGRES_TEST_URL")
 	if url == "" {
-		t.Skip("set MANDATUM_POSTGRES_TEST_URL")
+		t.Skip("set FIBER_POSTGRES_TEST_URL")
 	}
 	ctx := context.Background()
-	schema := fmt.Sprintf("mandatumtest_verify_%d_%d", time.Now().UnixNano(), verifySchemas.Add(1))
+	schema := fmt.Sprintf("fibertest_verify_%d_%d", time.Now().UnixNano(), verifySchemas.Add(1))
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatal(err)
@@ -57,11 +57,11 @@ func openBackends(t *testing.T) (*pgxpool.Pool, *pgledger.Ledger, *pgqueue.Queue
 	return pool, l, q
 }
 
-func TestLedgerConformanceOnMandatumSchema(t *testing.T) {
+func TestLedgerConformanceOnFiberSchema(t *testing.T) {
 	ledgertest.Run(t, func(t *testing.T) ledger.Ledger { _, l, _ := openBackends(t); return l })
 }
 
-func TestQueueConformanceOnMandatumSchema(t *testing.T) {
+func TestQueueConformanceOnFiberSchema(t *testing.T) {
 	queuetest.Run(t, func(t *testing.T) queue.Queue { _, _, q := openBackends(t); return q })
 }
 

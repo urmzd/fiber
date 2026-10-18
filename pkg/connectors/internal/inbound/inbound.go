@@ -40,7 +40,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/urmzd/mandatum/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // DefaultMaxBody bounds a request body. It is well above the largest realistic

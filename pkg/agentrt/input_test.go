@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/mandatum/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 )
