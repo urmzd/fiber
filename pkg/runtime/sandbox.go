@@ -16,6 +16,7 @@ import (
 	dispatchsandbox "github.com/urmzd/playscape/pkg/sandbox"
 	"github.com/urmzd/playscape/pkg/task"
 	"github.com/urmzd/playscape/pkg/tool"
+	"github.com/urmzd/playscape/pkg/workspace"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
@@ -733,8 +734,9 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 
 // delegateTool lets an agent tag another agent, gated by the spawn allowlist.
 //
-// The child is a sub-task of THIS turn, not a durable run: it is submitted into
-// the same deployment, its answer comes back as this tool's result, and it
+// The child is a sub-task of THIS turn, not a durable run: it runs in the same
+// deployment, on the node this turn already holds, under its own tool name and
+// the deployment's policy. Its answer comes back as this tool's result, and it
 // therefore lands inside the parent activity's memoized record. That is why it
 // resolves the target's current revision rather than pinning one — nothing
 // replays a tool result, so there is nothing for an unpinned resolution to
@@ -843,15 +845,23 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			if err != nil {
 				return "", fmt.Errorf("runtime: delegate to %q: %w", target, err)
 			}
-			id, err := rt.Spawn(ctx, task.Task{Tool: ToolName(target), Input: input})
+			// The sub-task runs here, on the node this turn already holds,
+			// rather than being spawned back into the queue: the turn does
+			// nothing but wait for it, and a spawned sub-task on a deployment
+			// with one node would wait behind the turn waiting for it.
+			childRT, err := s.subTaskRuntime(ctx, rt, parent, target)
 			if err != nil {
 				// A denial is the policy speaking. The model sees it as a
 				// tool error and can say so, instead of the turn dying.
 				return "", fmt.Errorf("runtime: delegate to %q: %w", target, err)
 			}
-			out, err := s.await(ctx, parent.Service, id)
+			res, err := s.call(ctx, childRT, input)
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("runtime: delegate to %q: %w", target, err)
+			}
+			var out Outcome
+			if err := json.Unmarshal(res, &out); err != nil {
+				return "", fmt.Errorf("runtime: delegate to %q: decode outcome: %w", target, err)
 			}
 			return out.Text, nil
 		},
@@ -919,32 +929,45 @@ func (s *Sandbox) delegationContext(ctx context.Context, runID string) (context.
 	return dctx, func() { cancel(nil) }
 }
 
-// await polls for a delegated sub-task's result.
-func (s *Sandbox) await(ctx context.Context, deployment, taskID string) (Outcome, error) {
-	ticker := time.NewTicker(s.poll)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return Outcome{}, ctx.Err()
-		case <-ticker.C:
-		}
-		res, done, err := s.plane.Result(ctx, deployment, taskID)
-		if err != nil {
-			return Outcome{}, fmt.Errorf("runtime: await task %s: %w", taskID, err)
-		}
-		if !done {
-			continue
-		}
-		if res.Error != "" {
-			return Outcome{}, fmt.Errorf("runtime: task %s: %s", taskID, res.Error)
-		}
-		var out Outcome
-		if err := json.Unmarshal(res.Output, &out); err != nil {
-			return Outcome{}, fmt.Errorf("runtime: task %s: decode outcome: %w", taskID, err)
-		}
-		return out, nil
+// subTaskRuntime gates a delegation from parent's turn to target and returns
+// the playscape runtime the sub-task executes against on the caller's node.
+//
+// It holds the sub-task to what a node would: the parent's identity must be
+// granted the spawn by the deployment's policy, and the sub-task acts under its
+// own tool name, default deny. Its workspace view and its own spawns are
+// checked under that name and then under the parent's view as well, so running
+// on the parent's node can never widen what either may touch.
+func (s *Sandbox) subTaskRuntime(ctx context.Context, rt tool.Runtime, parent Request, target string) (tool.Runtime, error) {
+	spec, err := s.plane.Spec(ctx, parent.Service)
+	if err != nil {
+		return nil, err
 	}
+	pdp, err := spec.PDP()
+	if err != nil {
+		return nil, err
+	}
+	user, child := ToolName(parent.Agent()), ToolName(target)
+	if !pdp.Can(user, dispatchsandbox.OpSpawn, dispatchsandbox.SpawnObject(child)) {
+		return nil, fmt.Errorf("%w: user %q may not spawn %q", dispatchsandbox.ErrDenied, user, child)
+	}
+	return &subTask{user: child, pdp: pdp, parent: rt, ws: dispatchsandbox.ScopePDP(rt.Workspace(), child, pdp)}, nil
+}
+
+// subTask is the tool.Runtime of a sub-task running on its parent's node.
+type subTask struct {
+	user   string
+	pdp    dispatchsandbox.PDP
+	parent tool.Runtime
+	ws     workspace.Workspace
+}
+
+func (r *subTask) Workspace() workspace.Workspace { return r.ws }
+
+func (r *subTask) Spawn(ctx context.Context, t task.Task) (string, error) {
+	if !r.pdp.Can(r.user, dispatchsandbox.OpSpawn, dispatchsandbox.SpawnObject(t.Tool)) {
+		return "", fmt.Errorf("%w: user %q may not spawn %q", dispatchsandbox.ErrDenied, r.user, t.Tool)
+	}
+	return r.parent.Spawn(ctx, t)
 }
 
 // childRunTool is the delegation tool of a durable run whose delegations are

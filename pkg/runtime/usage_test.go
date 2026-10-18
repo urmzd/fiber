@@ -485,7 +485,7 @@ func TestSubTaskCallsRollUpIntoTheRunThatDelegated(t *testing.T) {
 	w := newWorld(t)
 	chain(w.specs)
 	models := chainModels()
-	rt := w.runtime(t, sandboxOf(t, w.specs, models, runtime.WithReplicas(3)))
+	rt := w.runtime(t, sandboxOf(t, w.specs, models, runtime.WithReplicas(1)))
 	w.work(t, rt, nil)
 
 	lead := w.accept(t, rt, tag("lead", "evt-1", "How are the tests?"))

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/urmzd/playscape/pkg/controlplane"
 	"github.com/urmzd/playscape/pkg/metrics"
@@ -88,12 +89,27 @@ func toolResult(t *testing.T, chunks []agentrt.Chunk) payload.ToolDone {
 }
 
 // With no Delegator a delegation is what it always was: a sub-task of the
-// turn, whose answer is the tool's result.
+// turn, whose answer is the tool's result. One node is enough: the sub-task
+// runs on the node the waiting turn holds instead of queueing behind it.
 func TestDelegationIsASubTaskByDefault(t *testing.T) {
-	// Two nodes: the turn holds one while the sub-task runs on the other. With
-	// one node a sub-task waits behind the turn that is waiting for it.
-	s, lead := delegating(t, runtime.WithReplicas(2))
-	out, chunks, err := runLead(t, s, lead)
+	s, lead := delegating(t, runtime.WithReplicas(1))
+	type result struct {
+		out    runtime.Outcome
+		chunks []agentrt.Chunk
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, chunks, err := runLead(t, s, lead)
+		done <- result{out, chunks, err}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("a delegation on one node never finished: the sub-task is waiting behind the turn that waits for it")
+	}
+	out, chunks, err := r.out, r.chunks, r.err
 	if err != nil {
 		t.Fatal(err)
 	}
