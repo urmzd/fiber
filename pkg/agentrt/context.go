@@ -3,6 +3,9 @@ package agentrt
 import (
 	"context"
 	"fmt"
+	"math"
+	"strings"
+	"sync"
 
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
@@ -59,9 +62,30 @@ type Compaction struct {
 	// between two compactions, so a larger value compacts less often and
 	// keeps the cache warm for longer between rewrites.
 	KeepTurns int
+	// OnRequest lets a host ask a running turn to compact (Turn.Compact),
+	// whatever its size. It is independent of MaxInputTokens: a deployment
+	// may compact only when asked, only past a budget, or both. Without it
+	// a request is ignored, and so is the rest of this paragraph. With it,
+	// a turn whose request is rejected by the provider as too long is also
+	// compacted and retried instead of failing, as it is under a budget.
+	OnRequest bool
 }
 
-func (c Compaction) enabled() bool { return c.MaxInputTokens > 0 }
+// enabled reports whether a turn is configured to compact at all.
+func (c Compaction) enabled() bool { return c.MaxInputTokens > 0 || c.OnRequest }
+
+// requestOnlyBudget is the budget a turn that compacts only on request runs
+// under: large enough that no history reaches it, so the budget never fires
+// and a request (which reports a size past it) is the only trigger.
+const requestOnlyBudget = math.MaxInt32
+
+// budget is the input size saige is told to compact above.
+func (c Compaction) budget() int {
+	if c.MaxInputTokens > 0 {
+		return c.MaxInputTokens
+	}
+	return requestOnlyBudget
+}
 
 func (c Compaction) keepTurns() int {
 	if c.KeepTurns <= 0 {
@@ -97,7 +121,7 @@ func (c Compaction) config() *saigetypes.CompactConfig {
 	}
 	return &saigetypes.CompactConfig{
 		Strategy:       saigetypes.CompactSummary,
-		MaxInputTokens: c.MaxInputTokens,
+		MaxInputTokens: c.budget(),
 		KeepTurns:      c.keepTurns(),
 	}
 }
@@ -125,7 +149,8 @@ func (c Compaction) config() *saigetypes.CompactConfig {
 // The cost of the rule is that such a turn sends requests over the budget
 // until the distance is covered. If one of them is over the model's real
 // context window the provider rejects it, and that rejection forces a
-// compaction regardless of the rule.
+// compaction regardless of the rule. So does a host's request (Turn.Compact):
+// a person asked for that compaction.
 //
 // # Across the runs of a thread
 //
@@ -206,14 +231,6 @@ func newCompactionGuard(keepTurns int) *compactionGuard {
 	return &compactionGuard{minGrowth: keepTurns * messagesPerTurn}
 }
 
-func (g *compactionGuard) hooks() saige.Hooks {
-	return saige.Hooks{
-		Name:             "fiber-compaction-guard",
-		BeforeCompaction: g.before,
-		AfterCompaction:  g.after,
-	}
-}
-
 // before skips a compaction that comes too soon after the last one. A forced
 // compaction is never skipped: the provider has already refused the request as
 // too long, and skipping would fail the turn to protect a cache.
@@ -240,6 +257,156 @@ func (g *compactionGuard) after(_ context.Context, ev *saige.CompactionEvent) er
 		g.compacted, g.settled = true, false
 	}
 	return nil
+}
+
+// CompactRequest asks a running turn to compact its history before its next
+// model call. See Turn.Compact.
+type CompactRequest struct {
+	// By is who asked. It is reported on the compaction and never sent to
+	// the model.
+	By string `json:"by,omitempty"`
+}
+
+// TriggerRequested is payload.Compaction.Trigger for a compaction a host
+// asked for.
+const TriggerRequested = string(saigetypes.CompactionTriggerRequested)
+
+// compactRequests carries a host's requests to compact from the goroutine
+// that receives them to the agent loop, and tells the compactions that
+// answered them apart from the ones the budget made.
+//
+// saige has no call to compact a running turn. What it has is a budget it
+// measures the history against before every model call, with a tokenizer
+// the caller may supply. So a request is a pending flag the tokenizer reads:
+// while one is pending it reports the history as larger than the budget, the
+// loop compacts, and the BeforeCompaction hook takes the request. The
+// compaction is the one saige would make under the budget, with the same
+// strategy, cut and anti-thrash rule, only earlier. The count reported on
+// the record is measured after the request was taken, so it is the real one.
+//
+// Requests that arrive while one is pending fold into it: two presses of a
+// button before the next model call are one compaction.
+type compactRequests struct {
+	base   saigetypes.Tokenizer
+	budget int
+
+	mu      sync.Mutex
+	pending bool
+	by      string
+	// attempts holds, oldest first, one entry per compaction saige has
+	// started whose record the turn has not read yet: whether it answered
+	// a request, and who asked. A compaction that changes nothing is
+	// removed when it ends, since it sends no record.
+	attempts []compactAttempt
+}
+
+type compactAttempt struct {
+	requested bool
+	by        string
+}
+
+func newCompactRequests(base saigetypes.Tokenizer, budget int) *compactRequests {
+	return &compactRequests{base: base, budget: budget}
+}
+
+// request records a host's request.
+func (q *compactRequests) request(r CompactRequest) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !q.pending {
+		q.pending, q.by = true, strings.TrimSpace(r.By)
+	}
+}
+
+// CountTokens implements saigetypes.Tokenizer.
+func (q *compactRequests) CountTokens(ctx context.Context, messages []saigetypes.Message) (int, error) {
+	n, err := q.base.CountTokens(ctx, messages)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.pending {
+		return max(n, q.budget+1), nil
+	}
+	return n, err
+}
+
+// started takes the pending request, if any, for a compaction saige is
+// about to make, and reports whether there was one.
+func (q *compactRequests) started() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	a := compactAttempt{requested: q.pending, by: q.by}
+	q.pending, q.by = false, ""
+	q.attempts = append(q.attempts, a)
+	return a.requested
+}
+
+// ended forgets the last compaction started when it changed nothing.
+func (q *compactRequests) ended(compacted bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !compacted && len(q.attempts) > 0 {
+		q.attempts = q.attempts[:len(q.attempts)-1]
+	}
+}
+
+// record attributes a compaction record to the attempt that made it: the
+// oldest one not read yet, since compactions run one at a time and each
+// sends its record before the next starts.
+func (q *compactRequests) record(c payload.Compaction) payload.Compaction {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.attempts) == 0 {
+		return c
+	}
+	a := q.attempts[0]
+	q.attempts = q.attempts[1:]
+	if a.requested {
+		if c.Trigger == string(saigetypes.CompactionTriggerInputPressure) {
+			c.Trigger = TriggerRequested
+		}
+		c.By = a.by
+	}
+	return c
+}
+
+// compactionHooks are the turn's compaction hooks: the anti-thrash guard
+// when there is a budget, and the request bookkeeping when a host may ask.
+// A request is never skipped by the guard; the host asked for this one.
+func compactionHooks(guard *compactionGuard, reqs *compactRequests) saige.Hooks {
+	return saige.Hooks{
+		Name: "fiber-compaction",
+		BeforeCompaction: func(ctx context.Context, ev *saige.CompactionEvent) error {
+			requested := false
+			if reqs != nil {
+				requested = reqs.peek()
+			}
+			if !requested && guard != nil {
+				if err := guard.before(ctx, ev); err != nil || ev.Skip {
+					return err
+				}
+			}
+			if reqs != nil {
+				reqs.started()
+			}
+			return nil
+		},
+		AfterCompaction: func(ctx context.Context, ev *saige.CompactionEvent) error {
+			if reqs != nil {
+				reqs.ended(ev.Compacted)
+			}
+			if guard != nil {
+				return guard.after(ctx, ev)
+			}
+			return nil
+		},
+	}
+}
+
+// peek reports whether a request is pending, without taking it.
+func (q *compactRequests) peek() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.pending
 }
 
 // compactionRecord reduces saige's compaction record to the facts a caller

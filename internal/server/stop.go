@@ -82,39 +82,12 @@ func (s *Server) handleStop(stopper Stopper) http.HandlerFunc {
 			s.httpFail(w, "stop", fmt.Errorf("%w: no runtime is configured", ErrUnimplemented))
 			return
 		}
-		id, err := s.auth.Authenticate(r.Context(), r.Header)
-		if err != nil {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="fiber"`)
-			s.httpFail(w, "stop", err)
-			return
-		}
-		runID := strings.TrimSpace(r.PathValue("id"))
-		if runID == "" {
-			s.httpFail(w, "stop", fmt.Errorf("%w: no run id", ErrInvalid))
-			return
-		}
 		var body stopBody
-		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBody))
-		if err != nil {
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
-				http.Error(w, "stop: body exceeds the configured limit", http.StatusRequestEntityTooLarge)
-				return
-			}
-			s.httpFail(w, "stop", fmt.Errorf("%w: read body: %w", ErrInvalid, err))
+		id, runID, ok := s.runRequest(w, r, "stop", &body)
+		if !ok {
 			return
 		}
-		if len(strings.TrimSpace(string(raw))) > 0 {
-			if err := json.Unmarshal(raw, &body); err != nil {
-				s.httpFail(w, "stop", fmt.Errorf("%w: body is not JSON: %w", ErrInvalid, err))
-				return
-			}
-		}
-		by := id.Subject
-		if id.ActAs && strings.TrimSpace(body.By) != "" {
-			by = body.By
-		}
-		if err := stopper.Stop(r.Context(), StopRequest{Tenant: id.Tenant, RunID: runID, Reason: body.Reason, By: by}); err != nil {
+		if err := stopper.Stop(r.Context(), StopRequest{Tenant: id.Tenant, RunID: runID, Reason: body.Reason, By: actorOf(id, body.By)}); err != nil {
 			s.httpFail(w, "stop", err)
 			return
 		}
@@ -122,4 +95,47 @@ func (s *Server) handleStop(stopper Stopper) http.HandlerFunc {
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(stopReply{RunID: runID, Status: "requested"})
 	}
+}
+
+// runRequest authenticates a POST /v1/runs/{id}/<verb> and decodes its body,
+// which is optional JSON, into body. It answers the request itself and
+// reports false when the request cannot go on.
+func (s *Server) runRequest(w http.ResponseWriter, r *http.Request, op string, body any) (Identity, string, bool) {
+	id, err := s.auth.Authenticate(r.Context(), r.Header)
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="fiber"`)
+		s.httpFail(w, op, err)
+		return Identity{}, "", false
+	}
+	runID := strings.TrimSpace(r.PathValue("id"))
+	if runID == "" {
+		s.httpFail(w, op, fmt.Errorf("%w: no run id", ErrInvalid))
+		return Identity{}, "", false
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxBody))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, op+": body exceeds the configured limit", http.StatusRequestEntityTooLarge)
+			return Identity{}, "", false
+		}
+		s.httpFail(w, op, fmt.Errorf("%w: read body: %w", ErrInvalid, err))
+		return Identity{}, "", false
+	}
+	if len(strings.TrimSpace(string(raw))) > 0 {
+		if err := json.Unmarshal(raw, body); err != nil {
+			s.httpFail(w, op, fmt.Errorf("%w: body is not JSON: %w", ErrInvalid, err))
+			return Identity{}, "", false
+		}
+	}
+	return id, runID, true
+}
+
+// actorOf is who a request is made by: the credential's subject, unless the
+// credential may act for others and the body named someone.
+func actorOf(id Identity, named string) string {
+	if id.ActAs && strings.TrimSpace(named) != "" {
+		return named
+	}
+	return id.Subject
 }

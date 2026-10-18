@@ -572,6 +572,9 @@ func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(
 	if stop, ok := r.recordedStop(ctx, req.RunID); ok {
 		return Outcome{Prompt: agentrt.RequestText(req.Text, req.Meta), Stopped: &stop, StopRecorded: true}, nil
 	}
+	// Requests to compact are heard for as long as the turn runs (compact.go).
+	ctx, stopListening := r.listenCompact(ctx, in, req.RunID)
+	defer stopListening()
 	if r.control == nil && r.stops == nil {
 		return r.exec.Execute(ctx, req, emit)
 	}

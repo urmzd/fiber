@@ -111,6 +111,14 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 	if err != nil {
 		return err
 	}
+	keepTurns, err := intFromEnv(EnvCompactKeepTurns)
+	if err != nil {
+		return err
+	}
+	onRequest, err := boolFromEnv(EnvCompactOnRequest)
+	if err != nil {
+		return err
+	}
 
 	c, err := newCore(coreConfig{
 		Tenant:     opts.tenant,
@@ -118,14 +126,16 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		Postgres:   os.Getenv(EnvPostgres),
 		Embeddings: emb,
 
-		AuthorProvider: strings.TrimSpace(os.Getenv(EnvAuthorProvider)),
-		AuthorModel:    strings.TrimSpace(os.Getenv(EnvAuthorModel)),
-		CompactTokens:  compact,
-		Workspace:      os.Getenv(EnvWorkspace),
-		Schedules:      scheds,
-		Concurrency:    opts.concurrency,
-		Log:            log,
-		Metrics:        rec,
+		AuthorProvider:   strings.TrimSpace(os.Getenv(EnvAuthorProvider)),
+		AuthorModel:      strings.TrimSpace(os.Getenv(EnvAuthorModel)),
+		CompactTokens:    compact,
+		CompactKeepTurns: keepTurns,
+		CompactOnRequest: onRequest,
+		Workspace:        os.Getenv(EnvWorkspace),
+		Schedules:        scheds,
+		Concurrency:      opts.concurrency,
+		Log:              log,
+		Metrics:          rec,
 	})
 	if err != nil {
 		return err
@@ -163,6 +173,8 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		Invoker: c,
 		Runs:    c,
 		Stopper: c,
+		// Requests to compact a running turn reach the runtime as stops do.
+		Compactor: c,
 		// The questions runs park on are answered through the runtime too.
 		Answerer: c,
 		Metrics:  rec,
@@ -279,6 +291,19 @@ func intFromEnv(key string) (int, error) {
 		return 0, usagef("$%s must be a non-negative integer, got %q", key, raw)
 	}
 	return n, nil
+}
+
+// boolFromEnv reads a boolean, treating unset as false.
+func boolFromEnv(key string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, usagef("$%s must be true or false, got %q", key, raw)
+	}
+	return b, nil
 }
 
 func onOff(on bool) string {

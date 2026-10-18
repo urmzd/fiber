@@ -32,6 +32,8 @@ func TestKindFamilyAndMatches(t *testing.T) {
 		{envelope.KindUsageCall, "usage", "delta", false},
 		{envelope.KindUsageCall, "usage", "lifecycle", false},
 		{envelope.KindUsageChild, "usage", "usage.call", false},
+		{envelope.KindCompacted, "context", "context", true},
+		{envelope.KindCompacted, "context", "lifecycle", false},
 	}
 	for _, tc := range cases {
 		if got := tc.kind.Family(); got != tc.family {
@@ -256,6 +258,10 @@ func TestARouteReceivesUsageOnlyWhenItAsksForIt(t *testing.T) {
 		{"the family", []string{"usage"}, map[envelope.Kind]bool{envelope.KindUsageCall: true, envelope.KindUsageChild: true, envelope.KindText: false}},
 		{"one kind", []string{"usage.child"}, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindUsageChild: true}},
 		{"usage and the outcome", []string{"usage.call", "lifecycle.completed"}, map[envelope.Kind]bool{envelope.KindUsageCall: true, envelope.KindCompleted: true, envelope.KindText: false}},
+		// Compactions are opt-in the same way.
+		{"no filter, compactions", nil, map[envelope.Kind]bool{envelope.KindCompacted: false}},
+		{"the context family", []string{"context"}, map[envelope.Kind]bool{envelope.KindCompacted: true, envelope.KindUsageCall: false}},
+		{"one context kind", []string{"context.compacted"}, map[envelope.Kind]bool{envelope.KindCompacted: true}},
 	}
 	for _, tc := range cases {
 		r := envelope.Route{Target: address.MustParse("webhook://acme/deploys"), Kinds: tc.kinds}

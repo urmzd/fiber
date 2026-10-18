@@ -407,6 +407,10 @@ func (d *Doc) effect(e envelope.Event) bool {
 			}
 		}
 		return changed
+	case envelope.KindCompacted:
+		// Not rendered either: that the agent summarized its own context
+		// is for the host that drives it, not for the people in the thread.
+		return false
 	case envelope.KindUsageCall, envelope.KindUsageChild:
 		// Deliberately not rendered. A chat surface is the conversation, and
 		// often a shared one: token counts and cost are accounting for the

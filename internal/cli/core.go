@@ -71,6 +71,14 @@ const (
 	// EnvCompactTokens is the input size, in tokens, above which a run's
 	// history is compacted. Unset or zero never compacts.
 	EnvCompactTokens = "FIBER_COMPACT_TOKENS"
+	// EnvCompactKeepTurns is how many recent tool-calling turns a
+	// compaction keeps verbatim. Unset or zero takes
+	// agentrt.DefaultKeepTurns.
+	EnvCompactKeepTurns = "FIBER_COMPACT_KEEP_TURNS"
+	// EnvCompactOnRequest, when true, lets a host ask a running turn to
+	// compact (POST /v1/runs/{id}/compact). Unset or false ignores
+	// requests.
+	EnvCompactOnRequest = "FIBER_COMPACT_ON_REQUEST"
 
 	// EnvWorkspace is the directory agent artifacts are written under. Unset
 	// takes a directory under the user's cache.
@@ -104,8 +112,13 @@ type coreConfig struct {
 	AuthorProvider, AuthorModel string
 
 	// CompactTokens is the history size that triggers compaction. Zero never
-	// compacts.
+	// compacts on its own.
 	CompactTokens int
+	// CompactKeepTurns is how many recent turns a compaction keeps. Zero
+	// takes the default.
+	CompactKeepTurns int
+	// CompactOnRequest lets a host ask a running turn to compact.
+	CompactOnRequest bool
 
 	// Workspace is where the sandbox writes agent artifacts.
 	Workspace string
@@ -499,8 +512,12 @@ func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, fil
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), rec)
 
 	agentOpts := []agentrt.Option{agentrt.WithAttachments(resolve.New(files))}
-	if cfg.CompactTokens > 0 {
-		agentOpts = append(agentOpts, agentrt.WithCompaction(agentrt.Compaction{MaxInputTokens: cfg.CompactTokens}))
+	if cfg.CompactTokens > 0 || cfg.CompactOnRequest {
+		agentOpts = append(agentOpts, agentrt.WithCompaction(agentrt.Compaction{
+			MaxInputTokens: cfg.CompactTokens,
+			KeepTurns:      cfg.CompactKeepTurns,
+			OnRequest:      cfg.CompactOnRequest,
+		}))
 	}
 
 	exec, err := runtime.NewSandbox(plane, tools, registry.NewSpecs(store),
@@ -627,6 +644,19 @@ func (c *core) Stop(ctx context.Context, req server.StopRequest) error {
 	case errors.Is(err, runtime.ErrInvalid):
 		return fmt.Errorf("%w: %w", server.ErrInvalid, err)
 	case errors.Is(err, runtime.ErrStopUnavailable):
+		return fmt.Errorf("%w: %w", server.ErrUnimplemented, err)
+	}
+	return err
+}
+
+// Compact asks a run's running turn to compact its history. It satisfies
+// server.Compactor. See runtime.Runtime.Compact for what a nil error means.
+func (c *core) Compact(ctx context.Context, req server.CompactRequest) error {
+	err := c.rt.Compact(ctx, runtime.CompactRequest{Tenant: req.Tenant, RunID: req.RunID, By: req.By})
+	switch {
+	case errors.Is(err, runtime.ErrInvalid):
+		return fmt.Errorf("%w: %w", server.ErrInvalid, err)
+	case errors.Is(err, runtime.ErrCompactUnavailable):
 		return fmt.Errorf("%w: %w", server.ErrUnimplemented, err)
 	}
 	return err

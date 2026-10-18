@@ -181,6 +181,10 @@ func TestUnpublishableEventsAreRefusedAsBadRequests(t *testing.T) {
 			Topic: "agent:_control:stop-run_1",
 			Kind:  string(envelope.KindStop),
 		},
+		"a compaction the run never made": {
+			Topic: "agent:docs-bot:run_1",
+			Kind:  string(envelope.KindCompacted),
+		},
 		"run id disagrees": {
 			Topic: "agent:docs-bot:run_1",
 			RunId: "run_2",
