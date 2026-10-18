@@ -15,6 +15,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/runtime"
 )
@@ -231,4 +232,108 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 	if c := compactions[0]; c.Trigger != agentrt.TriggerRequested || c.By != "U1" || c.Summarized == 0 {
 		t.Errorf("compaction = %+v, want a requested one by U1 that summarized something", c)
 	}
+}
+
+// droppingBus ends the first subscription to a compact stream right after it
+// has delivered one event, as a broker that loses a connection would, and
+// says when the stream is subscribed to again.
+type droppingBus struct {
+	bus.Bus
+	mu           sync.Mutex
+	subscribed   int
+	resubscribed chan struct{}
+}
+
+func (d *droppingBus) Subscribe(ctx context.Context, sub envelope.Subscription) (bus.Stream, error) {
+	s, err := d.Bus.Subscribe(ctx, sub)
+	if err != nil || !strings.HasPrefix(sub.Topic.String(), "agent:_control:compact-") {
+		return s, err
+	}
+	d.mu.Lock()
+	d.subscribed++
+	n := d.subscribed
+	d.mu.Unlock()
+	if n == 2 {
+		close(d.resubscribed)
+	}
+	if n > 1 {
+		return s, nil
+	}
+	return &droppingStream{Stream: s}, nil
+}
+
+type droppingStream struct {
+	bus.Stream
+	delivered bool
+}
+
+func (s *droppingStream) Recv(ctx context.Context) (envelope.Event, error) {
+	if s.delivered {
+		return envelope.Event{}, errors.New("connection lost")
+	}
+	e, err := s.Stream.Recv(ctx)
+	s.delivered = err == nil
+	return e, err
+}
+
+// counting is an executor that relays every request to compact it hears
+// until the test lets it finish.
+type counting struct {
+	waiting chan struct{}
+	heard   chan agentrt.CompactRequest
+	finish  chan struct{}
+	once    sync.Once
+}
+
+func (c *counting) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+	signal := runtime.CompactSignal(ctx)
+	c.once.Do(func() { close(c.waiting) })
+	for {
+		select {
+		case got := <-signal:
+			c.heard <- got
+		case <-c.finish:
+			return runtime.Outcome{Text: "done", Prompt: req.Text}, nil
+		case <-ctx.Done():
+			return runtime.Outcome{}, ctx.Err()
+		}
+	}
+}
+
+// A turn that loses its subscription listens again from where it left off: a
+// request it already relayed is not relayed a second time, since each one
+// costs a summary.
+func TestARequestToCompactIsRelayedOnceAcrossAReconnect(t *testing.T) {
+	broker := &droppingBus{Bus: newBroker(t), resubscribed: make(chan struct{})}
+	w := newWorldOn(t, broker)
+	exec := &counting{waiting: make(chan struct{}), heard: make(chan agentrt.CompactRequest, 8), finish: make(chan struct{})}
+	rt := w.runtime(t, exec)
+	w.work(t, rt, nil)
+
+	runID := w.accept(t, rt, tag("docs-bot", "evt-1", "explain"))
+	select {
+	case <-exec.waiting:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the turn never started")
+	}
+	if err := rt.Compact(context.Background(), runtime.CompactRequest{Tenant: "acme", RunID: runID, By: "U1"}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	select {
+	case <-exec.heard:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the turn never heard the request")
+	}
+	select {
+	case <-broker.resubscribed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the turn never listened again after losing its subscription")
+	}
+	select {
+	case again := <-exec.heard:
+		t.Fatalf("the request was relayed again after the reconnect (by %q)", again.By)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(exec.finish)
+	w.result(t, rt, runID)
 }
