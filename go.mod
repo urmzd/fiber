@@ -10,7 +10,7 @@ require (
 	github.com/urmzd/anchor v0.2.0
 	github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261018021017-188198d7a00b
 	github.com/urmzd/playscape v0.3.0
-	github.com/urmzd/saige v0.37.1-0.20261018021915-827a48ba78d9
+	github.com/urmzd/saige v0.38.0
 	google.golang.org/protobuf v1.36.11
 )
 

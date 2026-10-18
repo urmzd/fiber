@@ -99,8 +99,8 @@ github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261018021017-188198d7a00b h
 github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261018021017-188198d7a00b/go.mod h1:bdzIJ9pJENypV5GFcEjCaLb14PxRdefezz9tMbSTfLs=
 github.com/urmzd/playscape v0.3.0 h1:M/HCeNf0zSlq1nAd+TeGwU1wmJM1X56LtvHz3Luevvg=
 github.com/urmzd/playscape v0.3.0/go.mod h1:FfBQoCnTmHzFuNXZxNxFW2l2ZJeZdhaD1ri/eU1DL9k=
-github.com/urmzd/saige v0.37.1-0.20261018021915-827a48ba78d9 h1:AO4F80kqrIx6Z6u2iDbR3gia3J01ausDZ3VwRg7coMU=
-github.com/urmzd/saige v0.37.1-0.20261018021915-827a48ba78d9/go.mod h1:9xKeELrQsfwazK1C7Pxvfogqf0SFRWZv9axsB2uZk1c=
+github.com/urmzd/saige v0.38.0 h1:HyP9ySo4qakJk4+ELTjXTcd0lwvntVGHYc4+tLZ1UkA=
+github.com/urmzd/saige v0.38.0/go.mod h1:9xKeELrQsfwazK1C7Pxvfogqf0SFRWZv9axsB2uZk1c=
 github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=
 github.com/zeebo/xxh3 v1.1.0/go.mod h1:IisAie1LELR4xhVinxWS5+zf1lA4p0MW4T+w+W07F5s=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
