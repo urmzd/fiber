@@ -98,7 +98,7 @@ jobs:
         run: |
           # pkg/runtime runs its stop, usage and park tests on the Postgres ledger,
           # queue and journal and the Redis bus when both variables are set.
-          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/bus ./pkg/runtime | tee integration-results.jsonl
+          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/toolprovider ./pkg/bus ./pkg/runtime | tee integration-results.jsonl
       - name: Reject skipped integration tests
         run: |
           # The Postgres queue does not implement the optional DeltaLog face.
@@ -114,6 +114,8 @@ jobs:
             ["durable", "TestLedgerConformanceOnFiberSchema"],
             ["durable", "TestQueueConformanceOnFiberSchema"],
             ["knowledge", "TestPostgresMigrateIsIdempotentAndConcurrent"],
+            ["toolprovider", "TestPostgresMigrateIsIdempotentAndConcurrent"],
+            ["toolprovider", "TestPostgresSnapshotsSurviveANewStoreByteForByte"],
             ["bus", "TestRedisConformance"],
             ["runtime", "TestStopTestsRunOnPostgresAndRedis"],
             ["runtime", "TestAStopReachesARunExecutingOnAnotherWorker"],
