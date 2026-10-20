@@ -51,9 +51,10 @@ message AgentSpec {
   // "claude-haiku-5-5". Empty takes the deployment default.
   string model = 3;
 
-  // Provider selects the LLM backend ("anthropic", "ollama"). Empty takes the
-  // deployment default. Provider and model are separate fields because the
-  // same model name can be served by more than one provider.
+  // Provider selects the LLM backend ("anthropic", "ollama", "openai", or a
+  // name the deployment registers). Empty takes the deployment default.
+  // Provider and model are separate fields because the same model name can
+  // be served by more than one provider.
   string provider = 4;
 
   // SystemPrompt is the agent's standing instruction. It is the single largest

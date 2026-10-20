@@ -99,9 +99,13 @@ func WithConnector(c connector.Connector) Option {
 }
 
 // WithToolProvider records an MCP tool provider at startup and accepts the
-// named tools from it, each with the class given (write when empty), as the
-// server offers them then. An empty p.Tenant is the deployment's tenant.
-// Agents reach it with an "mcp:<name>" or "mcp:<name>:write" grant.
+// tools in accept from it, each pinned by Name and SchemaHash and accepted
+// with its Class (write when empty). Only an offered tool whose schema hash
+// matches its pin is accepted, and its description may not change once it
+// has been; anything the server adds or changes stays pending and is logged
+// with its hash. A tool with no SchemaHash stops startup. An empty p.Tenant
+// is the deployment's tenant. Agents reach the provider with an
+// "mcp:<name>" or "mcp:<name>:write" grant.
 func WithToolProvider(p toolprovider.Provider, accept ...toolprovider.Tool) Option {
 	return func(e *cli.Extensions) {
 		e.ToolProviders = append(e.ToolProviders, cli.ToolProviderSeed{Provider: p, Accept: accept})

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -95,19 +97,44 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	}
 }
 
+// okTool answers every call with "ok".
+func okTool(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+}
+
 // fakeMCP serves an MCP server with a read tool and a write tool over HTTP.
-func fakeMCP(t *testing.T) string {
+// The server is returned so a test can change what it offers.
+func fakeMCP(t *testing.T) (*mcp.Server, string) {
 	t.Helper()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "issues", Version: "1"}, nil)
 	for _, name := range []string{"search", "close_issue"} {
-		srv.AddTool(&mcp.Tool{Name: name, Description: name, InputSchema: map[string]any{"type": "object"}},
-			func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
-			})
+		srv.AddTool(&mcp.Tool{Name: name, Description: name, InputSchema: map[string]any{"type": "object"}}, okTool)
 	}
 	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil))
 	t.Cleanup(ts.Close)
-	return ts.URL
+	return srv, ts.URL
+}
+
+// objectHash is the schema hash of the fake's tools, the pin a providers file
+// carries for them.
+func objectHash(t *testing.T) string {
+	t.Helper()
+	tool, err := toolprovider.NewTool("x", "", json.RawMessage(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tool.SchemaHash
+}
+
+// issuesFile is a providers file pinning the fake's two tools.
+func issuesFile(t *testing.T, url string) string {
+	t.Helper()
+	h := objectHash(t)
+	return writeFile(t, `{
+  "models": [{"name": "fireworks", "base_url": "https://api.fireworks.ai/inference/v1", "api_key_env": "FIREWORKS_API_KEY"}],
+  "tool_providers": [{"name": "issues", "transport": "http", "endpoint": "`+url+`",
+    "tools": [{"name": "search", "schema_hash": "`+h+`", "class": "read"}, {"name": "close_issue", "schema_hash": "`+h+`"}]}]
+}`)
 }
 
 func writeFile(t *testing.T, body string) string {
@@ -134,13 +161,8 @@ func TestAProvidersFileDeclaresModelsAndToolProviders(t *testing.T) {
 }
 
 func providersFileDeclares(t *testing.T, postgres, tenant string) {
-	url := fakeMCP(t)
-	path := writeFile(t, `{
-  "models": [{"name": "fireworks", "base_url": "https://api.fireworks.ai/inference/v1", "api_key_env": "FIREWORKS_API_KEY"}],
-  "tool_providers": [{"name": "issues", "transport": "http", "endpoint": "`+url+`",
-    "tools": [{"name": "search", "class": "read"}, {"name": "close_issue"}]}]
-}`)
-	ext, err := loadProvidersFile(path, tenant)
+	_, url := fakeMCP(t)
+	ext, err := loadProvidersFile(issuesFile(t, url), tenant)
 	if err != nil {
 		t.Fatalf("loadProvidersFile: %v", err)
 	}
@@ -185,6 +207,7 @@ func TestAProvidersFileThatCannotBeRightIsAUsageError(t *testing.T) {
 		"a model with no name":                    `{"models": [{"base_url": "https://x"}]}`,
 		"a model declared twice":                  `{"models": [{"name": "fw"}, {"name": "fw"}]}`,
 		"a tool provider with a bad transport":    `{"tool_providers": [{"name": "x", "transport": "smtp", "endpoint": "x"}]}`,
+		"a tool with no schema_hash pin":          `{"tool_providers": [{"name": "x", "transport": "http", "endpoint": "https://x", "tools": [{"name": "search"}]}]}`,
 		"not JSON":                                `models: []`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -212,5 +235,104 @@ func TestExtensionsFromGoAndTheFileMustNotCollide(t *testing.T) {
 	seed := ToolProviderSeed{Provider: toolprovider.Provider{Tenant: "acme", Name: "issues"}}
 	if _, err := (Extensions{ToolProviders: []ToolProviderSeed{seed}}).merge(Extensions{ToolProviders: []ToolProviderSeed{seed}}); exitCodeFor(err) != ExitUsage {
 		t.Fatalf("a tool provider declared twice: %v, want a usage error", err)
+	}
+}
+
+// A declared tool is accepted only as pinned, so a server cannot widen what
+// agents may do by changing under a restart. Here the server adds a write
+// tool and changes the schema of a declared one; after a restart neither is
+// accepted, both are logged as held back, and the untouched tool still works.
+// With $FIBER_POSTGRES_TEST_URL set the restart is a new process's core on
+// the same database.
+func TestARestartNeverAcceptsWhatTheProvidersFileDoesNotDeclare(t *testing.T) {
+	t.Run("memory", func(t *testing.T) { restartHoldsBackDrift(t, "", "acme") })
+	if url := os.Getenv("FIBER_POSTGRES_TEST_URL"); url != "" {
+		t.Run("postgres", func(t *testing.T) {
+			restartHoldsBackDrift(t, url, fmt.Sprintf("acme-%d", time.Now().UnixNano()))
+		})
+	}
+}
+
+func restartHoldsBackDrift(t *testing.T, postgres, tenant string) {
+	ctx := context.Background()
+	srv, url := fakeMCP(t)
+	ext, err := loadProvidersFile(issuesFile(t, url), tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := newCore(coreConfig{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres, Ext: ext})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.close() })
+
+	// The server drifts: a new write tool, and search takes a new argument.
+	srv.AddTool(&mcp.Tool{Name: "drop_db", Description: "drop_db", InputSchema: map[string]any{"type": "object"}}, okTool)
+	srv.AddTool(&mcp.Tool{Name: "search", Description: "search", InputSchema: map[string]any{
+		"type": "object", "properties": map[string]any{"delete": map[string]any{"type": "boolean"}},
+	}}, okTool)
+
+	// The restart.
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	store := first.tools
+	if postgres != "" {
+		_ = first.close()
+		again, err := newCore(coreConfig{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres, Ext: ext, Log: log})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = again.close() })
+		store = again.tools
+	} else if err := seedToolProviders(ctx, store, tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := store.Snapshot(ctx, tenant, "issues", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Version != 1 {
+		t.Errorf("the restart accepted snapshot %d; want the first, 1, unchanged", snap.Version)
+	}
+	if _, ok := snap.Tool("drop_db"); ok {
+		t.Error("the restart accepted drop_db, which the file does not declare")
+	}
+	if got, _ := snap.Tool("search"); got.SchemaHash != objectHash(t) {
+		t.Errorf("the restart accepted search's new schema %s", got.SchemaHash)
+	}
+	for _, want := range []string{"tool=drop_db", "offered but not declared", "tool=search", "schema does not match"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the restart did not log %q:\n%s", want, logs.String())
+		}
+	}
+
+	// What an agent granted the whole provider is offered now.
+	grants := mcptools.NewGrants(store, mcptools.Dialer())
+	t.Cleanup(func() { _ = grants.Close() })
+	tools, _, err := grants.Expand(ctx, tenant, "mcp:issues:write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tool := range tools {
+		names = append(names, tool.Definition().Name)
+	}
+	if strings.Join(names, ",") != "issues_close_issue" {
+		t.Errorf("a write grant is offered %v, want only the undrifted issues_close_issue", names)
+	}
+
+	// A reworded description is drift too: it changes what the model is
+	// told the tool does, under the same schema.
+	srv.AddTool(&mcp.Tool{Name: "close_issue", Description: "close and delete the issue", InputSchema: map[string]any{"type": "object"}}, okTool)
+	logs.Reset()
+	if err := seedToolProviders(ctx, store, tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.Snapshot(ctx, tenant, "issues", 0); got.Version != 1 {
+		t.Errorf("a reworded description was accepted as snapshot %d", got.Version)
+	}
+	if !strings.Contains(logs.String(), "description changed") {
+		t.Errorf("the reworded description was not logged:\n%s", logs.String())
 	}
 }

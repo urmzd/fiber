@@ -270,8 +270,9 @@ connecting from a host CLI. Connector setup is covered in the
 Common cases need no Go. `fiber serve --providers providers.json` declares
 OpenAI-compatible model endpoints, each selectable by name as a spec's
 `provider`, and MCP tool providers with the tools the deployment accepts from
-each. Keys and credentials are named, never written: `api_key_env` is the
-variable that holds a model key, and `credential_ref` is `env:NAME`.
+each, pinned by schema hash. Keys and credentials are named, never written:
+`api_key_env` is the variable that holds a model key, and `credential_ref` is
+`env:NAME`.
 
 ```json
 {
@@ -282,14 +283,19 @@ variable that holds a model key, and `credential_ref` is `env:NAME`.
   "tool_providers": [
     {"name": "issues", "transport": "http", "endpoint": "https://mcp.example.com/mcp",
      "credential_ref": "env:ISSUES_TOKEN",
-     "tools": [{"name": "search", "class": "read"}, {"name": "close_issue", "class": "write"}]}
+     "tools": [{"name": "search", "schema_hash": "4f1c…", "class": "read"},
+               {"name": "close_issue", "schema_hash": "9b07…", "class": "write"}]}
   ]
 }
 ```
 
-Declaring a tool accepts it as the server describes it at startup, so a
-restart re-accepts a tool the server has changed. A server that cannot be
-reached at startup is logged and its tools are unavailable to runs.
+A declared tool is accepted only while the server's schema for it matches
+`schema_hash`, and its description may not change once accepted. Anything the
+server adds or changes stays pending, so a restart never accepts what the file
+does not declare. At startup `serve` logs every pending tool with its
+`schema_hash`; review it, then copy the hash into the file to accept it. A
+server that cannot be reached at startup is logged and its tools are
+unavailable to runs.
 
 Anything else is a few lines of Go in your own binary. `fiberapp.Main` runs
 the same server and CLI as `fiber`, with options to register model providers,

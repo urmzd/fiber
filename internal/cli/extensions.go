@@ -43,9 +43,10 @@ type Extensions struct {
 }
 
 // ToolProviderSeed is an MCP tool provider a deployment declares rather than
-// an admin registering it: the record, and the tools (by name, with the class
-// to accept each as) the deployment accepts from it. A tool's description and
-// schema are taken from what the server offers at startup.
+// an admin registering it: the record, and the tools the deployment accepts
+// from it, each pinned by name, schema hash and class. Only an offered tool
+// whose schema hash matches its pin is accepted; anything the server adds or
+// changes stays pending, so a restart never accepts what was not declared.
 type ToolProviderSeed struct {
 	Provider toolprovider.Provider
 	Accept   []toolprovider.Tool
@@ -146,11 +147,14 @@ type toolProviderConfig struct {
 	Args          []string `json:"args,omitempty"`
 	CredentialRef string   `json:"credential_ref,omitempty"`
 	CredentialEnv string   `json:"credential_env,omitempty"`
-	// Tools are the tools the deployment accepts, each with its class.
-	// A tool left out stays pending; a class left out is write.
+	// Tools are the tools the deployment accepts, each pinned by the hash
+	// of its schema (toolprovider.Tool.SchemaHash, which the server log
+	// prints for every pending tool). A tool left out stays pending; a class
+	// left out is write.
 	Tools []struct {
-		Name  string `json:"name"`
-		Class string `json:"class,omitempty"`
+		Name       string `json:"name"`
+		SchemaHash string `json:"schema_hash"`
+		Class      string `json:"class,omitempty"`
 	} `json:"tools"`
 }
 
@@ -190,23 +194,45 @@ func loadProvidersFile(path, tenant string) (Extensions, error) {
 		}
 		seed := ToolProviderSeed{Provider: p}
 		for _, t := range tp.Tools {
-			seed.Accept = append(seed.Accept, toolprovider.Tool{Name: t.Name, Class: toolprovider.Class(t.Class)})
+			seed.Accept = append(seed.Accept, toolprovider.Tool{Name: t.Name, SchemaHash: t.SchemaHash, Class: toolprovider.Class(t.Class)})
+		}
+		if err := checkPins(seed); err != nil {
+			return Extensions{}, usagef("providers %q: %v", path, err)
 		}
 		ext.ToolProviders = append(ext.ToolProviders, seed)
 	}
 	return Extensions{}.merge(ext)
 }
 
+// checkPins refuses a declared tool with no name or no schema hash. A tool
+// accepted without a pin would be accepted in whatever form the server offers
+// it, which is the drift declaring it is meant to rule out.
+func checkPins(seed ToolProviderSeed) error {
+	for _, t := range seed.Accept {
+		switch {
+		case t.Name == "":
+			return fmt.Errorf("tool provider %q declares a tool with no name", seed.Provider.Name)
+		case t.SchemaHash == "":
+			return fmt.Errorf("tool provider %q: tool %q has no schema_hash; pending tools are logged with theirs", seed.Provider.Name, t.Name)
+		}
+	}
+	return nil
+}
+
 // seedToolProviders records each declared tool provider and accepts the tools
-// it names. A record or snapshot that already matches is left alone, so a
+// it pins. A record or snapshot that already matches is left alone, so a
 // restart does not mint versions. A server that cannot be reached is logged
 // and skipped: its grants are then unavailable to runs, which is how an
 // unreachable server is treated at run time too.
 //
-// Declaring a tool here is the admin's acceptance: the description and schema
-// the server offers at startup are what is accepted, and a server that
-// changed a declared tool has the change accepted at the next restart.
+// Declaring a tool is the admin's acceptance of that tool as pinned, and of
+// nothing else: see acceptDeclared.
 func seedToolProviders(ctx context.Context, store toolprovider.Store, tenant string, seeds []ToolProviderSeed, dial mcptools.Dial, log *slog.Logger) error {
+	for _, seed := range seeds {
+		if err := checkPins(seed); err != nil {
+			return usagef("%v", err)
+		}
+	}
 	for _, seed := range seeds {
 		p := seed.Provider
 		if p.Tenant == "" {
@@ -222,9 +248,16 @@ func seedToolProviders(ctx context.Context, store toolprovider.Store, tenant str
 		if len(seed.Accept) == 0 {
 			continue
 		}
-		if err := acceptDeclared(ctx, store, rec, seed.Accept, dial); err != nil {
+		held, err := acceptDeclared(ctx, store, rec, seed.Accept, dial)
+		if err != nil {
 			log.Warn("cli: tool provider not seeded; its tools are unavailable until it is reachable",
 				"provider", p.Name, "tenant", p.Tenant, "error", err)
+			continue
+		}
+		for _, h := range held {
+			log.Warn("cli: tool held back pending review; it does not match what the deployment declares",
+				"provider", p.Name, "tenant", p.Tenant, "tool", h.tool.Name, "reason", h.reason,
+				"schema_hash", h.tool.SchemaHash)
 		}
 	}
 	return nil
@@ -248,49 +281,88 @@ func putProvider(ctx context.Context, store toolprovider.Store, p toolprovider.P
 	return store.PutProvider(ctx, p)
 }
 
-// acceptDeclared accepts the declared tools as the server offers them now,
-// unless the current snapshot already holds exactly that.
-func acceptDeclared(ctx context.Context, store toolprovider.Store, p toolprovider.Provider, declared []toolprovider.Tool, dial mcptools.Dial) error {
+// heldBack is an offered tool the declaration does not accept, and why.
+type heldBack struct {
+	tool   toolprovider.Tool
+	reason string
+}
+
+// acceptDeclared accepts what the deployment pinned and nothing else, and
+// reports every offered tool it left pending.
+//
+// An offered tool is accepted only when it is declared and its schema hash
+// matches the pin. Its description is taken from the server the first time,
+// and after that must match the accepted one: a description is what the
+// model is told a tool does, so a reworded one is a change like a new schema.
+// A declared tool that drifted keeps its previously accepted form in the
+// snapshot, which the toolset then holds back until the server serves that
+// form again or the pin is updated. A tool the server offers that is not
+// declared is never accepted. The snapshot is written only when what it
+// holds would change.
+func acceptDeclared(ctx context.Context, store toolprovider.Store, p toolprovider.Provider, declared []toolprovider.Tool, dial mcptools.Dial) ([]heldBack, error) {
 	s, err := dial(ctx, p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	offered, err := s.Offered(ctx)
 	_ = s.Close()
 	if err != nil {
-		return err
+		return nil, err
+	}
+	cur, err := store.Snapshot(ctx, p.Tenant, p.Name, 0)
+	if err != nil {
+		return nil, err
 	}
 	byName := make(map[string]toolprovider.Tool, len(offered))
 	for _, o := range offered {
 		byName[o.Name] = o
 	}
 	var accept []toolprovider.Tool
-	var missing []string
+	var held []heldBack
 	for _, d := range declared {
+		class := d.Class
+		if class == "" {
+			class = toolprovider.ClassWrite
+		}
+		prev, wasAccepted := cur.Tool(d.Name)
 		o, ok := byName[d.Name]
-		if !ok {
-			missing = append(missing, d.Name)
+		var reason string
+		switch {
+		case !ok:
+			reason = "declared but not offered"
+		case o.SchemaHash != d.SchemaHash:
+			reason = "schema does not match the declared schema_hash"
+		case wasAccepted && prev.SchemaHash == o.SchemaHash && prev.Description != o.Description:
+			reason = "description changed since it was accepted"
+		}
+		if reason == "" {
+			o.Class = class
+			accept = append(accept, o)
 			continue
 		}
-		o.Class = d.Class
-		if o.Class == "" {
-			o.Class = toolprovider.ClassWrite
+		if ok {
+			held = append(held, heldBack{tool: o, reason: reason})
+		} else {
+			held = append(held, heldBack{tool: toolprovider.Tool{Name: d.Name, SchemaHash: d.SchemaHash}, reason: reason})
 		}
-		accept = append(accept, o)
+		if wasAccepted && prev.SchemaHash == d.SchemaHash {
+			// Keep the form that was accepted; the toolset holds it back
+			// while the server offers something else.
+			prev.Class = class
+			accept = append(accept, prev)
+		}
 	}
-	cur, err := store.Snapshot(ctx, p.Tenant, p.Name, 0)
-	if err != nil {
-		return err
+	for _, o := range offered {
+		if !slices.ContainsFunc(declared, func(d toolprovider.Tool) bool { return d.Name == o.Name }) {
+			held = append(held, heldBack{tool: o, reason: "offered but not declared"})
+		}
 	}
 	if !sameTools(cur.Tools, accept) {
 		if _, err := store.Accept(ctx, p.Tenant, p.Name, cur.Version, accept, "config"); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("the server does not offer %v", missing)
-	}
-	return nil
+	return held, nil
 }
 
 func sameTools(a, b []toolprovider.Tool) bool {

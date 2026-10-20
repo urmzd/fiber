@@ -28,7 +28,7 @@ func TestOptionsBecomeTheCompositionRootsExtensions(t *testing.T) {
 		WithToolSource(nil),
 		WithConnector(named("chat")),
 		WithConnector(nil),
-		WithToolProvider(toolprovider.Provider{Name: "issues"}, toolprovider.Tool{Name: "search", Class: toolprovider.ClassRead}),
+		WithToolProvider(toolprovider.Provider{Name: "issues"}, toolprovider.Tool{Name: "search", SchemaHash: "abc", Class: toolprovider.ClassRead}),
 		nil,
 	})
 	if len(ext.Providers) != 2 || ext.Providers["house"] == nil || ext.Providers["fireworks"] == nil {

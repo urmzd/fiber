@@ -66,9 +66,10 @@ type AgentSpec struct {
 	// Model is the provider-specific model identifier, such as
 	// "claude-haiku-5-5". Empty takes the deployment default.
 	Model string `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
-	// Provider selects the LLM backend ("anthropic", "ollama"). Empty takes the
-	// deployment default. Provider and model are separate fields because the
-	// same model name can be served by more than one provider.
+	// Provider selects the LLM backend ("anthropic", "ollama", "openai", or a
+	// name the deployment registers). Empty takes the deployment default.
+	// Provider and model are separate fields because the same model name can
+	// be served by more than one provider.
 	Provider string `protobuf:"bytes,4,opt,name=provider,proto3" json:"provider,omitempty"`
 	// SystemPrompt is the agent's standing instruction. It is the single largest
 	// reason revisions are immutable: changing it changes every answer, so it
