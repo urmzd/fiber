@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -143,6 +145,10 @@ type coreConfig struct {
 	// Concurrency is how many runs a worker executes at once. Zero means one.
 	Concurrency int
 
+	// Ext is what a binary built on fiber adds: model providers, tool
+	// sources, connectors and tool providers. The zero value adds nothing.
+	Ext Extensions
+
 	// Log receives operational output. Nil discards it.
 	Log *slog.Logger
 
@@ -232,7 +238,9 @@ func newCore(cfg coreConfig) (*core, error) {
 	defer cancel()
 
 	// The control plane: append-only agent definitions, scoped by tenant.
-	c.store, err = newRegistry(ctx, pool)
+	// Its provider table includes the extensions', so an agent naming one
+	// can be stored as well as run.
+	c.store, err = newRegistry(ctx, pool, cfg.Ext.providerNames())
 	if err != nil {
 		_ = c.close()
 		return nil, err
@@ -272,11 +280,18 @@ func newCore(cfg coreConfig) (*core, error) {
 	// Sessions are opened on first use and kept per provider record. A
 	// credential reference resolves from this process's environment
 	// ("env:NAME"), and never reaches a log or an error.
-	grants := mcptools.NewGrants(c.tools, mcptools.Dialer(
+	dial := mcptools.Dialer(
 		mcptools.WithResolver(mcptools.EnvResolver()),
 		mcptools.WithLogger(log),
-	))
+	)
+	grants := mcptools.NewGrants(c.tools, dial)
 	c.closers = append(c.closers, grants.Close)
+	// Tool providers the deployment declares are recorded, and their
+	// declared tools accepted, before anything can run.
+	if err := seedToolProviders(ctx, c.tools, cfg.Tenant, cfg.Ext.ToolProviders, dial, log); err != nil {
+		_ = c.close()
+		return nil, err
+	}
 
 	// The mesh. Roles are derived from the interfaces each connector
 	// implements, never declared, so registering is the whole wiring.
@@ -392,6 +407,7 @@ func newBus(redisURL string, concurrency, perRun int) (bus.Bus, func() error, er
 func (c *core) addAuthor(ctx context.Context) error {
 	a, err := author.New(author.Config{
 		Store:      c.store,
+		Providers:  c.cfg.Ext.providerNames(),
 		Principals: author.PrincipalFunc(c.principal),
 		Catalog: func() []string {
 			var names []string
@@ -468,11 +484,11 @@ func newPostgres(url string) (*pgxpool.Pool, error) {
 // newRegistry selects the control plane's store. The schema is migrated here
 // rather than by a separate command because a server that starts against an
 // unmigrated database has nothing useful to do but report that.
-func newRegistry(ctx context.Context, pool *pgxpool.Pool) (registry.Store, error) {
+func newRegistry(ctx context.Context, pool *pgxpool.Pool, providers []string) (registry.Store, error) {
 	if pool == nil {
-		return registry.NewMemory(), nil
+		return registry.NewMemory(registry.WithProviders(providers...)), nil
 	}
-	store := registry.NewPostgres(pool)
+	store := registry.NewPostgres(pool, registry.WithProviders(providers...))
 	if err := store.Migrate(ctx); err != nil {
 		return nil, fmt.Errorf("%w: $%s: %w", errUnavailable, EnvPostgres, err)
 	}
@@ -569,6 +585,11 @@ func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, fil
 		ep.Name = agentrt.ProviderOpenAI
 		agentOpts = append(agentOpts, agentrt.WithOpenAICompatible(ep))
 	}
+	// Extension providers come after the built-ins' configuration, so one
+	// named like a built-in replaces it.
+	for _, name := range slices.Sorted(maps.Keys(cfg.Ext.Providers)) {
+		agentOpts = append(agentOpts, agentrt.WithProvider(name, cfg.Ext.Providers[name]))
+	}
 	if cfg.CompactTokens > 0 || cfg.CompactOnRequest {
 		agentOpts = append(agentOpts, agentrt.WithCompaction(agentrt.Compaction{
 			MaxInputTokens: cfg.CompactTokens,
@@ -582,7 +603,8 @@ func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, fil
 		// A spec's tool names resolve against the actions every registered
 		// connector advertises, so granting "github.comment" in a spec is the
 		// whole of wiring an agent to GitHub's write side.
-		runtime.WithCatalog(runtime.Connectors(sinks)),
+		// Tool sources a binary added resolve what no connector does.
+		runtime.WithCatalog(catalog(runtime.Connectors(sinks), cfg.Ext.Catalogs)),
 		// "mcp:<provider>" grants expand to that provider's accepted
 		// tools, named "<provider>_<tool>", under the grant's class.
 		runtime.WithToolGroups(groups),

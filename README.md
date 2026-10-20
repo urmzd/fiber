@@ -252,6 +252,7 @@ adds product workflows and a web surface on top of the platform.
 | `OPENAI_API_KEY` | Authenticate the `openai` provider when it talks to OpenAI |
 | `FIBER_OPENAI_BASE_URL`, `FIBER_OPENAI_API_KEY_ENV` | Point the `openai` provider at any OpenAI-compatible endpoint; the second names the variable that holds the key |
 | `FIBER_EMBEDDINGS_URL`, `_MODEL`, `_KEY`, `_DIMENSIONS` | Configure an OpenAI-compatible embeddings endpoint |
+| `FIBER_PROVIDERS` | Default for `serve --providers`: a JSON file of model endpoints and MCP tool providers |
 | `FIBER_AUTHOR_PROVIDER`, `FIBER_AUTHOR_MODEL` | Select the built-in author agent's model |
 | `FIBER_COMPACT_TOKENS` | Enable history compaction at a token threshold; off by default |
 | `FIBER_COMPACT_KEEP_TURNS` | Recent tool-calling turns a compaction keeps verbatim; defaults to saige's |
@@ -263,6 +264,44 @@ offline development. Use the same embedding settings for `serve` and `index`.
 Compose sets `FIBER_TOKEN=fiber-dev-token` by default. Use that value when
 connecting from a host CLI. Connector setup is covered in the
 [GitHub](docs/architecture/github.md) and [Slack](docs/architecture/slack.md) guides.
+
+## Extending fiber
+
+Common cases need no Go. `fiber serve --providers providers.json` declares
+OpenAI-compatible model endpoints, each selectable by name as a spec's
+`provider`, and MCP tool providers with the tools the deployment accepts from
+each. Keys and credentials are named, never written: `api_key_env` is the
+variable that holds a model key, and `credential_ref` is `env:NAME`.
+
+```json
+{
+  "models": [
+    {"name": "fireworks", "base_url": "https://api.fireworks.ai/inference/v1", "api_key_env": "FIREWORKS_API_KEY"},
+    {"name": "vllm", "base_url": "http://vllm.internal:8000/v1", "api_key_env": "VLLM_API_KEY"}
+  ],
+  "tool_providers": [
+    {"name": "issues", "transport": "http", "endpoint": "https://mcp.example.com/mcp",
+     "credential_ref": "env:ISSUES_TOKEN",
+     "tools": [{"name": "search", "class": "read"}, {"name": "close_issue", "class": "write"}]}
+  ]
+}
+```
+
+Declaring a tool accepts it as the server describes it at startup, so a
+restart re-accepts a tool the server has changed. A server that cannot be
+reached at startup is logged and its tools are unavailable to runs.
+
+Anything else is a few lines of Go in your own binary. `fiberapp.Main` runs
+the same server and CLI as `fiber`, with options to register model providers,
+tool sources, connectors and MCP tool providers.
+[`examples/downstream`](examples/downstream/main.go) is a complete one:
+
+```go
+os.Exit(fiberapp.Main(fiberapp.Version{Version: "v1"},
+    fiberapp.WithModelProvider("house", houseProvider),
+    fiberapp.WithTools(runbookTool{}),
+))
+```
 
 ## Upgrading
 

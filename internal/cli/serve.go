@@ -31,8 +31,12 @@ const DefaultTenant = "default"
 // HTTP server has drained.
 const serveGrace = 20 * time.Second
 
-func newServeCmd() *cobra.Command {
+// EnvProviders is the default for serve's --providers.
+const EnvProviders = "FIBER_PROVIDERS"
+
+func newServeCmd(ext Extensions) *cobra.Command {
 	var (
+		providers   string
 		addr        string
 		schedules   string
 		concurrency int
@@ -58,6 +62,8 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			return runServe(cmd.Context(), ui, serveOptions{
+				ext:         ext,
+				providers:   providers,
 				addr:        addr,
 				schedules:   schedules,
 				concurrency: concurrency,
@@ -69,6 +75,8 @@ func newServeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&addr, "addr", DefaultAddr, "Listen address")
 	cmd.Flags().StringVar(&schedules, "schedules", "", "JSON file of cron schedules to run")
+	cmd.Flags().StringVar(&providers, "providers", os.Getenv(EnvProviders),
+		"JSON file of model endpoints and MCP tool providers ($"+EnvProviders+")")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "Runs executed at once")
 	cmd.Flags().StringVar(&tenant, "tenant", envOr(EnvTenant, DefaultTenant),
 		"Authorization scope this deployment serves ($"+EnvTenant+")")
@@ -79,6 +87,8 @@ func newServeCmd() *cobra.Command {
 }
 
 type serveOptions struct {
+	ext         Extensions
+	providers   string
 	addr        string
 	schedules   string
 	concurrency int
@@ -125,6 +135,14 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 	if err != nil {
 		return err
 	}
+	declared, err := loadProvidersFile(opts.providers, opts.tenant)
+	if err != nil {
+		return err
+	}
+	ext, err := opts.ext.merge(declared)
+	if err != nil {
+		return err
+	}
 
 	c, err := newCore(coreConfig{
 		Tenant:     opts.tenant,
@@ -135,6 +153,7 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		AuthorProvider:   strings.TrimSpace(os.Getenv(EnvAuthorProvider)),
 		AuthorModel:      strings.TrimSpace(os.Getenv(EnvAuthorModel)),
 		OpenAI:           openAI,
+		Ext:              ext,
 		CompactTokens:    compact,
 		CompactKeepTurns: keepTurns,
 		CompactOnRequest: onRequest,
@@ -271,6 +290,7 @@ func announce(ui *ui, c *core, opts serveOptions, addr, token string, generated 
 	}
 	ui.logf("  bus        %s\n", bus)
 	ui.logf("  worker     %s\n", onOff(!opts.noWorker))
+	ui.logf("  models     %s\n", strings.Join(c.cfg.Ext.providerNames(), ", "))
 	names := c.sinks.Names()
 	if len(names) == 0 {
 		ui.logf("  connectors %s\n", ui.dim("none configured; events stream to subscribers only"))

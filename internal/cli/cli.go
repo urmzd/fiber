@@ -127,8 +127,13 @@ const DefaultAddr = ":8383"
 // It returns a code rather than calling os.Exit so that main stays a one-liner
 // and so a test can drive the whole tree in-process. Cobra's own error printing
 // is off: an error is classified once, here, and printed to stderr in one shape.
-func Execute(v Version) int {
-	root := newRootCmd(v)
+func Execute(v Version) int { return ExecuteWith(v, Extensions{}) }
+
+// ExecuteWith is Execute for a binary that extends the composition root. It
+// is what pkg-level callers reach through fiberapp; the command tree, flags
+// and exit codes are the same as the fiber command's.
+func ExecuteWith(v Version, ext Extensions) int {
+	root := newRootCmd(v, ext)
 
 	// Signals cancel the command's context rather than killing the process, so
 	// a serve draining its streams and a tag mid-answer both get to finish the
@@ -150,7 +155,7 @@ func Execute(v Version) int {
 	return exitCodeFor(err)
 }
 
-func newRootCmd(v Version) *cobra.Command {
+func newRootCmd(v Version, ext Extensions) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "fiber",
 		Short: "Tag an agent from anywhere; stream its events everywhere",
@@ -171,7 +176,7 @@ func newRootCmd(v Version) *cobra.Command {
 		"Bearer credential ($"+EnvToken+")")
 
 	root.AddCommand(
-		newServeCmd(),
+		newServeCmd(ext),
 		newWorkCmd(),
 		newAgentCmd(),
 		newIndexCmd(),

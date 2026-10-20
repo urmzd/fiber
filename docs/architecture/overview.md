@@ -702,6 +702,7 @@ composition
   pkg/connectors   slack, github, jira, cron, webhook
   internal/server  Connect handlers, SSE, webhook ingress
   internal/cli     command tree and the composition root
+  fiberapp         the composition root's public face, for downstream binaries
 ```
 
 `internal/cli/core.go` is the composition root and the fastest way to understand
