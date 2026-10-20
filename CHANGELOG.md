@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.20.0 (2026-10-20)
+
+### Features
+
+- **fiberapp**: public composition with extension points and a providers file (#36) ([6045747](https://github.com/urmzd/fiber/commit/6045747758eb6ea9c4a9f5a92749ad8352b9ea32))
+
+### Bug Fixes
+
+- **agentrt**: drop a tool group that cannot be expanded, with a warning (#37) ([e9e07c0](https://github.com/urmzd/fiber/commit/e9e07c0a8b919577902740d04c1d9d212a050499))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.19.0...v0.20.0)
+
+
 ## 0.19.0 (2026-10-20)
 
 ### Features
