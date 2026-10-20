@@ -169,11 +169,14 @@ export OPENAI_API_KEY="your-api-key"                # optional for a local serve
 
 Models saige's catalog does not know report their token usage and no cost.
 
-An agent can be granted a connector's tools one by one or as a group:
-`"tools": ["group:github"]` grants every action the GitHub connector
-contributes. The group is expanded each time a run builds the agent, so a new action on that
-connector reaches the agent without a new revision. Approvals still name each
-tool: `"approvals": ["github_comment"]`.
+An agent can be granted an MCP provider's tools as one name:
+`"tools": ["mcp:urmzd"]` grants every tool an admin accepted on the provider
+`urmzd`. The model is shown each member tool (`urmzd__create_issue`), never
+the group, and approvals name members: `"approvals": ["urmzd__create_issue"]`.
+The group is expanded each time a run builds the agent, so a newly accepted
+tool reaches the agent without a new revision. `fiber serve` does not connect
+to MCP servers yet; a host embedding `pkg/agentrt` supplies groups with
+`agentrt.WithToolGroups` or from its tool catalog.
 
 After configuring the GitHub and webhook connectors, route the same agent's
 answer to multiple destinations. Replace the example addresses with yours:

@@ -80,9 +80,9 @@ type AgentSpec struct {
 	// deployment's catalog of connector actions ("jira_transition",
 	// "github_comment"). A name that the deployment does not offer is rejected
 	// at create time rather than silently ignored, so a spec cannot appear to
-	// grant a capability it does not have. An entry "group:<connector>"
-	// ("group:github") grants every action that connector contributes,
-	// expanded when the agent is built. Empty grants no tools.
+	// grant a capability it does not have. An entry "mcp:<provider>"
+	// ("mcp:urmzd") grants every accepted tool of that MCP provider; the
+	// model is shown the member tools, never the group. Empty grants no tools.
 	Tools []string `protobuf:"bytes,6,rep,name=tools,proto3" json:"tools,omitempty"`
 	// Sources are the corpora this agent retrieves from. Retrieval is
 	// grounded and cited: an answer that used a source carries a citation event

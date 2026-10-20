@@ -26,7 +26,7 @@ const specSchema = `{
         "model": {"type": "string", "description": "Model id."},
         "provider": {"type": "string", "description": "Provider name, such as anthropic, openai (also any OpenAI-compatible server), ollama or offline."},
         "system_prompt": {"type": "string", "description": "The agent's instructions."},
-        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"group:<connector>\" grants every action of that connector."},
+        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"mcp:<provider>\" grants every accepted tool of that MCP provider."},
         "sources": {
           "type": "array",
           "description": "Corpora the agent may retrieve from.",

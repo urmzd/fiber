@@ -105,11 +105,12 @@ const (
 	ProviderOffline = "offline"
 )
 
-// ToolGroupPrefix marks an entry of Tools as a tool group: "group:github"
-// grants every action the github connector contributes. It mirrors
-// pkg/agentrt's. Which tools a group holds is a property of a deployment, so
-// a group is expanded when an agent is built, never here.
-const ToolGroupPrefix = "group:"
+// MCPGroupPrefix marks an entry of Tools as a tool group: "mcp:urmzd"
+// grants every tool of the MCP provider named urmzd as one name. It mirrors
+// pkg/agentrt's. Which tools a group holds is a property of a deployment
+// (which tools an admin accepted), so a group is expanded when an agent is
+// built, never here.
+const MCPGroupPrefix = "mcp:"
 
 // KnownProviders returns the built-in provider names, sorted. It returns a
 // fresh slice so a caller extending it cannot edit this package's answer.
@@ -132,7 +133,7 @@ type AgentSpec struct {
 	Access       Access   `json:"access,omitzero"`
 	// Approvals names the tools whose every call waits for a person to
 	// approve it. Each must be a tool the agent is granted: one in Tools, one
-	// in a tool group Tools grants (see ToolGroupPrefix), or the delegation
+	// in a tool group Tools grants (see MCPGroupPrefix), or the delegation
 	// tool "tag_<agent>" of an agent in Access.Spawn. A run
 	// parks on the call and resumes with the person's decision; see the
 	// runtime's "Parking a run on a person".
@@ -365,7 +366,7 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	}
 	groups := false
 	for _, name := range c.Tools {
-		group, ok := strings.CutPrefix(name, ToolGroupPrefix)
+		group, ok := strings.CutPrefix(name, MCPGroupPrefix)
 		if !ok {
 			continue
 		}
@@ -390,7 +391,7 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 		return fmt.Errorf("%w: agent %q names who may approve but requires no approvals", ErrInvalid, c.Name)
 	}
 	for _, name := range c.Approvals {
-		if strings.HasPrefix(name, ToolGroupPrefix) {
+		if strings.HasPrefix(name, MCPGroupPrefix) {
 			return fmt.Errorf("%w: agent %q requires approval for %q, which is a tool group; name each tool that needs approval", ErrInvalid, c.Name, name)
 		}
 		// An approval for a tool the agent cannot call would never be asked,
@@ -404,7 +405,7 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 		// may come from a granted group passes here. Building the agent
 		// checks it against the expanded grant and refuses to run an
 		// approval it cannot enforce, so the guard fails closed either way.
-		if groups && !strings.HasPrefix(name, ToolGroupPrefix) {
+		if groups && !strings.HasPrefix(name, MCPGroupPrefix) {
 			granted = true
 		}
 		if !granted {

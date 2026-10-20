@@ -25,7 +25,8 @@ const (
 	// ProviderOpenAI speaks the OpenAI Chat Completions API: OpenAI itself,
 	// or any server that implements the same API (vLLM, LM Studio, llama.cpp,
 	// OpenRouter, Groq, Together, a gateway) when EnvOpenAIBaseURL points at
-	// it. See OpenAICompatible.
+	// it. It is one OpenAICompatible endpoint; register more with
+	// WithOpenAICompatible.
 	ProviderOpenAI = "openai"
 	// ProviderOffline replays a canned script instead of calling a model.
 	// It is what makes an fiber deployment demonstrable with no API key,
@@ -139,57 +140,100 @@ func ollamaProvider(spec Spec) (saigetypes.Provider, error) {
 	return withRetry(a)
 }
 
-// openaiFromEnv builds the openai provider from EnvOpenAIBaseURL and
-// EnvOpenAIKey, read at build time like every built-in provider.
-func openaiFromEnv(spec Spec) (saigetypes.Provider, error) {
-	base := os.Getenv(EnvOpenAIBaseURL)
-	key := os.Getenv(EnvOpenAIKey)
-	if base == "" && key == "" {
-		return nil, fmt.Errorf("%w: agent %q asks for the %s provider but %s is unset (set %s to use a compatible server instead)",
-			ErrInvalid, spec.Name, ProviderOpenAI, EnvOpenAIKey, EnvOpenAIBaseURL)
-	}
-	return OpenAICompatible(base, key)(spec)
-}
-
-// OpenAICompatible returns a ProviderFunc for a server that speaks the OpenAI
-// Chat Completions API at baseURL, authenticated with key. An empty baseURL is
-// DefaultOpenAIBaseURL; an empty key sends none, which is what a local server
-// expects.
+// OpenAICompatible is a model endpoint that speaks the OpenAI Chat
+// Completions API, registered under a provider name so a spec can ask for it:
+// OpenAI itself, or vLLM, LM Studio, llama.cpp, OpenRouter, Groq, a gateway.
 //
-// The arguments are the whole configuration. OpenAI's SDK also reads
+// The built-in "openai" provider is one of these, configured from
+// EnvOpenAIBaseURL and EnvOpenAIKey. A deployment that talks to more servers
+// registers each under its own name with WithOpenAICompatible:
+//
+//	agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{
+//		Name:    "vllm",
+//		BaseURL: "http://gpu-box:8000/v1",
+//	})
+//
+// The fields are the whole configuration. OpenAI's SDK also reads
 // OPENAI_BASE_URL and OPENAI_API_KEY from the environment, and both are
-// overridden here, so a provider registered for one server never sends the
+// overridden here, so an endpoint registered for one server never sends the
 // OpenAI key to it or follows the environment somewhere else. The SDK's other
 // environment settings (OPENAI_ORG_ID, OPENAI_PROJECT_ID,
 // OPENAI_CUSTOM_HEADERS) still apply to every client in the process; leave
 // them unset in a deployment that also talks to third-party servers.
 //
-// The built-in "openai" provider is this function configured from the
-// environment. A deployment that talks to more than one such server registers
-// each under its own name:
-//
-//	agentrt.WithProvider("vllm", agentrt.OpenAICompatible("http://gpu-box:8000/v1", ""))
-//
-// Two things differ from the Anthropic provider and are worth knowing. There
-// are no cache breakpoints to place: OpenAI caches a request's prefix on its
-// own, which the stable-to-volatile layout already serves, and a compatible
-// server caches or not as it chooses. And a model saige's catalog does not
-// know (most models a compatible server hosts) resolves to conservative
-// capabilities and no price, so its usage reports tokens and no cost.
-func OpenAICompatible(baseURL, key string) ProviderFunc {
+// Two things differ from the Anthropic provider. There are no cache
+// breakpoints to place: OpenAI caches a request's prefix on its own, which the
+// stable-to-volatile layout already serves, and a compatible server caches or
+// not as it chooses. And a model saige's catalog does not know (most models a
+// compatible server hosts) resolves to conservative capabilities and no price,
+// so its usage reports tokens and no cost.
+type OpenAICompatible struct {
+	// Name is the provider name a spec asks for, such as "openai" or
+	// "vllm". Required.
+	Name string
+	// BaseURL is where the API is served, such as
+	// "http://localhost:8000/v1". Empty is DefaultOpenAIBaseURL.
+	BaseURL string
+	// KeyEnv names the environment variable that holds the API key. It is
+	// read when an agent is built, never stored here, so a key rotated in
+	// the environment is picked up by the next run. When it is set the key
+	// is required; when it is empty no key is sent, which is what a local
+	// server expects. OpenAI itself always needs one.
+	KeyEnv string
+}
+
+// WithOpenAICompatible registers each endpoint as a provider under its Name,
+// replacing any provider of that name.
+func WithOpenAICompatible(endpoints ...OpenAICompatible) Option {
+	return func(c *config) {
+		for _, e := range endpoints {
+			if e.Name != "" {
+				c.providers[e.Name] = e.Provider()
+			}
+		}
+	}
+}
+
+// Provider returns the endpoint as a ProviderFunc.
+func (e OpenAICompatible) Provider() ProviderFunc {
 	return func(spec Spec) (saigetypes.Provider, error) {
 		if spec.Model == "" {
-			return nil, fmt.Errorf("%w: agent %q asks for an OpenAI-compatible provider with no model", ErrInvalid, spec.Name)
+			return nil, fmt.Errorf("%w: agent %q asks for the %s provider with no model", ErrInvalid, spec.Name, e.Name)
 		}
-		if baseURL == "" {
-			baseURL = DefaultOpenAIBaseURL
+		base := e.BaseURL
+		if base == "" {
+			base = DefaultOpenAIBaseURL
 		}
-		a, err := openai.New(openai.Config{APIKey: key, Model: saigetypes.ModelID(spec.Model)}, openai.WithBaseURL(baseURL))
+		var key string
+		if e.KeyEnv != "" {
+			if key = os.Getenv(e.KeyEnv); key == "" {
+				return nil, fmt.Errorf("%w: agent %q asks for the %s provider but %s is unset", ErrInvalid, spec.Name, e.Name, e.KeyEnv)
+			}
+		}
+		if key == "" && base == DefaultOpenAIBaseURL {
+			return nil, fmt.Errorf("%w: agent %q asks for the %s provider, which is OpenAI, with no key", ErrInvalid, spec.Name, e.Name)
+		}
+		a, err := openai.New(openai.Config{APIKey: key, Model: saigetypes.ModelID(spec.Model)}, openai.WithBaseURL(base))
 		if err != nil {
 			return nil, fmt.Errorf("%w: agent %q: %v", ErrInvalid, spec.Name, err)
 		}
 		return withRetry(a)
 	}
+}
+
+// openaiFromEnv is the built-in "openai" endpoint, read from the environment
+// at build time like every built-in provider: OpenAI with EnvOpenAIKey, or
+// the compatible server at EnvOpenAIBaseURL, with EnvOpenAIKey if it is set.
+func openaiFromEnv(spec Spec) (saigetypes.Provider, error) {
+	e := OpenAICompatible{Name: ProviderOpenAI, BaseURL: os.Getenv(EnvOpenAIBaseURL), KeyEnv: EnvOpenAIKey}
+	if e.BaseURL != "" && os.Getenv(EnvOpenAIKey) == "" {
+		e.KeyEnv = "" // a local server needs no key
+	}
+	if e.BaseURL == "" && os.Getenv(EnvOpenAIKey) == "" {
+		return nil, fmt.Errorf("%w: agent %q asks for the %s provider but %s is unset (set %s to use a compatible server instead)",
+			ErrInvalid, spec.Name, ProviderOpenAI, EnvOpenAIKey, EnvOpenAIBaseURL)
+	}
+	return e.Provider()(spec)
 }
 
 // withRetry wraps a model adapter in saige's retry decorator. saige's adapters

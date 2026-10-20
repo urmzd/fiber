@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/urmzd/playscape/pkg/controlplane"
@@ -14,6 +15,8 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/runtime"
 )
@@ -48,9 +51,32 @@ func TestCatalogBindsTheActualRunOverCallerContextAndSourceParameters(t *testing
 	}
 }
 
-// A spec granting a connector's tool group reaches that connector's actions
-// through the sandbox, which wraps the deployment catalog for every turn.
-func TestAToolGroupResolvesThroughTheSandbox(t *testing.T) {
+// groupCatalog is a per-turn catalog that resolves no single tools and one
+// MCP tool group, the way a host serving a tenant's MCP providers would.
+type groupCatalog struct{ group agentrt.ToolGroup }
+
+func (groupCatalog) Lookup(name string) (saigetypes.Tool, error) {
+	return nil, fmt.Errorf("%w: %q", agentrt.ErrNoSuchTool, name)
+}
+
+func (c groupCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
+	if name != c.group.Name {
+		return agentrt.ToolGroup{}, fmt.Errorf("%w: %q", agentrt.ErrNoSuchToolGroup, name)
+	}
+	return c.group, nil
+}
+
+// echoTool is an MCP-style tool qualified by its provider.
+type echoTool struct{}
+
+func (echoTool) Definition() saigetypes.ToolDef {
+	return saigetypes.ToolDef{Name: "urmzd__echo", Parameters: saigetypes.ParameterSchema{Type: "object"}}
+}
+func (echoTool) Execute(context.Context, map[string]any) (string, error) { return "echoed", nil }
+
+// A spec granting an MCP provider's tool group reaches its tools through the
+// sandbox, which wraps the deployment catalog for every turn.
+func TestAnMCPToolGroupResolvesThroughTheSandbox(t *testing.T) {
 	ws, err := workspace.NewLocal(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -59,17 +85,14 @@ func TestAToolGroupResolvesThroughTheSandbox(t *testing.T) {
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
 	lead := history.revise("lead", "Lead.")
-	lead.Spec.Tools = []string{"group:identity"}
+	lead.Spec.Tools = []string{agentrt.MCPGroup("urmzd")}
 
-	reg := connector.NewRegistry()
-	if err := reg.Register(&identityActor{}); err != nil {
-		t.Fatal(err)
-	}
+	catalog := groupCatalog{group: agentrt.ToolGroup{Name: agentrt.MCPGroup("urmzd"), Tools: []saigetypes.Tool{echoTool{}}}}
 	s, err := runtime.NewSandbox(plane, tools, history,
-		runtime.WithCatalog(runtime.Connectors(reg)),
+		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) { return catalog, nil }),
 		runtime.WithAgentOptions(scripted(map[string][][]saigetypes.Delta{
 			"lead": {
-				agenttest.ToolCallResponse("call-1", "identity_read", map[string]any{}),
+				agenttest.ToolCallResponse("call-1", "urmzd__echo", map[string]any{}),
 				agenttest.TextResponse("done"),
 			},
 		})))
@@ -83,7 +106,7 @@ func TestAToolGroupResolvesThroughTheSandbox(t *testing.T) {
 	if out.Text != "done" {
 		t.Fatalf("answer = %q", out.Text)
 	}
-	if done := toolResult(t, chunks); done.Result != "run-1" || done.Error != "" {
-		t.Fatalf("tool result = %+v, want identity_read to run under run-1", done)
+	if done := toolResult(t, chunks); done.Result != "echoed" || done.Error != "" {
+		t.Fatalf("tool result = %+v, want the group's member to run", done)
 	}
 }

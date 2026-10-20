@@ -111,7 +111,7 @@ func TestOpenAICompatibleNeverSendsTheEnvironmentKeyElsewhere(t *testing.T) {
 
 	rev := openaiRevision("llama")
 	rev.Spec.Provider = "vllm"
-	r, err := agentrt.New(rev, agentrt.WithProvider("vllm", agentrt.OpenAICompatible(srv.URL, "")))
+	r, err := agentrt.New(rev, agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{Name: "vllm", BaseURL: srv.URL}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -128,12 +128,14 @@ func TestOpenAICompatibleNeverSendsTheEnvironmentKeyElsewhere(t *testing.T) {
 	}
 }
 
-// A provider with a key sends it as a bearer token.
-func TestOpenAICompatibleSendsItsKey(t *testing.T) {
+// An endpoint with a key env var sends that variable's value as a bearer
+// token, read when the agent is built.
+func TestOpenAICompatibleSendsTheKeyFromItsEnvVar(t *testing.T) {
 	srv := newCompatServer(t)
+	t.Setenv("GATEWAY_KEY", "gw-key")
 	rev := openaiRevision("m")
 	rev.Spec.Provider = "gateway"
-	r, err := agentrt.New(rev, agentrt.WithProvider("gateway", agentrt.OpenAICompatible(srv.URL, "gw-key")))
+	r, err := agentrt.New(rev, agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{Name: "gateway", BaseURL: srv.URL, KeyEnv: "GATEWAY_KEY"}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -161,5 +163,17 @@ func TestOpenAIProviderRefusesAnIncompleteConfiguration(t *testing.T) {
 				t.Fatalf("New: %v, want ErrInvalid", err)
 			}
 		})
+	}
+}
+
+// An endpoint that names a key variable needs it set: building without it
+// would only move the failure to the first model call.
+func TestOpenAICompatibleRefusesAKeyVariableThatIsUnset(t *testing.T) {
+	t.Setenv("GATEWAY_KEY", "")
+	rev := openaiRevision("m")
+	rev.Spec.Provider = "gateway"
+	_, err := agentrt.New(rev, agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{Name: "gateway", BaseURL: "http://127.0.0.1:1/v1", KeyEnv: "GATEWAY_KEY"}))
+	if !errors.Is(err, agentrt.ErrInvalid) {
+		t.Fatalf("New: %v, want ErrInvalid", err)
 	}
 }
