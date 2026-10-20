@@ -179,6 +179,10 @@ type Config struct {
 	// the route.
 	Stopper Stopper
 
+	// Compactor asks running turns to compact their history, behind POST
+	// /v1/runs/{id}/compact. Nil disables the route.
+	Compactor Compactor
+
 	// Answerer answers the questions runs are parked on, behind
 	// InvokeService.Answer. Nil disables it.
 	Answerer Answerer
@@ -306,6 +310,7 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("GET /v1/sse", s.handleSSE)
 	s.mux.HandleFunc("POST /v1/blobs", s.handleBlobPut)
 	s.mux.HandleFunc("POST /v1/runs/{id}/stop", s.handleStop(cfg.Stopper))
+	s.mux.HandleFunc("POST /v1/runs/{id}/compact", s.handleCompact(cfg.Compactor))
 	s.mux.HandleFunc("POST /v1/webhooks/{connector}", s.handleWebhook(cfg.Invoker))
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)

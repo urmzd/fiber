@@ -452,6 +452,8 @@ type Runtime struct {
 	stops     StopLedger
 	stopGrace time.Duration
 	stopPoll  time.Duration
+	// compactRequests makes turns listen for requests to compact.
+	compactRequests bool
 
 	// waker wakes a parked run once its question is answered or it is
 	// stopped. Nil leaves it to the worker's janitor.

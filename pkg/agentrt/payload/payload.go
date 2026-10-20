@@ -71,17 +71,43 @@ type ToolCall struct {
 	Name string `json:"name"`
 	// Phase is PhaseRequested or PhaseExecuting.
 	Phase string `json:"phase"`
+	// Arguments are the call's arguments as a compact JSON object. They are
+	// absent while the model is still generating the call (PhaseRequested),
+	// and on any event whose arguments were left out: see ToolArguments.
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// ArgumentsBytes is the size of arguments that were left out for
+	// exceeding the cap, so a reader can tell "left out" from "none".
+	ArgumentsBytes int `json:"arguments_bytes,omitempty"`
 }
+
+// MaxToolArguments bounds the arguments a tool event carries, in bytes of
+// compact JSON. Arguments over it are left out whole, never cut, because a
+// cut JSON object is not JSON, and ArgumentsBytes reports their size instead.
+//
+// Arguments are model output addressed to a tool, and can hold anything the
+// model saw: file contents, a customer's message, a credential it was shown.
+// They travel on the run's stream to every subscriber and every route, so
+// the cap keeps one call from flooding a stream, and a deployment that must
+// keep some arguments off the bus scrubs them before they are published
+// (agentrt.WithToolArguments).
+const MaxToolArguments = 8 << 10
 
 // ToolDone is the body of envelope.KindToolDone: a tool execution finished.
 // Error is set when the tool failed; Result is then the failure text the model
 // was shown, because the model always sees something and an auditor should see
 // the same thing.
+//
+// Arguments are the arguments the tool ran with, which can differ from the
+// ones the model asked for when a person edited them on approval. They follow
+// the rules on ToolCall.Arguments.
 type ToolDone struct {
 	ID     string `json:"id"`
 	Name   string `json:"name,omitempty"`
 	Result string `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// Arguments and ArgumentsBytes are as on ToolCall.
+	Arguments      json.RawMessage `json:"arguments,omitempty"`
+	ArgumentsBytes int             `json:"arguments_bytes,omitempty"`
 }
 
 // Provenance locates the source a citation came from, well enough to follow.
@@ -314,6 +340,19 @@ type StopRequest struct {
 	By string `json:"by,omitempty"`
 	// At is when the request was made.
 	At time.Time `json:"at,omitzero"`
+}
+
+// CompactRequest is the body of envelope.KindCompact: a request that one run
+// compact its history before its next model call. Like StopRequest it is
+// published to the run's control topic, never to the run's own.
+type CompactRequest struct {
+	// RunID is the run asked. It repeats what the topic says, and a request
+	// whose body disagrees with its topic is not obeyed.
+	RunID string `json:"run_id"`
+	// By is who asked. Optional.
+	By string `json:"by,omitempty"`
+	// At is when it was asked.
+	At time.Time `json:"at"`
 }
 
 // Action is the body of envelope.KindActionTaken: a connector's native verb
@@ -683,9 +722,9 @@ func (u Usage) CacheReadRatio() float64 {
 	return float64(u.CachedPromptTokens) / float64(u.PromptTokens)
 }
 
-// Compaction records one time a turn replaced the older part of its history
-// with a summary. Like Usage it has no envelope.Kind yet and is returned to
-// the caller of the turn.
+// Compaction is the body of envelope.KindCompacted: one time a turn replaced
+// the older part of its history with a summary. The turn's caller also gets
+// every record back (agentrt.Result.Compactions).
 //
 // It exists because a compaction is the one point where a run's request prefix
 // is rewritten: the prompt cache misses once and the model continues from a
@@ -695,8 +734,12 @@ func (u Usage) CacheReadRatio() float64 {
 type Compaction struct {
 	// Trigger is why it ran: "input_pressure" when the input crossed the
 	// budget, "context_length" when the provider rejected the request as too
-	// long.
+	// long, "requested" when a host asked.
 	Trigger string `json:"trigger,omitempty"`
+	// By is who asked, for a compaction that answered a host's request. A
+	// request that coincided with a provider's rejection keeps Trigger
+	// "context_length" and still names who asked.
+	By string `json:"by,omitempty"`
 	// Strategy is the compaction strategy that ran.
 	Strategy string `json:"strategy,omitempty"`
 	// TokensBefore and TokensAfter are the estimated size of the
@@ -771,6 +814,10 @@ func Of(e envelope.Event) (body any, known bool, err error) {
 		return decodeOr[UsageCall](e)
 	case envelope.KindUsageChild:
 		return decodeOr[UsageChild](e)
+	case envelope.KindCompacted:
+		return decodeOr[Compaction](e)
+	case envelope.KindCompact:
+		return decodeOr[CompactRequest](e)
 	default:
 		return json.RawMessage(e.Payload), false, nil
 	}

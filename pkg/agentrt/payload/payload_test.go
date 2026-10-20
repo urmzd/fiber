@@ -24,6 +24,10 @@ func TestEveryKindSurvivesEncodeDecode(t *testing.T) {
 		{"text", envelope.KindText, payload.Text{Text: "hello"}},
 		{"thinking", envelope.KindThinking, payload.Thinking{Text: "considering"}},
 		{"tool call", envelope.KindToolCall, payload.ToolCall{ID: "call_1", Name: "grep", Phase: payload.PhaseExecuting}},
+		{"tool call with arguments", envelope.KindToolCall, payload.ToolCall{ID: "call_1", Name: "grep", Phase: payload.PhaseExecuting, Arguments: json.RawMessage(`{"path":"."}`)}},
+		{"tool done with arguments left out", envelope.KindToolDone, payload.ToolDone{ID: "call_1", Name: "write", Result: "ok", ArgumentsBytes: 9000}},
+		{"compacted", envelope.KindCompacted, payload.Compaction{Trigger: "requested", By: "slack:U1", Strategy: "summary", TokensBefore: 900, TokensAfter: 200, Summarized: 6, Kept: 3}},
+		{"compact request", envelope.KindCompact, payload.CompactRequest{RunID: "r0123", By: "slack:U1"}},
 		{"tool done", envelope.KindToolDone, payload.ToolDone{ID: "call_1", Name: "grep", Result: "3 hits"}},
 		{"tool failed", envelope.KindToolDone, payload.ToolDone{ID: "call_1", Name: "grep", Error: "no such file"}},
 		{"citation", envelope.KindCitation, payload.Citation{

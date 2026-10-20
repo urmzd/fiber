@@ -71,6 +71,14 @@ const (
 	// EnvCompactTokens is the input size, in tokens, above which a run's
 	// history is compacted. Unset or zero never compacts.
 	EnvCompactTokens = "FIBER_COMPACT_TOKENS"
+	// EnvCompactKeepTurns is how many recent tool-calling turns a
+	// compaction keeps verbatim. Unset or zero takes
+	// agentrt.DefaultKeepTurns.
+	EnvCompactKeepTurns = "FIBER_COMPACT_KEEP_TURNS"
+	// EnvCompactOnRequest, when true, lets a host ask a running turn to
+	// compact (POST /v1/runs/{id}/compact). Unset or false ignores
+	// requests.
+	EnvCompactOnRequest = "FIBER_COMPACT_ON_REQUEST"
 
 	// EnvWorkspace is the directory agent artifacts are written under. Unset
 	// takes a directory under the user's cache.
@@ -104,8 +112,13 @@ type coreConfig struct {
 	AuthorProvider, AuthorModel string
 
 	// CompactTokens is the history size that triggers compaction. Zero never
-	// compacts.
+	// compacts on its own.
 	CompactTokens int
+	// CompactKeepTurns is how many recent turns a compaction keeps. Zero
+	// takes the default.
+	CompactKeepTurns int
+	// CompactOnRequest lets a host ask a running turn to compact.
+	CompactOnRequest bool
 
 	// Workspace is where the sandbox writes agent artifacts.
 	Workspace string
@@ -178,7 +191,7 @@ func newCore(cfg coreConfig) (*core, error) {
 
 	// The broker. Runs publish here; the router, every subscriber, and every
 	// SSE client read from here. Nothing else connects them.
-	broker, closeBus, err := newBus(cfg.Redis, cfg.Concurrency)
+	broker, closeBus, err := newBus(cfg.Redis, cfg.Concurrency, controlStreams(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -294,6 +307,12 @@ func newCore(cfg coreConfig) (*core, error) {
 		// record, not the run's transcripts.
 		rtOpts = append(rtOpts, runtime.WithRecordReader(durable.NewRecords(pool)))
 	}
+	if cfg.CompactOnRequest {
+		// The agents take requests to compact (see the sandbox below), so
+		// their turns listen for them. Each listening turn holds a second
+		// control subscription, which newBus sized the pool for.
+		rtOpts = append(rtOpts, runtime.WithCompactRequests())
+	}
 	rt, err := runtime.New(anchor.New(c.ledger, c.queue), registry.NewSpecs(c.store), broker, exec, rtOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("cli: runtime: %w", err)
@@ -322,7 +341,7 @@ func (c *core) close() error {
 // publishes wait for a connection, and a publish that times out fails the
 // turn. So unless the URL sets pool_size, the pool is go-redis's default plus
 // one connection per run this process executes at once.
-func newBus(redisURL string, concurrency int) (bus.Bus, func() error, error) {
+func newBus(redisURL string, concurrency, perRun int) (bus.Bus, func() error, error) {
 	if strings.TrimSpace(redisURL) == "" {
 		return bus.NewMemory(), nil, nil
 	}
@@ -330,7 +349,7 @@ func newBus(redisURL string, concurrency int) (bus.Bus, func() error, error) {
 	if err != nil {
 		return nil, nil, usagef("$%s is not a redis URL: %v", EnvRedis, err)
 	}
-	opts.PoolSize = redisPoolSize(redisURL, opts.PoolSize, concurrency)
+	opts.PoolSize = redisPoolSize(redisURL, opts.PoolSize, concurrency, perRun)
 	client := redis.NewClient(opts)
 	return bus.NewRedis(client), client.Close, nil
 }
@@ -499,8 +518,12 @@ func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, fil
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), rec)
 
 	agentOpts := []agentrt.Option{agentrt.WithAttachments(resolve.New(files))}
-	if cfg.CompactTokens > 0 {
-		agentOpts = append(agentOpts, agentrt.WithCompaction(agentrt.Compaction{MaxInputTokens: cfg.CompactTokens}))
+	if cfg.CompactTokens > 0 || cfg.CompactOnRequest {
+		agentOpts = append(agentOpts, agentrt.WithCompaction(agentrt.Compaction{
+			MaxInputTokens: cfg.CompactTokens,
+			KeepTurns:      cfg.CompactKeepTurns,
+			OnRequest:      cfg.CompactOnRequest,
+		}))
 	}
 
 	exec, err := runtime.NewSandbox(plane, tools, registry.NewSpecs(store),
@@ -627,6 +650,19 @@ func (c *core) Stop(ctx context.Context, req server.StopRequest) error {
 	case errors.Is(err, runtime.ErrInvalid):
 		return fmt.Errorf("%w: %w", server.ErrInvalid, err)
 	case errors.Is(err, runtime.ErrStopUnavailable):
+		return fmt.Errorf("%w: %w", server.ErrUnimplemented, err)
+	}
+	return err
+}
+
+// Compact asks a run's running turn to compact its history. It satisfies
+// server.Compactor. See runtime.Runtime.Compact for what a nil error means.
+func (c *core) Compact(ctx context.Context, req server.CompactRequest) error {
+	err := c.rt.Compact(ctx, runtime.CompactRequest{Tenant: req.Tenant, RunID: req.RunID, By: req.By})
+	switch {
+	case errors.Is(err, runtime.ErrInvalid):
+		return fmt.Errorf("%w: %w", server.ErrInvalid, err)
+	case errors.Is(err, runtime.ErrCompactUnavailable):
 		return fmt.Errorf("%w: %w", server.ErrUnimplemented, err)
 	}
 	return err
@@ -801,11 +837,21 @@ func (g *group) wait(grace time.Duration) error {
 }
 
 // redisPoolSize is the connection pool newBus asks for: what the URL says when
-// it says, otherwise go-redis's default of ten per CPU plus one per run this
-// process may execute at once.
-func redisPoolSize(redisURL string, fromURL, concurrency int) int {
+// it says, otherwise go-redis's default of ten per CPU plus perRun for each
+// run this process may execute at once.
+func redisPoolSize(redisURL string, fromURL, concurrency, perRun int) int {
 	if strings.Contains(redisURL, "pool_size=") && fromURL > 0 {
 		return fromURL
 	}
-	return 10*goruntime.GOMAXPROCS(0) + max(concurrency, 1)
+	return 10*goruntime.GOMAXPROCS(0) + max(concurrency, 1)*max(perRun, 1)
+}
+
+// controlStreams is how many control subscriptions a running turn holds for
+// the whole turn: one for stop requests, and one for requests to compact when
+// the deployment takes them.
+func controlStreams(cfg coreConfig) int {
+	if cfg.CompactOnRequest {
+		return 2
+	}
+	return 1
 }
