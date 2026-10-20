@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.17.0 (2026-10-20)
+
+### Features
+
+- model fallbacks with fallback conditions, and per-call approvals (#32) ([0d43e9b](https://github.com/urmzd/fiber/commit/0d43e9b72b0b6e948ce81681df7664e381b93db2))
+
+### Bug Fixes
+
+- **runtime**: forward per-call approval through the host call tool (#33) ([aa7cc4c](https://github.com/urmzd/fiber/commit/aa7cc4c0105f67ebb981511d6ee8e60546edf21b))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.16.0...v0.17.0)
+
+
 ## 0.16.0 (2026-10-20)
 
 ### Features
