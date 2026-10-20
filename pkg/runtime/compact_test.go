@@ -51,7 +51,7 @@ func (l *listener) Execute(ctx context.Context, req runtime.Request, _ func(cont
 func TestARequestToCompactReachesOnlyTheTurnRunningNowUnderItsTenant(t *testing.T) {
 	w := newWorld(t)
 	exec := newListener()
-	rt := w.runtime(t, exec)
+	rt := w.runtime(t, exec, runtime.WithCompactRequests())
 
 	runID := w.accept(t, rt, tag("docs-bot", "evt-1", "explain"))
 	compact := func(tenant, by string) {
@@ -93,7 +93,7 @@ func TestCompactRefusesWhatItCannotCarry(t *testing.T) {
 	}
 
 	w := newWorld(t)
-	rt := w.runtime(t, newPatient())
+	rt := w.runtime(t, newPatient(), runtime.WithCompactRequests())
 	for _, id := range []string{"", "has:colon"} {
 		if err := rt.Compact(context.Background(), runtime.CompactRequest{Tenant: "acme", RunID: id}); !errors.Is(err, runtime.ErrInvalid) {
 			t.Errorf("Compact(%q) = %v, want ErrInvalid", id, err)
@@ -198,7 +198,7 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 			agentrt.WithMaxIter(40),
 			agentrt.WithCompaction(agentrt.Compaction{OnRequest: true, KeepTurns: 1}),
 		))
-	rt := w.runtime(t, exec)
+	rt := w.runtime(t, exec, runtime.WithCompactRequests())
 	w.work(t, rt, nil)
 
 	runID := w.accept(t, rt, tag("docs-bot", "evt-1", "look it up"))
@@ -307,7 +307,7 @@ func TestARequestToCompactIsRelayedOnceAcrossAReconnect(t *testing.T) {
 	broker := &droppingBus{Bus: newBroker(t), resubscribed: make(chan struct{})}
 	w := newWorldOn(t, broker)
 	exec := &counting{waiting: make(chan struct{}), heard: make(chan agentrt.CompactRequest, 8), finish: make(chan struct{})}
-	rt := w.runtime(t, exec)
+	rt := w.runtime(t, exec, runtime.WithCompactRequests())
 	w.work(t, rt, nil)
 
 	runID := w.accept(t, rt, tag("docs-bot", "evt-1", "explain"))
@@ -336,4 +336,126 @@ func TestARequestToCompactIsRelayedOnceAcrossAReconnect(t *testing.T) {
 	}
 	close(exec.finish)
 	w.result(t, rt, runID)
+}
+
+// subscriptionCounter is a bus that counts the control subscriptions open at
+// once, by verb, and the most of each it ever saw.
+type subscriptionCounter struct {
+	bus.Bus
+	mu   sync.Mutex
+	open map[string]int
+	peak map[string]int
+}
+
+func (c *subscriptionCounter) Subscribe(ctx context.Context, sub envelope.Subscription) (bus.Stream, error) {
+	s, err := c.Bus.Subscribe(ctx, sub)
+	if err != nil || !sub.Topic.IsControl() {
+		return s, err
+	}
+	verb, _, _ := strings.Cut(strings.TrimPrefix(sub.Topic.String(), "agent:_control:"), "-")
+	c.mu.Lock()
+	c.open[verb]++
+	c.peak[verb] = max(c.peak[verb], c.open[verb])
+	c.mu.Unlock()
+	return &countedStream{Stream: s, done: func() {
+		c.mu.Lock()
+		c.open[verb]--
+		c.mu.Unlock()
+	}}, nil
+}
+
+func (c *subscriptionCounter) peakOf(verb string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.peak[verb]
+}
+
+type countedStream struct {
+	bus.Stream
+	once sync.Once
+	done func()
+}
+
+func (s *countedStream) Close() error {
+	s.once.Do(s.done)
+	return s.Stream.Close()
+}
+
+// held is an executor whose turns all wait until the test releases them.
+type held struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (h *held) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+	h.started <- struct{}{}
+	select {
+	case <-h.release:
+		return runtime.Outcome{Text: "done", Prompt: req.Text}, nil
+	case <-ctx.Done():
+		return runtime.Outcome{}, ctx.Err()
+	}
+}
+
+// What a running turn holds on the bus for its whole length, which is what
+// a Redis pool has to reserve per run: a subscription for stop requests, and
+// one for requests to compact only when the runtime takes them. A runtime that
+// does not take them holds no second subscription and refuses Compact.
+func TestARunningTurnListensForCompactionOnlyWhenTheRuntimeTakesRequests(t *testing.T) {
+	const runs = 3
+	for _, tc := range []struct {
+		name        string
+		opts        []runtime.Option
+		wantCompact int
+	}{
+		{"requests are not taken", nil, 0},
+		{"requests are taken", []runtime.Option{runtime.WithCompactRequests()}, runs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &subscriptionCounter{Bus: newBroker(t), open: map[string]int{}, peak: map[string]int{}}
+			w := newWorldOn(t, counter)
+			w.concurrency = runs
+			exec := &held{started: make(chan struct{}, runs), release: make(chan struct{})}
+			rt := w.runtime(t, exec, tc.opts...)
+			w.work(t, rt, nil)
+
+			ids := make([]string, runs)
+			for i := range ids {
+				ids[i] = w.accept(t, rt, tag("docs-bot", fmt.Sprintf("evt-%d", i), "explain"))
+			}
+			for range runs {
+				select {
+				case <-exec.started:
+				case <-time.After(20 * time.Second):
+					t.Fatal("not every turn started")
+				}
+			}
+			err := rt.Compact(context.Background(), runtime.CompactRequest{Tenant: "acme", RunID: ids[0]})
+			if tc.wantCompact == 0 && !errors.Is(err, runtime.ErrCompactUnavailable) {
+				t.Errorf("Compact = %v, want ErrCompactUnavailable from a runtime that does not take requests", err)
+			}
+			if tc.wantCompact > 0 && err != nil {
+				t.Errorf("Compact = %v", err)
+			}
+			// The listeners subscribe as each turn begins; give the last
+			// one a moment to be counted.
+			deadline := time.Now().Add(5 * time.Second)
+			for counter.peakOf("stop") < runs && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			for counter.peakOf("compact") < tc.wantCompact && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			close(exec.release)
+			for _, id := range ids {
+				w.result(t, rt, id)
+			}
+			if got := counter.peakOf("stop"); got != runs {
+				t.Errorf("%d stop subscriptions were open at once, want one per running turn (%d)", got, runs)
+			}
+			if got := counter.peakOf("compact"); got != tc.wantCompact {
+				t.Errorf("%d compact subscriptions were open at once, want %d", got, tc.wantCompact)
+			}
+		})
+	}
 }
