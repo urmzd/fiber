@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.0 (2026-10-20)
+
+### Features
+
+- **mcptools**: expand mcp:<provider>[:write] grants from the tool provider store (#35) ([55b362a](https://github.com/urmzd/fiber/commit/55b362aa4107f814208cabeaf146f9704169ca21))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.18.0...v0.19.0)
+
+
 ## 0.18.0 (2026-10-20)
 
 ### Features
