@@ -1108,6 +1108,16 @@ func (t *hostCallTool) Execute(ctx context.Context, args map[string]any) (string
 	defer done()
 	return t.Tool.Execute(ctx, args)
 }
+
+// Approval forwards a per-call approval to the tool the host wraps, so a host
+// call tool that decides per call who must approve it still asks.
+func (t *hostCallTool) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
+	if approving, ok := t.Tool.(agentrt.Approving); ok {
+		return approving.Approval(call)
+	}
+	return agentrt.ApprovalRequest{}, false
+}
+
 func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
 	if awaiting, ok := t.Tool.(agentrt.Awaiting); ok {
 		return awaiting.AwaitQuestion(call)
