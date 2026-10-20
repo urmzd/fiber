@@ -23,7 +23,8 @@ import (
 // part of its history now, rather than wait for the deployment's budget. The
 // turn compacts before its next model call, exactly as the budget would have
 // made it, and publishes context.compacted with Trigger "requested" and who
-// asked. The deployment has to take requests: agentrt.Compaction.OnRequest,
+// asked. The deployment has to take requests: WithCompactRequests on the
+// runtime and agentrt.Compaction.OnRequest on its agents,
 // FIBER_COMPACT_ON_REQUEST in the binary.
 //
 // # How the request reaches the turn
@@ -53,10 +54,23 @@ import (
 // compactVerb names the compaction stream within a run's control topics.
 const compactVerb = "compact"
 
-// ErrCompactUnavailable reports a runtime that cannot carry requests to
-// compact: its bus can be published to and not subscribed to, so no turn it
-// executes could hear one.
+// ErrCompactUnavailable reports a runtime that does not carry requests to
+// compact: it was built without WithCompactRequests, or its bus can be
+// published to and not subscribed to, so no turn it executes could hear one.
 var ErrCompactUnavailable = errors.New("runtime: compaction on request is not available")
+
+// WithCompactRequests makes every turn listen for requests to compact, and
+// Compact publish them. Pass it with agentrt.Compaction.OnRequest on the
+// executor's agents: one without the other either listens for requests no
+// turn obeys, or obeys requests no turn hears.
+//
+// Listening costs one bus subscription per running turn, beside the one for
+// stop requests; on Redis that is a pooled connection held for the turn. A
+// runtime without the option holds none and Compact refuses with
+// ErrCompactUnavailable.
+func WithCompactRequests() Option {
+	return func(r *Runtime) { r.compactRequests = true }
+}
 
 // CompactRequest asks one run to compact its history.
 type CompactRequest struct {
@@ -94,8 +108,12 @@ func CompactTopic(tenant, runID string) (topic.Topic, error) {
 // context.compacted event if the turn compacted.
 //
 // It returns ErrInvalid for a request that names no run and
-// ErrCompactUnavailable when this runtime's bus cannot be subscribed to.
+// ErrCompactUnavailable when this runtime does not take requests
+// (WithCompactRequests) or its bus cannot be subscribed to.
 func (r *Runtime) Compact(ctx context.Context, req CompactRequest) error {
+	if !r.compactRequests {
+		return fmt.Errorf("%w: this runtime was built without WithCompactRequests", ErrCompactUnavailable)
+	}
 	if r.control == nil {
 		return fmt.Errorf("%w: the bus this runtime was built with cannot be subscribed to", ErrCompactUnavailable)
 	}
@@ -138,7 +156,7 @@ func CompactSignal(ctx context.Context) <-chan agentrt.CompactRequest {
 // listenCompact puts a CompactSignal on ctx and relays to it the requests to
 // compact this run made from now until release is called.
 func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (context.Context, func()) {
-	if r.control == nil {
+	if !r.compactRequests || r.control == nil {
 		return ctx, func() {}
 	}
 	tp, err := CompactTopic(in.Tag.Tenant, runID)
