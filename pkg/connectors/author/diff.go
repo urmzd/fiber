@@ -71,6 +71,9 @@ func renderSpec(s agentspec.AgentSpec) []string {
 		"model: " + s.Model,
 		"provider: " + s.Provider,
 	}
+	for _, fb := range s.Fallbacks {
+		lines = append(lines, "fallback: "+fb.Provider+" "+fb.Model)
+	}
 	for _, t := range s.Tools {
 		lines = append(lines, "tool: "+t)
 	}

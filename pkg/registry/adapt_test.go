@@ -30,6 +30,7 @@ func serverSpec(name, prompt string) server.Spec {
 		Tools:        []string{"search", "fetch"},
 		Sources:      []server.Source{{Name: "handbook", URI: "s3://h", Options: map[string]string{"k": "v"}}},
 		Access:       server.Access{Spawn: []string{"linter"}, WorkspaceAreas: []string{"docs/"}},
+		Fallbacks:    []server.ModelRef{{Provider: " Ollama ", Model: "llama4"}, {Provider: agentspec.ProviderOffline, Model: "scripted"}},
 	}
 }
 
@@ -57,6 +58,7 @@ func TestServerStoreRoundTripsEveryField(t *testing.T) {
 		Tools:        []string{"fetch", "search"},
 		Sources:      []server.Source{{Name: "handbook", URI: "s3://h", Options: map[string]string{"k": "v"}}},
 		Access:       server.Access{Spawn: []string{"linter"}, WorkspaceAreas: []string{"docs/"}},
+		Fallbacks:    []server.ModelRef{{Provider: agentspec.ProviderOllama, Model: "llama4"}, {Provider: agentspec.ProviderOffline, Model: "scripted"}},
 	}
 	if !reflect.DeepEqual(created.Spec, want) {
 		t.Fatalf("stored spec =\n%+v\nwant\n%+v", created.Spec, want)
@@ -194,7 +196,9 @@ func TestSpecsResolvesPinnedRevisionsForever(t *testing.T) {
 	store := registry.NewMemory()
 	specs := registry.NewSpecs(store)
 
-	if _, err := store.Create(ctx, tenantA, spec("docs-bot", "v1"), "ada"); err != nil {
+	first := spec("docs-bot", "v1")
+	first.Fallbacks = []agentspec.ModelRef{{Provider: agentspec.ProviderOllama, Model: "llama4"}}
+	if _, err := store.Create(ctx, tenantA, first, "ada"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	pinned, err := specs.Latest(ctx, tenantA, "docs-bot")
@@ -216,6 +220,7 @@ func TestSpecsResolvesPinnedRevisionsForever(t *testing.T) {
 		Tools:        []string{"search"},
 		Sources:      []agentrt.Source{{Name: "handbook", URI: "s3://h", Options: map[string]string{"k": "v"}}},
 		Access:       agentrt.Access{Spawn: []string{"linter"}, WorkspaceAreas: []string{"docs/"}},
+		Fallbacks:    []agentrt.ModelRef{{Provider: agentspec.ProviderOllama, Model: "llama4"}},
 	}
 	if !reflect.DeepEqual(pinned.Spec, want) {
 		t.Fatalf("resolved spec =\n%+v\nwant\n%+v", pinned.Spec, want)

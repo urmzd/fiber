@@ -99,6 +99,16 @@ func (s AgentSpec) Hash() string {
 		writeString(h, "answerers")
 		writeStrings(h, c.Answerers)
 	}
+	// Fallbacks are hashed the same way, and in their own order: it is the
+	// order they are tried in, so reordering them is an edit.
+	if len(c.Fallbacks) > 0 {
+		writeString(h, "fallbacks")
+		writeCount(h, len(c.Fallbacks))
+		for _, fb := range c.Fallbacks {
+			writeString(h, fb.Provider)
+			writeString(h, fb.Model)
+		}
+	}
 	return HashAlgorithm + ":" + hex.EncodeToString(h.Sum(nil))
 }
 

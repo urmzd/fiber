@@ -27,10 +27,17 @@ type Spec struct {
 	Tools        []string
 	Sources      []Source
 	Access       Access
+	Fallbacks    []ModelRef
 	Approvals    []string
 	Approvers    []string
 	SelfApproval bool
 	Answerers    []string
+}
+
+// ModelRef names one model behind one provider: one of a spec's fallbacks.
+type ModelRef struct {
+	Provider string
+	Model    string
 }
 
 // Source names one corpus an agent retrieves from.

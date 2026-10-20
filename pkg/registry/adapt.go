@@ -139,6 +139,9 @@ func fromServerSpec(s server.Spec) agentspec.AgentSpec {
 			Options: src.Options,
 		})
 	}
+	for _, fb := range s.Fallbacks {
+		out.Fallbacks = append(out.Fallbacks, agentspec.ModelRef{Provider: fb.Provider, Model: fb.Model})
+	}
 	// The store owns its memory, and this spec's slices belong to whoever
 	// decoded the request. Normalize copies every one of them, so the store
 	// never holds a slice the edge can still write to.
@@ -168,6 +171,9 @@ func toServerSpec(s agentspec.AgentSpec) server.Spec {
 			URI:     src.URI,
 			Options: src.Options,
 		})
+	}
+	for _, fb := range s.Fallbacks {
+		out.Fallbacks = append(out.Fallbacks, server.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	return out
 }
@@ -241,6 +247,9 @@ func toRuntimeRevision(r agentspec.Revision) agentrt.Revision {
 			URI:     src.URI,
 			Options: src.Options,
 		})
+	}
+	for _, fb := range r.Spec.Fallbacks {
+		spec.Fallbacks = append(spec.Fallbacks, agentrt.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	return agentrt.Revision{
 		Spec:      spec,

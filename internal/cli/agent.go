@@ -52,6 +52,7 @@ type specFile struct {
 	Description  string            `json:"description,omitempty"`
 	Model        string            `json:"model,omitempty"`
 	Provider     string            `json:"provider,omitempty"`
+	Fallbacks    []specFileModel   `json:"fallbacks,omitempty"`
 	SystemPrompt string            `json:"system_prompt"`
 	Tools        []string          `json:"tools,omitempty"`
 	Approvals    []string          `json:"approvals,omitempty"`
@@ -61,6 +62,11 @@ type specFile struct {
 	Sources      []specFileSource  `json:"sources,omitempty"`
 	Access       specFileAccess    `json:"access,omitempty"`
 	Meta         map[string]string `json:"meta,omitempty"`
+}
+
+type specFileModel struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 type specFileSource struct {
@@ -104,6 +110,9 @@ func loadSpec(path string) (*mandatumv1.AgentSpec, error) {
 			Spawn:          f.Access.Spawn,
 			WorkspaceAreas: f.Access.WorkspaceAreas,
 		},
+	}
+	for _, fb := range f.Fallbacks {
+		spec.Fallbacks = append(spec.Fallbacks, &mandatumv1.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	for _, s := range f.Sources {
 		spec.Sources = append(spec.Sources, &mandatumv1.Source{
@@ -383,6 +392,9 @@ func printRevisionFull(u *ui, r *mandatumv1.Revision) error {
 	}
 	u.printf("  provider     %s\n", s.GetProvider())
 	u.printf("  model        %s\n", s.GetModel())
+	for _, fb := range s.GetFallbacks() {
+		u.printf("  fallback     %s %s\n", fb.GetProvider(), fb.GetModel())
+	}
 	if len(s.GetTools()) > 0 {
 		u.printf("  tools        %v\n", s.GetTools())
 	}
@@ -422,6 +434,10 @@ func revisionMap(r *mandatumv1.Revision) map[string]any {
 			"name": src.GetName(), "uri": src.GetUri(), "options": src.GetOptions(),
 		})
 	}
+	fallbacks := make([]map[string]any, 0, len(s.GetFallbacks()))
+	for _, fb := range s.GetFallbacks() {
+		fallbacks = append(fallbacks, map[string]any{"provider": fb.GetProvider(), "model": fb.GetModel()})
+	}
 	m := map[string]any{
 		"name":          s.GetName(),
 		"rev":           r.GetRev(),
@@ -429,6 +445,7 @@ func revisionMap(r *mandatumv1.Revision) map[string]any {
 		"description":   s.GetDescription(),
 		"provider":      s.GetProvider(),
 		"model":         s.GetModel(),
+		"fallbacks":     fallbacks,
 		"system_prompt": s.GetSystemPrompt(),
 		"tools":         s.GetTools(),
 		"approvals":     s.GetApprovals(),

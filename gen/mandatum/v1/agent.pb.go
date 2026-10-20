@@ -109,7 +109,16 @@ type AgentSpec struct {
 	// Answerers, when set, are the only people who may answer a choice or a
 	// reply the agent asks, named as approvers are. Empty lets anyone in the
 	// tenant answer.
-	Answerers     []string `protobuf:"bytes,12,rep,name=answerers,proto3" json:"answerers,omitempty"`
+	Answerers []string `protobuf:"bytes,12,rep,name=answerers,proto3" json:"answerers,omitempty"`
+	// Fallbacks are the models tried, in order, when a call to the primary
+	// (provider and model) fails with an error another model could fix: an
+	// outage, a rate limit, a refused credential. A request the provider
+	// rejected as invalid, a cancelled run, or an exhausted budget does not
+	// fall through. Each names a provider this deployment knows and a model,
+	// none repeats the primary or another fallback, and there are at most
+	// four. Order is content: reordering them is a new revision. Empty means
+	// the primary alone.
+	Fallbacks     []*ModelRef `protobuf:"bytes,13,rep,name=fallbacks,proto3" json:"fallbacks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -228,6 +237,69 @@ func (x *AgentSpec) GetAnswerers() []string {
 	return nil
 }
 
+func (x *AgentSpec) GetFallbacks() []*ModelRef {
+	if x != nil {
+		return x.Fallbacks
+	}
+	return nil
+}
+
+// ModelRef names one model behind one provider. The fields mean exactly what
+// AgentSpec.provider and AgentSpec.model mean.
+type ModelRef struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Provider selects the LLM backend, as AgentSpec.provider does.
+	Provider string `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Model is the provider-specific model identifier.
+	Model         string `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModelRef) Reset() {
+	*x = ModelRef{}
+	mi := &file_mandatum_v1_agent_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModelRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModelRef) ProtoMessage() {}
+
+func (x *ModelRef) ProtoReflect() protoreflect.Message {
+	mi := &file_mandatum_v1_agent_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModelRef.ProtoReflect.Descriptor instead.
+func (*ModelRef) Descriptor() ([]byte, []int) {
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *ModelRef) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *ModelRef) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
 // Source names one corpus an agent retrieves from.
 //
 // It is a message rather than a bare string because a citation has to be able
@@ -250,7 +322,7 @@ type Source struct {
 
 func (x *Source) Reset() {
 	*x = Source{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[1]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -262,7 +334,7 @@ func (x *Source) String() string {
 func (*Source) ProtoMessage() {}
 
 func (x *Source) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[1]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -275,7 +347,7 @@ func (x *Source) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Source.ProtoReflect.Descriptor instead.
 func (*Source) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{1}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Source) GetName() string {
@@ -324,7 +396,7 @@ type Access struct {
 
 func (x *Access) Reset() {
 	*x = Access{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[2]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -336,7 +408,7 @@ func (x *Access) String() string {
 func (*Access) ProtoMessage() {}
 
 func (x *Access) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[2]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -349,7 +421,7 @@ func (x *Access) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Access.ProtoReflect.Descriptor instead.
 func (*Access) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{2}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Access) GetSpawn() []string {
@@ -396,7 +468,7 @@ type Revision struct {
 
 func (x *Revision) Reset() {
 	*x = Revision{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[3]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -408,7 +480,7 @@ func (x *Revision) String() string {
 func (*Revision) ProtoMessage() {}
 
 func (x *Revision) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[3]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -421,7 +493,7 @@ func (x *Revision) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Revision.ProtoReflect.Descriptor instead.
 func (*Revision) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{3}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Revision) GetSpec() *AgentSpec {
@@ -470,7 +542,7 @@ type CreateAgentRequest struct {
 
 func (x *CreateAgentRequest) Reset() {
 	*x = CreateAgentRequest{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[4]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -482,7 +554,7 @@ func (x *CreateAgentRequest) String() string {
 func (*CreateAgentRequest) ProtoMessage() {}
 
 func (x *CreateAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[4]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -495,7 +567,7 @@ func (x *CreateAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateAgentRequest.ProtoReflect.Descriptor instead.
 func (*CreateAgentRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{4}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *CreateAgentRequest) GetSpec() *AgentSpec {
@@ -516,7 +588,7 @@ type CreateAgentResponse struct {
 
 func (x *CreateAgentResponse) Reset() {
 	*x = CreateAgentResponse{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[5]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -528,7 +600,7 @@ func (x *CreateAgentResponse) String() string {
 func (*CreateAgentResponse) ProtoMessage() {}
 
 func (x *CreateAgentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[5]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -541,7 +613,7 @@ func (x *CreateAgentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateAgentResponse.ProtoReflect.Descriptor instead.
 func (*CreateAgentResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{5}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CreateAgentResponse) GetRevision() *Revision {
@@ -568,7 +640,7 @@ type ReviseAgentRequest struct {
 
 func (x *ReviseAgentRequest) Reset() {
 	*x = ReviseAgentRequest{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[6]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -580,7 +652,7 @@ func (x *ReviseAgentRequest) String() string {
 func (*ReviseAgentRequest) ProtoMessage() {}
 
 func (x *ReviseAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[6]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -593,7 +665,7 @@ func (x *ReviseAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReviseAgentRequest.ProtoReflect.Descriptor instead.
 func (*ReviseAgentRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{6}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ReviseAgentRequest) GetSpec() *AgentSpec {
@@ -621,7 +693,7 @@ type ReviseAgentResponse struct {
 
 func (x *ReviseAgentResponse) Reset() {
 	*x = ReviseAgentResponse{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[7]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -633,7 +705,7 @@ func (x *ReviseAgentResponse) String() string {
 func (*ReviseAgentResponse) ProtoMessage() {}
 
 func (x *ReviseAgentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[7]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -646,7 +718,7 @@ func (x *ReviseAgentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReviseAgentResponse.ProtoReflect.Descriptor instead.
 func (*ReviseAgentResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{7}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ReviseAgentResponse) GetRevision() *Revision {
@@ -672,7 +744,7 @@ type GetAgentRequest struct {
 
 func (x *GetAgentRequest) Reset() {
 	*x = GetAgentRequest{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[8]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -684,7 +756,7 @@ func (x *GetAgentRequest) String() string {
 func (*GetAgentRequest) ProtoMessage() {}
 
 func (x *GetAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[8]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -697,7 +769,7 @@ func (x *GetAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAgentRequest.ProtoReflect.Descriptor instead.
 func (*GetAgentRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetAgentRequest) GetName() string {
@@ -725,7 +797,7 @@ type GetAgentResponse struct {
 
 func (x *GetAgentResponse) Reset() {
 	*x = GetAgentResponse{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[9]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -737,7 +809,7 @@ func (x *GetAgentResponse) String() string {
 func (*GetAgentResponse) ProtoMessage() {}
 
 func (x *GetAgentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[9]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -750,7 +822,7 @@ func (x *GetAgentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAgentResponse.ProtoReflect.Descriptor instead.
 func (*GetAgentResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetAgentResponse) GetRevision() *Revision {
@@ -774,7 +846,7 @@ type ListAgentsRequest struct {
 
 func (x *ListAgentsRequest) Reset() {
 	*x = ListAgentsRequest{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[10]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -786,7 +858,7 @@ func (x *ListAgentsRequest) String() string {
 func (*ListAgentsRequest) ProtoMessage() {}
 
 func (x *ListAgentsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[10]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -799,7 +871,7 @@ func (x *ListAgentsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAgentsRequest.ProtoReflect.Descriptor instead.
 func (*ListAgentsRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ListAgentsRequest) GetPageSize() uint32 {
@@ -830,7 +902,7 @@ type ListAgentsResponse struct {
 
 func (x *ListAgentsResponse) Reset() {
 	*x = ListAgentsResponse{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[11]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -842,7 +914,7 @@ func (x *ListAgentsResponse) String() string {
 func (*ListAgentsResponse) ProtoMessage() {}
 
 func (x *ListAgentsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[11]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -855,7 +927,7 @@ func (x *ListAgentsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAgentsResponse.ProtoReflect.Descriptor instead.
 func (*ListAgentsResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListAgentsResponse) GetAgents() []*Revision {
@@ -883,7 +955,7 @@ type GetAgentHistoryRequest struct {
 
 func (x *GetAgentHistoryRequest) Reset() {
 	*x = GetAgentHistoryRequest{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[12]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -895,7 +967,7 @@ func (x *GetAgentHistoryRequest) String() string {
 func (*GetAgentHistoryRequest) ProtoMessage() {}
 
 func (x *GetAgentHistoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[12]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -908,7 +980,7 @@ func (x *GetAgentHistoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAgentHistoryRequest.ProtoReflect.Descriptor instead.
 func (*GetAgentHistoryRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetAgentHistoryRequest) GetName() string {
@@ -931,7 +1003,7 @@ type GetAgentHistoryResponse struct {
 
 func (x *GetAgentHistoryResponse) Reset() {
 	*x = GetAgentHistoryResponse{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[13]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -943,7 +1015,7 @@ func (x *GetAgentHistoryResponse) String() string {
 func (*GetAgentHistoryResponse) ProtoMessage() {}
 
 func (x *GetAgentHistoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[13]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -956,7 +1028,7 @@ func (x *GetAgentHistoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAgentHistoryResponse.ProtoReflect.Descriptor instead.
 func (*GetAgentHistoryResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetAgentHistoryResponse) GetRevisions() []*Revision {
@@ -977,7 +1049,7 @@ type DeleteAgentRequest struct {
 
 func (x *DeleteAgentRequest) Reset() {
 	*x = DeleteAgentRequest{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[14]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -989,7 +1061,7 @@ func (x *DeleteAgentRequest) String() string {
 func (*DeleteAgentRequest) ProtoMessage() {}
 
 func (x *DeleteAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[14]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1002,7 +1074,7 @@ func (x *DeleteAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAgentRequest.ProtoReflect.Descriptor instead.
 func (*DeleteAgentRequest) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DeleteAgentRequest) GetName() string {
@@ -1021,7 +1093,7 @@ type DeleteAgentResponse struct {
 
 func (x *DeleteAgentResponse) Reset() {
 	*x = DeleteAgentResponse{}
-	mi := &file_mandatum_v1_agent_proto_msgTypes[15]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1033,7 +1105,7 @@ func (x *DeleteAgentResponse) String() string {
 func (*DeleteAgentResponse) ProtoMessage() {}
 
 func (x *DeleteAgentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mandatum_v1_agent_proto_msgTypes[15]
+	mi := &file_mandatum_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1046,14 +1118,14 @@ func (x *DeleteAgentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAgentResponse.ProtoReflect.Descriptor instead.
 func (*DeleteAgentResponse) Descriptor() ([]byte, []int) {
-	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_mandatum_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 var File_mandatum_v1_agent_proto protoreflect.FileDescriptor
 
 const file_mandatum_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x17mandatum/v1/agent.proto\x12\vmandatum.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8f\x03\n" +
+	"\x17mandatum/v1/agent.proto\x12\vmandatum.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc4\x03\n" +
 	"\tAgentSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x14\n" +
@@ -1067,7 +1139,11 @@ const file_mandatum_v1_agent_proto_rawDesc = "" +
 	"\tapprovers\x18\n" +
 	" \x03(\tR\tapprovers\x12#\n" +
 	"\rself_approval\x18\v \x01(\bR\fselfApproval\x12\x1c\n" +
-	"\tanswerers\x18\f \x03(\tR\tanswerersJ\x04\b\r\x10\x19\"\xac\x01\n" +
+	"\tanswerers\x18\f \x03(\tR\tanswerers\x123\n" +
+	"\tfallbacks\x18\r \x03(\v2\x15.mandatum.v1.ModelRefR\tfallbacksJ\x04\b\x0e\x10\x19\"<\n" +
+	"\bModelRef\x12\x1a\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x14\n" +
+	"\x05model\x18\x02 \x01(\tR\x05model\"\xac\x01\n" +
 	"\x06Source\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03uri\x18\x02 \x01(\tR\x03uri\x12:\n" +
@@ -1147,57 +1223,59 @@ func file_mandatum_v1_agent_proto_rawDescGZIP() []byte {
 	return file_mandatum_v1_agent_proto_rawDescData
 }
 
-var file_mandatum_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_mandatum_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_mandatum_v1_agent_proto_goTypes = []any{
 	(*AgentSpec)(nil),               // 0: mandatum.v1.AgentSpec
-	(*Source)(nil),                  // 1: mandatum.v1.Source
-	(*Access)(nil),                  // 2: mandatum.v1.Access
-	(*Revision)(nil),                // 3: mandatum.v1.Revision
-	(*CreateAgentRequest)(nil),      // 4: mandatum.v1.CreateAgentRequest
-	(*CreateAgentResponse)(nil),     // 5: mandatum.v1.CreateAgentResponse
-	(*ReviseAgentRequest)(nil),      // 6: mandatum.v1.ReviseAgentRequest
-	(*ReviseAgentResponse)(nil),     // 7: mandatum.v1.ReviseAgentResponse
-	(*GetAgentRequest)(nil),         // 8: mandatum.v1.GetAgentRequest
-	(*GetAgentResponse)(nil),        // 9: mandatum.v1.GetAgentResponse
-	(*ListAgentsRequest)(nil),       // 10: mandatum.v1.ListAgentsRequest
-	(*ListAgentsResponse)(nil),      // 11: mandatum.v1.ListAgentsResponse
-	(*GetAgentHistoryRequest)(nil),  // 12: mandatum.v1.GetAgentHistoryRequest
-	(*GetAgentHistoryResponse)(nil), // 13: mandatum.v1.GetAgentHistoryResponse
-	(*DeleteAgentRequest)(nil),      // 14: mandatum.v1.DeleteAgentRequest
-	(*DeleteAgentResponse)(nil),     // 15: mandatum.v1.DeleteAgentResponse
-	nil,                             // 16: mandatum.v1.Source.OptionsEntry
-	(*timestamppb.Timestamp)(nil),   // 17: google.protobuf.Timestamp
+	(*ModelRef)(nil),                // 1: mandatum.v1.ModelRef
+	(*Source)(nil),                  // 2: mandatum.v1.Source
+	(*Access)(nil),                  // 3: mandatum.v1.Access
+	(*Revision)(nil),                // 4: mandatum.v1.Revision
+	(*CreateAgentRequest)(nil),      // 5: mandatum.v1.CreateAgentRequest
+	(*CreateAgentResponse)(nil),     // 6: mandatum.v1.CreateAgentResponse
+	(*ReviseAgentRequest)(nil),      // 7: mandatum.v1.ReviseAgentRequest
+	(*ReviseAgentResponse)(nil),     // 8: mandatum.v1.ReviseAgentResponse
+	(*GetAgentRequest)(nil),         // 9: mandatum.v1.GetAgentRequest
+	(*GetAgentResponse)(nil),        // 10: mandatum.v1.GetAgentResponse
+	(*ListAgentsRequest)(nil),       // 11: mandatum.v1.ListAgentsRequest
+	(*ListAgentsResponse)(nil),      // 12: mandatum.v1.ListAgentsResponse
+	(*GetAgentHistoryRequest)(nil),  // 13: mandatum.v1.GetAgentHistoryRequest
+	(*GetAgentHistoryResponse)(nil), // 14: mandatum.v1.GetAgentHistoryResponse
+	(*DeleteAgentRequest)(nil),      // 15: mandatum.v1.DeleteAgentRequest
+	(*DeleteAgentResponse)(nil),     // 16: mandatum.v1.DeleteAgentResponse
+	nil,                             // 17: mandatum.v1.Source.OptionsEntry
+	(*timestamppb.Timestamp)(nil),   // 18: google.protobuf.Timestamp
 }
 var file_mandatum_v1_agent_proto_depIdxs = []int32{
-	1,  // 0: mandatum.v1.AgentSpec.sources:type_name -> mandatum.v1.Source
-	2,  // 1: mandatum.v1.AgentSpec.access:type_name -> mandatum.v1.Access
-	16, // 2: mandatum.v1.Source.options:type_name -> mandatum.v1.Source.OptionsEntry
-	0,  // 3: mandatum.v1.Revision.spec:type_name -> mandatum.v1.AgentSpec
-	17, // 4: mandatum.v1.Revision.created_at:type_name -> google.protobuf.Timestamp
-	0,  // 5: mandatum.v1.CreateAgentRequest.spec:type_name -> mandatum.v1.AgentSpec
-	3,  // 6: mandatum.v1.CreateAgentResponse.revision:type_name -> mandatum.v1.Revision
-	0,  // 7: mandatum.v1.ReviseAgentRequest.spec:type_name -> mandatum.v1.AgentSpec
-	3,  // 8: mandatum.v1.ReviseAgentResponse.revision:type_name -> mandatum.v1.Revision
-	3,  // 9: mandatum.v1.GetAgentResponse.revision:type_name -> mandatum.v1.Revision
-	3,  // 10: mandatum.v1.ListAgentsResponse.agents:type_name -> mandatum.v1.Revision
-	3,  // 11: mandatum.v1.GetAgentHistoryResponse.revisions:type_name -> mandatum.v1.Revision
-	4,  // 12: mandatum.v1.AgentService.CreateAgent:input_type -> mandatum.v1.CreateAgentRequest
-	6,  // 13: mandatum.v1.AgentService.ReviseAgent:input_type -> mandatum.v1.ReviseAgentRequest
-	8,  // 14: mandatum.v1.AgentService.GetAgent:input_type -> mandatum.v1.GetAgentRequest
-	10, // 15: mandatum.v1.AgentService.ListAgents:input_type -> mandatum.v1.ListAgentsRequest
-	12, // 16: mandatum.v1.AgentService.GetAgentHistory:input_type -> mandatum.v1.GetAgentHistoryRequest
-	14, // 17: mandatum.v1.AgentService.DeleteAgent:input_type -> mandatum.v1.DeleteAgentRequest
-	5,  // 18: mandatum.v1.AgentService.CreateAgent:output_type -> mandatum.v1.CreateAgentResponse
-	7,  // 19: mandatum.v1.AgentService.ReviseAgent:output_type -> mandatum.v1.ReviseAgentResponse
-	9,  // 20: mandatum.v1.AgentService.GetAgent:output_type -> mandatum.v1.GetAgentResponse
-	11, // 21: mandatum.v1.AgentService.ListAgents:output_type -> mandatum.v1.ListAgentsResponse
-	13, // 22: mandatum.v1.AgentService.GetAgentHistory:output_type -> mandatum.v1.GetAgentHistoryResponse
-	15, // 23: mandatum.v1.AgentService.DeleteAgent:output_type -> mandatum.v1.DeleteAgentResponse
-	18, // [18:24] is the sub-list for method output_type
-	12, // [12:18] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	2,  // 0: mandatum.v1.AgentSpec.sources:type_name -> mandatum.v1.Source
+	3,  // 1: mandatum.v1.AgentSpec.access:type_name -> mandatum.v1.Access
+	1,  // 2: mandatum.v1.AgentSpec.fallbacks:type_name -> mandatum.v1.ModelRef
+	17, // 3: mandatum.v1.Source.options:type_name -> mandatum.v1.Source.OptionsEntry
+	0,  // 4: mandatum.v1.Revision.spec:type_name -> mandatum.v1.AgentSpec
+	18, // 5: mandatum.v1.Revision.created_at:type_name -> google.protobuf.Timestamp
+	0,  // 6: mandatum.v1.CreateAgentRequest.spec:type_name -> mandatum.v1.AgentSpec
+	4,  // 7: mandatum.v1.CreateAgentResponse.revision:type_name -> mandatum.v1.Revision
+	0,  // 8: mandatum.v1.ReviseAgentRequest.spec:type_name -> mandatum.v1.AgentSpec
+	4,  // 9: mandatum.v1.ReviseAgentResponse.revision:type_name -> mandatum.v1.Revision
+	4,  // 10: mandatum.v1.GetAgentResponse.revision:type_name -> mandatum.v1.Revision
+	4,  // 11: mandatum.v1.ListAgentsResponse.agents:type_name -> mandatum.v1.Revision
+	4,  // 12: mandatum.v1.GetAgentHistoryResponse.revisions:type_name -> mandatum.v1.Revision
+	5,  // 13: mandatum.v1.AgentService.CreateAgent:input_type -> mandatum.v1.CreateAgentRequest
+	7,  // 14: mandatum.v1.AgentService.ReviseAgent:input_type -> mandatum.v1.ReviseAgentRequest
+	9,  // 15: mandatum.v1.AgentService.GetAgent:input_type -> mandatum.v1.GetAgentRequest
+	11, // 16: mandatum.v1.AgentService.ListAgents:input_type -> mandatum.v1.ListAgentsRequest
+	13, // 17: mandatum.v1.AgentService.GetAgentHistory:input_type -> mandatum.v1.GetAgentHistoryRequest
+	15, // 18: mandatum.v1.AgentService.DeleteAgent:input_type -> mandatum.v1.DeleteAgentRequest
+	6,  // 19: mandatum.v1.AgentService.CreateAgent:output_type -> mandatum.v1.CreateAgentResponse
+	8,  // 20: mandatum.v1.AgentService.ReviseAgent:output_type -> mandatum.v1.ReviseAgentResponse
+	10, // 21: mandatum.v1.AgentService.GetAgent:output_type -> mandatum.v1.GetAgentResponse
+	12, // 22: mandatum.v1.AgentService.ListAgents:output_type -> mandatum.v1.ListAgentsResponse
+	14, // 23: mandatum.v1.AgentService.GetAgentHistory:output_type -> mandatum.v1.GetAgentHistoryResponse
+	16, // 24: mandatum.v1.AgentService.DeleteAgent:output_type -> mandatum.v1.DeleteAgentResponse
+	19, // [19:25] is the sub-list for method output_type
+	13, // [13:19] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_mandatum_v1_agent_proto_init() }
@@ -1211,7 +1289,7 @@ func file_mandatum_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mandatum_v1_agent_proto_rawDesc), len(file_mandatum_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

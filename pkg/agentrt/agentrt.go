@@ -296,8 +296,11 @@ type Result struct {
 // is safe for concurrent use only insofar as its provider and tools are; each
 // turn gets its own conversation tree.
 type Runner struct {
-	rev       Revision
-	provider  saigetypes.Provider
+	rev      Revision
+	provider saigetypes.Provider
+	// models are the providers behind provider, primary first: provider
+	// itself when the spec names no fallbacks. Usage is priced per member.
+	models    []saigetypes.Provider
 	tools     *saigetypes.ToolRegistry
 	retriever Retriever
 	files     *resolve.Resolver
@@ -430,12 +433,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		cfg.providers[ProviderAnthropic] = anthropicProvider(cfg.promptCache)
 	}
 
-	newProvider, ok := cfg.providers[rev.Spec.Provider]
-	if !ok || newProvider == nil {
-		return nil, fmt.Errorf("%w: agent %q revision %d names provider %q; this deployment has %v",
-			ErrInvalid, rev.Spec.Name, rev.Rev, rev.Spec.Provider, providerNames(cfg.providers))
-	}
-	provider, err := newProvider(rev.Spec)
+	provider, models, err := cfg.modelChain(rev)
 	if err != nil {
 		return nil, err
 	}
@@ -494,6 +492,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	return &Runner{
 		rev:        rev,
 		provider:   provider,
+		models:     models,
 		tools:      tools,
 		retriever:  cfg.retriever,
 		files:      cfg.files,
@@ -648,7 +647,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 	}
 
 	stream := agent.Invoke(ctx, input)
-	accounts := newAccountant(t.Accounting, r.rev.Spec.Name, r.rev.Spec.Model, r.provider)
+	accounts := newAccountant(t.Accounting, r.rev.Spec.Name, r.rev.Spec.Model, r.provider, r.models...)
 
 	// The stop request is applied from its own goroutine, because this one is
 	// busy draining the stream and saige's Stop is safe to call from anywhere.

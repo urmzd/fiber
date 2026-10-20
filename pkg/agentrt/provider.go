@@ -8,6 +8,7 @@ import (
 
 	"github.com/urmzd/saige/agent/agenttest"
 	"github.com/urmzd/saige/agent/provider/anthropic"
+	"github.com/urmzd/saige/agent/provider/fallback"
 	"github.com/urmzd/saige/agent/provider/ollama"
 	"github.com/urmzd/saige/agent/provider/openai"
 	"github.com/urmzd/saige/agent/provider/retry"
@@ -234,6 +235,65 @@ func openaiFromEnv(spec Spec) (saigetypes.Provider, error) {
 			ErrInvalid, spec.Name, ProviderOpenAI, EnvOpenAIKey, EnvOpenAIBaseURL)
 	}
 	return e.Provider()(spec)
+}
+
+// modelChain builds the provider a revision's turns call, and the members
+// behind it, primary first.
+//
+// Each model, the primary and every fallback, is built through the same
+// provider table from a copy of the spec that names that model alone, so a
+// ProviderFunc builds one model and never sees the policy around it. A
+// fallback this process cannot build fails the build exactly as the primary
+// would: an agent that reads as having a safety net and silently does not is
+// worse than one that does not start.
+//
+// With fallbacks the members are composed with saige's fallback provider
+// under its default rule (fallback.DefaultFallbackOn): a call moves on to the
+// next model on an outage, a rate limit, an auth or context-length failure,
+// and stops on a cancelled run, an invalid request, or an exhausted budget,
+// which no other model can fix. Each built-in member already retries its own
+// transient failures, so a member is given up on only once its retries are
+// spent. A stream that fails after it has delivered output is not replayed
+// on another model, since that would duplicate what the run already
+// published.
+func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Provider, error) {
+	refs := make([]ModelRef, 0, 1+len(rev.Spec.Fallbacks))
+	refs = append(refs, ModelRef{Provider: rev.Spec.Provider, Model: rev.Spec.Model})
+	refs = append(refs, rev.Spec.Fallbacks...)
+	members := make([]saigetypes.Provider, 0, len(refs))
+	for i, ref := range refs {
+		newProvider, ok := c.providers[ref.Provider]
+		if !ok || newProvider == nil {
+			if i == 0 {
+				return nil, nil, fmt.Errorf("%w: agent %q revision %d names provider %q; this deployment has %v",
+					ErrInvalid, rev.Spec.Name, rev.Rev, ref.Provider, providerNames(c.providers))
+			}
+			return nil, nil, fmt.Errorf("%w: agent %q revision %d fallback %d names provider %q; this deployment has %v",
+				ErrInvalid, rev.Spec.Name, rev.Rev, i, ref.Provider, providerNames(c.providers))
+		}
+		spec := rev.Spec
+		spec.Provider, spec.Model, spec.Fallbacks = ref.Provider, ref.Model, nil
+		p, err := newProvider(spec)
+		if err != nil {
+			if i == 0 {
+				return nil, nil, err
+			}
+			return nil, nil, fmt.Errorf("agentrt: agent %q revision %d fallback %d (%s %q): %w",
+				rev.Spec.Name, rev.Rev, i, ref.Provider, ref.Model, err)
+		}
+		if p == nil {
+			return nil, nil, fmt.Errorf("%w: agent %q revision %d: provider %q built no model", ErrInvalid, rev.Spec.Name, rev.Rev, ref.Provider)
+		}
+		members = append(members, p)
+	}
+	if len(members) == 1 {
+		return members[0], members, nil
+	}
+	chain, err := fallback.Of(members...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentrt: agent %q revision %d: fallback: %w", rev.Spec.Name, rev.Rev, err)
+	}
+	return chain, members, nil
 }
 
 // withRetry wraps a model adapter in saige's retry decorator. saige's adapters

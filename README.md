@@ -169,6 +169,27 @@ export OPENAI_API_KEY="your-api-key"                # optional for a local serve
 
 Models saige's catalog does not know report their token usage and no cost.
 
+An agent can name fallback models, tried in order when a call to its primary
+model fails with an error another model could fix (an outage, a rate limit, a
+refused credential):
+
+```json
+"fallbacks": [
+  {"provider": "openai", "model": "gpt-5"},
+  {"provider": "ollama", "model": "llama4"}
+]
+```
+
+Each fallback names a provider the deployment knows and a model, none repeats
+the primary or another fallback, and there are at most four. An invalid
+request, a stopped run or an exhausted budget does not fall through, and a
+stream that already produced output is not replayed on another model. Every
+fallback is built with the agent, so one whose provider is not configured
+(say, `OPENAI_API_KEY` is unset) fails the build like the primary would. Each
+call is priced on the rate card of the model that answered it. Order is part
+of the revision: reordering fallbacks is an edit. A spec without fallbacks
+hashes exactly as it did before they existed.
+
 An agent can be granted an MCP provider's tools as one name:
 `"tools": ["mcp:urmzd"]` grants every tool an admin accepted on the provider
 `urmzd`. The model is shown each member tool (`urmzd__create_issue`), never

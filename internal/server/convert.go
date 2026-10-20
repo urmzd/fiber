@@ -276,6 +276,9 @@ func specFromProto(p *mandatumv1.AgentSpec) (Spec, error) {
 	if a := p.GetAccess(); a != nil {
 		s.Access = Access{Spawn: a.GetSpawn(), WorkspaceAreas: a.GetWorkspaceAreas()}
 	}
+	for _, fb := range p.GetFallbacks() {
+		s.Fallbacks = append(s.Fallbacks, ModelRef{Provider: fb.GetProvider(), Model: fb.GetModel()})
+	}
 	return s, nil
 }
 
@@ -299,6 +302,9 @@ func specToProto(s Spec) *mandatumv1.AgentSpec {
 			Uri:     src.URI,
 			Options: src.Options,
 		})
+	}
+	for _, fb := range s.Fallbacks {
+		p.Fallbacks = append(p.Fallbacks, &mandatumv1.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	return p
 }

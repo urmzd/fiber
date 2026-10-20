@@ -41,6 +41,8 @@
 //   - Tools, spawn grants, workspace areas and sources are sets, not
 //     sequences: nothing downstream consumes them in order, so they are sorted.
 //     A reordered tool list is not an edit.
+//   - Fallback models are the exception: they are tried in the order given,
+//     so their order is content and is kept.
 //
 // Hash then digests the canonical form with a length-prefixed encoding
 // described in hash.go. Together they give the property the registry depends
@@ -112,6 +114,12 @@ const (
 // built, never here.
 const MCPGroupPrefix = "mcp:"
 
+// MaxFallbacks bounds how many models an agent may fall back to. Every
+// fallback is a client built with the agent and a model that may answer for
+// it, so the list is a policy, not a search: a short one an operator can
+// reason about. Four alternates is already five models a run may land on.
+const MaxFallbacks = 4
+
 // KnownProviders returns the built-in provider names, sorted. It returns a
 // fresh slice so a caller extending it cannot edit this package's answer.
 func KnownProviders() []string {
@@ -131,6 +139,15 @@ type AgentSpec struct {
 	Tools        []string `json:"tools,omitempty"`
 	Sources      []Source `json:"sources,omitempty"`
 	Access       Access   `json:"access,omitzero"`
+	// Fallbacks are the models tried, in order, when a model call to the
+	// primary (Provider and Model) fails with an error another model could
+	// fix: an outage, a rate limit, a refused credential. A request the
+	// provider rejected as invalid, a cancelled run, or an exhausted budget
+	// does not fall through. Each is built with the agent, so a fallback
+	// this deployment cannot construct fails the build like the primary
+	// would. Empty means the primary alone, which is what every revision
+	// written before fallbacks existed means too.
+	Fallbacks []ModelRef `json:"fallbacks,omitempty"`
 	// Approvals names the tools whose every call waits for a person to
 	// approve it. Each must be a tool the agent is granted: one in Tools, one
 	// in a tool group Tools grants (see MCPGroupPrefix), or the delegation
@@ -151,6 +168,14 @@ type AgentSpec struct {
 	// a reply the agent asks with ask_person, named as Approvers are. Empty
 	// lets anyone in the tenant answer, the requester included.
 	Answerers []string `json:"answerers,omitempty"`
+}
+
+// ModelRef names one model behind one provider: a fallback for the agent's
+// primary model. The two fields mean exactly what AgentSpec.Provider and
+// AgentSpec.Model mean.
+type ModelRef struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in. Options are
@@ -245,6 +270,7 @@ func (r Revision) Clone() Revision {
 // Clone returns a deep copy of the definition.
 func (s AgentSpec) Clone() AgentSpec {
 	s.Tools = slices.Clone(s.Tools)
+	s.Fallbacks = slices.Clone(s.Fallbacks)
 	s.Approvals = slices.Clone(s.Approvals)
 	s.Approvers = slices.Clone(s.Approvers)
 	s.Answerers = slices.Clone(s.Answerers)
@@ -272,7 +298,8 @@ func NormalizeName(name string) string {
 // Normalize returns the canonical form of the definition: names lower-cased,
 // free text trimmed, set-valued fields sorted, and empty collections collapsed
 // to nil so that a spec decoded from JSON with "tools": [] is the same
-// definition as one without the field.
+// definition as one without the field. Fallbacks are a sequence, not a set:
+// their order is the order they are tried in, so it is kept.
 //
 // It never reports an error and never drops content, including content
 // Validate will reject. Dropping an empty tool name here would make the
@@ -286,6 +313,7 @@ func (s AgentSpec) Normalize() AgentSpec {
 		Provider:     NormalizeName(s.Provider),
 		SystemPrompt: strings.TrimSpace(s.SystemPrompt),
 		Tools:        normalizeSet(s.Tools, false),
+		Fallbacks:    normalizeFallbacks(s.Fallbacks),
 		Approvals:    normalizeSet(s.Approvals, false),
 		Approvers:    normalizeSet(s.Approvers, false),
 		SelfApproval: s.SelfApproval,
@@ -360,6 +388,9 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	}
 	if !slices.ContainsFunc(providers, func(p string) bool { return strings.EqualFold(p, c.Provider) }) {
 		return fmt.Errorf("%w: agent %q names provider %q; this deployment knows %s", ErrInvalid, c.Name, c.Provider, list(providers))
+	}
+	if err := validFallbacks(c, providers); err != nil {
+		return err
 	}
 	if err := uniqueNonEmpty("tool", c.Name, c.Tools); err != nil {
 		return err
@@ -436,6 +467,53 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 		seen[src.Name] = struct{}{}
 	}
 	return nil
+}
+
+// validFallbacks holds every fallback to the rules the primary model is held
+// to (a provider this deployment knows, and a model), bounds the list, and
+// refuses a repeat: a fallback identical to the primary or to an earlier
+// fallback would only send the same failing request again, which is the retry
+// decorator's job, not the policy's. c is canonical.
+func validFallbacks(c AgentSpec, providers []string) error {
+	if len(c.Fallbacks) > MaxFallbacks {
+		return fmt.Errorf("%w: agent %q names %d fallback models, the limit is %d", ErrInvalid, c.Name, len(c.Fallbacks), MaxFallbacks)
+	}
+	seen := make(map[ModelRef]int, len(c.Fallbacks)+1)
+	seen[ModelRef{Provider: c.Provider, Model: c.Model}] = 0
+	for i, fb := range c.Fallbacks {
+		n := i + 1
+		switch {
+		case fb.Provider == "":
+			return fmt.Errorf("%w: agent %q fallback %d names no provider", ErrInvalid, c.Name, n)
+		case fb.Model == "":
+			return fmt.Errorf("%w: agent %q fallback %d (provider %q) names no model", ErrInvalid, c.Name, n, fb.Provider)
+		}
+		if !slices.ContainsFunc(providers, func(p string) bool { return strings.EqualFold(p, fb.Provider) }) {
+			return fmt.Errorf("%w: agent %q fallback %d names provider %q; this deployment knows %s", ErrInvalid, c.Name, n, fb.Provider, list(providers))
+		}
+		if prev, dup := seen[fb]; dup {
+			what := "the primary model"
+			if prev > 0 {
+				what = fmt.Sprintf("fallback %d", prev)
+			}
+			return fmt.Errorf("%w: agent %q fallback %d (%s %q) repeats %s", ErrInvalid, c.Name, n, fb.Provider, fb.Model, what)
+		}
+		seen[fb] = n
+	}
+	return nil
+}
+
+// normalizeFallbacks trims each fallback and lower-cases its provider the way
+// the primary's is, keeping the order and collapsing an empty list to nil.
+func normalizeFallbacks(fallbacks []ModelRef) []ModelRef {
+	if len(fallbacks) == 0 {
+		return nil
+	}
+	out := make([]ModelRef, 0, len(fallbacks))
+	for _, fb := range fallbacks {
+		out = append(out, ModelRef{Provider: NormalizeName(fb.Provider), Model: strings.TrimSpace(fb.Model)})
+	}
+	return out
 }
 
 // uniqueNonEmpty enforces the two rules every set-valued field shares. The

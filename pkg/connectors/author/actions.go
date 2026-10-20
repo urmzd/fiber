@@ -25,6 +25,18 @@ const specSchema = `{
         "description": {"type": "string", "description": "One line on what the agent is for."},
         "model": {"type": "string", "description": "Model id."},
         "provider": {"type": "string", "description": "Provider name, such as anthropic, openai (also any OpenAI-compatible server), ollama or offline."},
+        "fallbacks": {
+          "type": "array",
+          "description": "Models tried in order when the primary model fails with an outage, rate limit or auth error. At most 4, none repeating the primary or each other.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "provider": {"type": "string"},
+              "model": {"type": "string"}
+            },
+            "required": ["provider", "model"]
+          }
+        },
         "system_prompt": {"type": "string", "description": "The agent's instructions."},
         "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"mcp:<provider>\" grants every accepted tool of that MCP provider."},
         "sources": {
