@@ -281,7 +281,9 @@ func TestMetadataRendersInAStableOrder(t *testing.T) {
 }
 
 // A definition this deployment cannot honour must fail at construction, not
-// halfway through a conversation.
+// halfway through a conversation. A granted tool it cannot resolve is such a
+// definition only under WithStrictTools; otherwise it is dropped (see
+// TestAnUnresolvableToolIsDroppedAndTheModelIsTold).
 func TestConstructionRefusesWhatItCannotRun(t *testing.T) {
 	t.Parallel()
 
@@ -307,7 +309,7 @@ func TestConstructionRefusesWhatItCannotRun(t *testing.T) {
 				r.Spec.Tools = []string{"jira_transition"}
 				return r
 			}(),
-			opts: []agentrt.Option{agentrt.WithTools(agentrt.StaticTools())},
+			opts: []agentrt.Option{agentrt.WithTools(agentrt.StaticTools()), agentrt.WithStrictTools()},
 		},
 		{
 			name: "a tool with no catalog at all",
@@ -316,6 +318,7 @@ func TestConstructionRefusesWhatItCannotRun(t *testing.T) {
 				r.Spec.Tools = []string{"jira_transition"}
 				return r
 			}(),
+			opts: []agentrt.Option{agentrt.WithStrictTools()},
 		},
 	}
 	for _, tc := range tests {

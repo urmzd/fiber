@@ -19,7 +19,8 @@ import (
 // agent definition runs in a process with a Jira connector and in one without,
 // and which of those is an error is a deployment decision, not a definition
 // one. Lookup therefore returns an error rather than a bool, so the message can
-// say what was missing.
+// say what was missing. Any error makes the tool unavailable to the run (see
+// Runner.Unavailable); the error is the reason the operator is shown.
 type Tools interface {
 	Lookup(name string) (saigetypes.Tool, error)
 }

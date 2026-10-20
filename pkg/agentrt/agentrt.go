@@ -120,6 +120,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -291,8 +292,11 @@ type Result struct {
 // Runner runs turns of one pinned revision.
 //
 // Construction validates everything a turn needs — the provider exists and is
-// configured, every tool the spec names is resolvable — so a run fails at accept
-// time with a clear reason instead of halfway through a Slack thread. A Runner
+// configured, every approval names a granted tool — so a run fails at accept
+// time with a clear reason instead of halfway through a Slack thread. A granted
+// tool this process cannot resolve is the exception: it is dropped, the model
+// is told, and the operator is logged the reason (see Unavailable), unless the
+// runner is built WithStrictTools. A Runner
 // is safe for concurrent use only insofar as its provider and tools are; each
 // turn gets its own conversation tree.
 type Runner struct {
@@ -311,6 +315,15 @@ type Runner struct {
 	// toolArgs scrubs tool arguments before events carry them; nil
 	// publishes them as they are, within payload.MaxToolArguments.
 	toolArgs ToolArguments
+	// unavailable are the granted tools New dropped, in grant order.
+	unavailable []UnavailableTool
+}
+
+// UnavailableTool is a tool the revision grants that this process could not
+// resolve when the runner was built, and why.
+type UnavailableTool struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
 }
 
 // Option configures a Runner.
@@ -329,6 +342,17 @@ type config struct {
 	promptCache string
 	files       *resolve.Resolver
 	toolArgs    ToolArguments
+	strictTools bool
+}
+
+// WithStrictTools makes a granted tool that cannot be resolved fail New with
+// the lookup's error (ErrNoSuchTool for one nobody contributes), as it did
+// before tools were dropped. Without it the tool is left out, the model is
+// told it is unavailable, and the runner reports it (Runner.Unavailable).
+// A host that would rather not run an agent at all than run it short of a
+// tool passes this.
+func WithStrictTools() Option {
+	return func(c *config) { c.strictTools = true }
 }
 
 // WithToolArguments sets how tool arguments are scrubbed before the events
@@ -372,8 +396,10 @@ func WithScript(script ...[]saigetypes.Delta) Option {
 }
 
 // WithTools sets the catalog the spec's tool names resolve against. Without
-// one, a spec that names any tool fails to build: silently running an agent
-// without the tools it was defined with would answer the wrong question.
+// one, every tool a spec names except ask_person is unavailable: dropped and
+// announced to the model, or a build failure WithStrictTools. The model is
+// always told, because an agent silently running without the tools it was
+// defined with would answer the wrong question.
 func WithTools(t Tools) Option {
 	return func(c *config) { c.tools = t }
 }
@@ -444,6 +470,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	// cached prefix, and an order that followed the spec would invalidate
 	// the cache for an edit that only reordered a list.
 	tools := saigetypes.NewToolRegistry()
+	var unavailable []UnavailableTool
 	for _, name := range rev.Spec.Tools {
 		if IsToolGroup(name) {
 			// The members are registered, never the group itself.
@@ -462,13 +489,27 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 			tools.Register(AskPersonTool())
 			continue
 		}
+		var (
+			t   saigetypes.Tool
+			err error
+		)
 		if cfg.tools == nil {
-			return nil, fmt.Errorf("%w: agent %q revision %d grants tool %q but no tool catalog is configured",
-				ErrInvalid, rev.Spec.Name, rev.Rev, name)
+			err = fmt.Errorf("%w: %q (no tool catalog is configured)", ErrNoSuchTool, name)
+		} else {
+			t, err = cfg.tools.Lookup(name)
 		}
-		t, err := cfg.tools.Lookup(name)
 		if err != nil {
-			return nil, fmt.Errorf("agentrt: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
+			if cfg.strictTools {
+				return nil, fmt.Errorf("agentrt: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
+			}
+			// A grant this process cannot honour right now (a connector
+			// not configured here, an MCP tool held back or disabled) costs
+			// the agent that tool, not the run: the model is told it is
+			// missing and the operator is told why.
+			unavailable = append(unavailable, UnavailableTool{Name: name, Reason: err.Error()})
+			cfg.logger.Warn("fiber/agentrt: a granted tool is unavailable; the run continues without it",
+				"agent", rev.Spec.Name, "rev", rev.Rev, "tool", name, "error", err)
+			continue
 		}
 		tools.Register(t)
 	}
@@ -477,6 +518,11 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	for _, name := range rev.Spec.Approvals {
 		t, ok := tools.Get(name)
 		if !ok {
+			if slices.ContainsFunc(unavailable, func(u UnavailableTool) bool { return u.Name == name }) {
+				// Dropped above, so it cannot be called and there is
+				// nothing to approve.
+				continue
+			}
 			return nil, fmt.Errorf("%w: agent %q revision %d requires approval for %q, which it is not granted",
 				ErrInvalid, rev.Spec.Name, rev.Rev, name)
 		}
@@ -490,18 +536,24 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	}
 
 	return &Runner{
-		rev:        rev,
-		provider:   provider,
-		models:     models,
-		tools:      tools,
-		retriever:  cfg.retriever,
-		files:      cfg.files,
-		maxIter:    cfg.maxIter,
-		logger:     cfg.logger,
-		compaction: cfg.compaction,
-		toolArgs:   cfg.toolArgs,
+		rev:         rev,
+		provider:    provider,
+		models:      models,
+		tools:       tools,
+		unavailable: unavailable,
+		retriever:   cfg.retriever,
+		files:       cfg.files,
+		maxIter:     cfg.maxIter,
+		logger:      cfg.logger,
+		compaction:  cfg.compaction,
+		toolArgs:    cfg.toolArgs,
 	}, nil
 }
+
+// Unavailable reports the granted tools this runner left out because they
+// could not be resolved, in the order the revision grants them. It is empty
+// for a runner built WithStrictTools, which fails instead.
+func (r *Runner) Unavailable() []UnavailableTool { return slices.Clone(r.unavailable) }
 
 // Revision returns the pinned revision this runner executes. Callers assert on
 // it: a run that pinned revision 6 must still report 6 after the agent has been
@@ -605,7 +657,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 
 	agentCfg := saige.Config{
 		Name:         r.rev.Spec.Name,
-		SystemPrompt: invocationPrompt(r.rev.Spec.SystemPrompt, t.Instructions),
+		SystemPrompt: invocationPrompt(unavailableNote(r.rev.Spec.SystemPrompt, r.unavailable), t.Instructions),
 		Provider:     provider,
 		Tools:        r.tools,
 		MaxIter:      r.maxIter,
@@ -1065,6 +1117,24 @@ func firstOf(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// unavailableNote tells the model which granted tools it does not have, after
+// the spec's own prompt, so an agent whose instructions say "use jira_create"
+// says it cannot rather than inventing the call. It names the tools and not
+// the reasons: a reason is for the operator, and may name infrastructure the
+// model has no business describing. The note follows the deployment, not the
+// turn, so two turns of a revision on one deployment send the same prompt.
+func unavailableNote(system string, unavailable []UnavailableTool) string {
+	if len(unavailable) == 0 {
+		return system
+	}
+	names := make([]string, len(unavailable))
+	for i, u := range unavailable {
+		names[i] = u.Name
+	}
+	return system + "\n\nThese tools you were granted are unavailable in this deployment, so do not try to call them: " +
+		strings.Join(names, ", ") + "."
 }
 
 func invocationPrompt(system, instructions string) string {
