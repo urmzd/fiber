@@ -33,7 +33,8 @@
 //
 // A provider's CredentialRef is resolved through a Resolver when Connect is
 // called, and the value is held only by the HTTP round tripper (as a bearer
-// token) or the stdio command's environment (in CredentialEnv). Every error,
+// token, sent only to the endpoint's own origin and never across a redirect
+// to another host, port or plain HTTP) or the stdio command's environment (in CredentialEnv). Every error,
 // tool result and log record that leaves this package is scrubbed of the
 // value, and Secret prints as Redacted through every fmt verb, slog and JSON.
 // A stdio server inherits only PATH and HOME from this process, not its
@@ -62,9 +63,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -80,6 +84,10 @@ var (
 	// ErrHeldBack reports a tool that is not callable because it was never
 	// accepted, or because the server changed it since it was.
 	ErrHeldBack = errors.New("mcptools: tool held back pending acceptance")
+
+	// ErrRedirectDowngrade reports a provider served over HTTPS that
+	// redirected to plain HTTP. The redirect is not followed.
+	ErrRedirectDowngrade = errors.New("mcptools: refused a redirect from https to http")
 
 	// ErrDenied reports a call the grant does not permit, such as a write
 	// tool under a read-only grant.
@@ -193,21 +201,73 @@ func buildTransport(p toolprovider.Provider, secret Secret, c config) mcp.Transp
 		if next == nil {
 			next = http.DefaultTransport
 		}
-		client.Transport = bearer{next: next, secret: secret}
+		origin, ok := originOf(p.Endpoint)
+		client.Transport = bearer{next: next, secret: secret, origin: origin, ok: ok}
+		client.CheckRedirect = noDowngrade(client.CheckRedirect)
 	}
 	return &mcp.StreamableClientTransport{Endpoint: p.Endpoint, HTTPClient: &client}
 }
 
-// bearer adds the credential to every request to the provider.
+// bearer adds the credential to requests bound for the provider's own origin
+// (scheme, host and port of its endpoint) and to nothing else. A redirect to
+// another host, another port or plain HTTP gets no Authorization header, so a
+// server, or anyone who can make it redirect, cannot send the credential
+// somewhere the admin did not configure.
 type bearer struct {
 	next   http.RoundTripper
 	secret Secret
+	origin string
+	ok     bool
 }
 
 func (b bearer) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", "Bearer "+b.secret.Reveal())
+	req.Header.Del("Authorization")
+	if o, ok := originOf(req.URL.String()); b.ok && ok && o == b.origin {
+		req.Header.Set("Authorization", "Bearer "+b.secret.Reveal())
+	}
 	return b.next.RoundTrip(req)
+}
+
+// originOf returns raw's scheme://host:port with the scheme and host lowered
+// and the default port filled in, so equal origins compare equal as strings.
+func originOf(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return "", false
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port), true
+}
+
+// noDowngrade refuses a redirect from HTTPS to HTTP, then defers to next (or
+// to net/http's default limit of 10 redirects when next is nil).
+func noDowngrade(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		for _, v := range via {
+			if strings.EqualFold(v.URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return ErrRedirectDowngrade
+			}
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
 }
 
 // Provider returns the record this session was opened from.
