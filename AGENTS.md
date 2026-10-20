@@ -43,7 +43,8 @@ sandboxing and access control.
 | `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
 | `internal/server` | Connect handlers, SSE, webhook ingress, tenant interceptor. |
-| `internal/cli` | Command tree. `core.go` is the composition root. |
+| `internal/cli` | Command tree. `core.go` is the composition root; `extensions.go` is what a downstream binary or `serve --providers FILE` adds to it. |
+| `fiberapp` | The public face of the composition root: `Main` runs the fiber command tree with options that register model providers, tool sources, connectors and MCP tool providers. It sits at the module root because nothing under `pkg/` may import `internal/`. `cmd/fiber` is `fiberapp.Main` with no options. |
 | `gen/`, `proto/` | The protobuf contract and its generated code. `gen/` is committed. |
 
 Discover layout with `tree` or ripgrep; do not trust stale listings.
@@ -168,9 +169,16 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   server's interface already exists. Make `newStore` in
   `pkg/registry/memory_test.go` able to build it, so it runs the same suite
   `Memory` and `Postgres` do.
-- **New agent provider**: extend `pkg/agentrt`'s provider construction. Keep
-  `agenttest.ScriptedProvider` working, since it is what makes the example and
-  the tests run with no API key.
+- **New agent provider**: an OpenAI-compatible endpoint needs no code (a
+  `models` entry in `serve --providers FILE`). Anything else outside this repo
+  is a `fiberapp.WithModelProvider` in the downstream binary; see
+  `examples/downstream`. A built-in belongs in `pkg/agentrt`'s provider
+  construction. Keep `agenttest.ScriptedProvider` working, since it is what
+  makes the example and the tests run with no API key.
+- **Downstream extensions**: tool sources, connectors and MCP tool providers
+  are `fiberapp` options too. Each option is a field of `cli.Extensions`, so a
+  new extension point is a field there, its wiring in `newCore`, and an option
+  in `fiberapp`.
 - **New event kind**: add it to `pkg/envelope`, give it a typed body in
   `pkg/agentrt/payload`, and teach the connector renderers about it. Kinds are
   fields, never topics. A kind that ends a run must also be taught to

@@ -296,6 +296,7 @@ adds product workflows and a web surface on top of the platform.
 | `OPENAI_API_KEY` | Authenticate the `openai` provider; optional with `OPENAI_BASE_URL` |
 | `OPENAI_BASE_URL` | Point the `openai` provider at an OpenAI-compatible server |
 | `FIBER_EMBEDDINGS_URL`, `_MODEL`, `_KEY`, `_DIMENSIONS` | Configure an OpenAI-compatible embeddings endpoint |
+| `FIBER_PROVIDERS` | Default for `serve --providers`: a JSON file of model endpoints and MCP tool providers |
 | `FIBER_AUTHOR_PROVIDER`, `FIBER_AUTHOR_MODEL` | Select the built-in author agent's model |
 | `FIBER_COMPACT_TOKENS` | Enable history compaction at a token threshold; off by default |
 | `FIBER_COMPACT_KEEP_TURNS` | Recent tool-calling turns a compaction keeps verbatim; defaults to saige's |
@@ -307,6 +308,50 @@ offline development. Use the same embedding settings for `serve` and `index`.
 Compose sets `FIBER_TOKEN=fiber-dev-token` by default. Use that value when
 connecting from a host CLI. Connector setup is covered in the
 [GitHub](docs/architecture/github.md) and [Slack](docs/architecture/slack.md) guides.
+
+## Extending fiber
+
+Common cases need no Go. `fiber serve --providers providers.json` declares
+OpenAI-compatible model endpoints, each selectable by name as a spec's
+`provider`, and MCP tool providers with the tools the deployment accepts from
+each, pinned by schema hash. Keys and credentials are named, never written:
+`api_key_env` is the variable that holds a model key, and `credential_ref` is
+`env:NAME`.
+
+```json
+{
+  "models": [
+    {"name": "fireworks", "base_url": "https://api.fireworks.ai/inference/v1", "api_key_env": "FIREWORKS_API_KEY"},
+    {"name": "vllm", "base_url": "http://vllm.internal:8000/v1", "api_key_env": "VLLM_API_KEY"}
+  ],
+  "tool_providers": [
+    {"name": "issues", "transport": "http", "endpoint": "https://mcp.example.com/mcp",
+     "credential_ref": "env:ISSUES_TOKEN",
+     "tools": [{"name": "search", "schema_hash": "4f1c…", "class": "read"},
+               {"name": "close_issue", "schema_hash": "9b07…", "class": "write"}]}
+  ]
+}
+```
+
+A declared tool is accepted only while the server's schema for it matches
+`schema_hash`, and its description may not change once accepted. Anything the
+server adds or changes stays pending, so a restart never accepts what the file
+does not declare. At startup `serve` logs every pending tool with its
+`schema_hash`; review it, then copy the hash into the file to accept it. A
+server that cannot be reached at startup is logged and its tools are
+unavailable to runs.
+
+Anything else is a few lines of Go in your own binary. `fiberapp.Main` runs
+the same server and CLI as `fiber`, with options to register model providers,
+tool sources, connectors and MCP tool providers.
+[`examples/downstream`](examples/downstream/main.go) is a complete one:
+
+```go
+os.Exit(fiberapp.Main(fiberapp.Version{Version: "v1"},
+    fiberapp.WithModelProvider("house", houseProvider),
+    fiberapp.WithTools(runbookTool{}),
+))
+```
 
 ## Upgrading
 
@@ -327,7 +372,7 @@ connecting from a host CLI. Connector setup is covered in the
 - Agent specs load from JSON, not YAML.
 - Stopping a run is the HTTP route `POST /v1/runs/{id}/stop`, not an RPC; `GetRun` reports the result as `RUN_STATUS_STOPPED`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
 - Compacting a running turn on request is the HTTP route `POST /v1/runs/{id}/compact`, not an RPC. The request is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
-- There is no API or CLI command to register MCP tool providers or accept their tools yet; an admin writes them to the tool provider store (`pkg/toolprovider`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) fails the run's build with `agentrt.ErrNoSuchToolGroup`, unlike a single tool, which is dropped.
+- There is no API or CLI command to register MCP tool providers or accept their tools yet; a deployment declares them in `serve --providers FILE` (or `fiberapp.WithToolProvider`), or an admin writes them to the tool provider store (`pkg/toolprovider`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) fails the run's build with `agentrt.ErrNoSuchToolGroup`, unlike a single tool, which is dropped.
 - A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
 - A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
