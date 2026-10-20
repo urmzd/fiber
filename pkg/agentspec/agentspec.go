@@ -42,7 +42,8 @@
 //     sequences: nothing downstream consumes them in order, so they are sorted.
 //     A reordered tool list is not an edit.
 //   - Fallback models are the exception: they are tried in the order given,
-//     so their order is content and is kept.
+//     so their order is content and is kept. The conditions they are tried
+//     on (FallbackOn) are a set, and are sorted.
 //
 // Hash then digests the canonical form with a length-prefixed encoding
 // described in hash.go. Together they give the property the registry depends
@@ -120,6 +121,40 @@ const MCPGroupPrefix = "mcp:"
 // reason about. Four alternates is already five models a run may land on.
 const MaxFallbacks = 4
 
+// Conditions a spec's FallbackOn may name: the classes of model error that
+// move a call on to the next fallback model. Whatever is named, an error no
+// other model can fix (a cancelled run, an invalid request or configuration,
+// an exhausted budget) never falls through.
+const (
+	// FallbackOnAny falls through on every error but those. It cannot be
+	// combined with another condition, and it is what an empty FallbackOn
+	// means.
+	FallbackOnAny = "any"
+	// FallbackOnUnavailable is an outage: a 5xx, an overloaded provider.
+	FallbackOnUnavailable = "unavailable"
+	// FallbackOnRateLimit is a rate limit or an exhausted quota.
+	FallbackOnRateLimit = "rate_limit"
+	// FallbackOnTransient is any error a retry could fix: a timeout, a reset
+	// connection, and also a rate limit or an outage.
+	FallbackOnTransient = "transient"
+	// FallbackOnAuth is a refused or missing credential.
+	FallbackOnAuth = "auth"
+	// FallbackOnContextLength is a prompt too long for the model.
+	FallbackOnContextLength = "context_length"
+	// FallbackOnContentFilter is a request or response a provider's safety
+	// system blocked.
+	FallbackOnContentFilter = "content_filter"
+)
+
+// FallbackConditions returns every condition FallbackOn may name, sorted. It
+// returns a fresh slice so a caller cannot edit this package's answer.
+func FallbackConditions() []string {
+	return []string{
+		FallbackOnAny, FallbackOnAuth, FallbackOnContentFilter, FallbackOnContextLength,
+		FallbackOnRateLimit, FallbackOnTransient, FallbackOnUnavailable,
+	}
+}
+
 // KnownProviders returns the built-in provider names, sorted. It returns a
 // fresh slice so a caller extending it cannot edit this package's answer.
 func KnownProviders() []string {
@@ -148,6 +183,11 @@ type AgentSpec struct {
 	// would. Empty means the primary alone, which is what every revision
 	// written before fallbacks existed means too.
 	Fallbacks []ModelRef `json:"fallbacks,omitempty"`
+	// FallbackOn is when a call moves on to the next fallback: the error
+	// classes, from FallbackConditions, that fall through. Empty means
+	// FallbackOnAny. It is a set, sorted by Normalize, and naming it without
+	// any Fallbacks is invalid: there is nothing to fall back to.
+	FallbackOn []string `json:"fallback_on,omitempty"`
 	// Approvals names the tools whose every call waits for a person to
 	// approve it. Each must be a tool the agent is granted: one in Tools, one
 	// in a tool group Tools grants (see MCPGroupPrefix), or the delegation
@@ -271,6 +311,7 @@ func (r Revision) Clone() Revision {
 func (s AgentSpec) Clone() AgentSpec {
 	s.Tools = slices.Clone(s.Tools)
 	s.Fallbacks = slices.Clone(s.Fallbacks)
+	s.FallbackOn = slices.Clone(s.FallbackOn)
 	s.Approvals = slices.Clone(s.Approvals)
 	s.Approvers = slices.Clone(s.Approvers)
 	s.Answerers = slices.Clone(s.Answerers)
@@ -314,6 +355,7 @@ func (s AgentSpec) Normalize() AgentSpec {
 		SystemPrompt: strings.TrimSpace(s.SystemPrompt),
 		Tools:        normalizeSet(s.Tools, false),
 		Fallbacks:    normalizeFallbacks(s.Fallbacks),
+		FallbackOn:   normalizeSet(s.FallbackOn, true),
 		Approvals:    normalizeSet(s.Approvals, false),
 		Approvers:    normalizeSet(s.Approvers, false),
 		SelfApproval: s.SelfApproval,
@@ -477,6 +519,20 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 func validFallbacks(c AgentSpec, providers []string) error {
 	if len(c.Fallbacks) > MaxFallbacks {
 		return fmt.Errorf("%w: agent %q names %d fallback models, the limit is %d", ErrInvalid, c.Name, len(c.Fallbacks), MaxFallbacks)
+	}
+	if err := uniqueNonEmpty("fallback condition", c.Name, c.FallbackOn); err != nil {
+		return err
+	}
+	if len(c.FallbackOn) > 0 && len(c.Fallbacks) == 0 {
+		return fmt.Errorf("%w: agent %q says when to fall back (%s) but names no fallback models", ErrInvalid, c.Name, strings.Join(c.FallbackOn, ", "))
+	}
+	for _, cond := range c.FallbackOn {
+		if !slices.Contains(FallbackConditions(), cond) {
+			return fmt.Errorf("%w: agent %q falls back on %q; the conditions are %s", ErrInvalid, c.Name, cond, list(FallbackConditions()))
+		}
+		if cond == FallbackOnAny && len(c.FallbackOn) > 1 {
+			return fmt.Errorf("%w: agent %q falls back on %q together with other conditions; %q already covers them", ErrInvalid, c.Name, FallbackOnAny, FallbackOnAny)
+		}
 	}
 	seen := make(map[ModelRef]int, len(c.Fallbacks)+1)
 	seen[ModelRef{Provider: c.Provider, Model: c.Model}] = 0

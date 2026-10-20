@@ -37,6 +37,11 @@ const specSchema = `{
             "required": ["provider", "model"]
           }
         },
+        "fallback_on": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["any", "auth", "content_filter", "context_length", "rate_limit", "transient", "unavailable"]},
+          "description": "When to move to the next fallback model. Omit for any. \"any\" cannot be combined with others. Requires fallbacks."
+        },
         "system_prompt": {"type": "string", "description": "The agent's instructions."},
         "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"mcp:<provider>\" grants every accepted tool of that MCP provider."},
         "sources": {

@@ -265,6 +265,7 @@ func specFromProto(p *mandatumv1.AgentSpec) (Spec, error) {
 		Approvers:    p.GetApprovers(),
 		SelfApproval: p.GetSelfApproval(),
 		Answerers:    p.GetAnswerers(),
+		FallbackOn:   p.GetFallbackOn(),
 	}
 	for _, src := range p.GetSources() {
 		s.Sources = append(s.Sources, Source{
@@ -294,6 +295,7 @@ func specToProto(s Spec) *mandatumv1.AgentSpec {
 		Approvers:    s.Approvers,
 		SelfApproval: s.SelfApproval,
 		Answerers:    s.Answerers,
+		FallbackOn:   s.FallbackOn,
 		Access:       &mandatumv1.Access{Spawn: s.Access.Spawn, WorkspaceAreas: s.Access.WorkspaceAreas},
 	}
 	for _, src := range s.Sources {

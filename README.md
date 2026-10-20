@@ -181,7 +181,13 @@ refused credential):
 ```
 
 Each fallback names a provider the deployment knows and a model, none repeats
-the primary or another fallback, and there are at most four. An invalid
+the primary or another fallback, and there are at most four. By default any
+error another model could fix falls through. `"fallback_on"` narrows that to
+named classes: `unavailable` (an outage), `rate_limit`, `transient` (a timeout
+or reset connection, and also a rate limit or outage), `auth`,
+`context_length` and `content_filter`, or `any` alone, which is the default.
+For example `"fallback_on": ["rate_limit", "unavailable"]`. It is a set, and
+naming it without fallbacks is refused. Whatever it names, an invalid
 request, a stopped run or an exhausted budget does not fall through, and a
 stream that already produced output is not replayed on another model. Every
 fallback is built with the agent, so one whose provider is not configured

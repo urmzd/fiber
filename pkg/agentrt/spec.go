@@ -36,6 +36,9 @@ type Spec struct {
 	// fails with an error another model could fix: see
 	// agentspec.AgentSpec.Fallbacks and New.
 	Fallbacks []ModelRef `json:"fallbacks,omitempty"`
+	// FallbackOn is when a call moves on to the next fallback: see
+	// FallbackConditions. Empty means FallbackOnAny.
+	FallbackOn []string `json:"fallback_on,omitempty"`
 	// Approvals names the tools whose calls wait for a person: see
 	// agentspec.AgentSpec.Approvals.
 	Approvals []string `json:"approvals,omitempty"`

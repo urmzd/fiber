@@ -127,6 +127,7 @@ func fromServerSpec(s server.Spec) agentspec.AgentSpec {
 		Approvers:    s.Approvers,
 		SelfApproval: s.SelfApproval,
 		Answerers:    s.Answerers,
+		FallbackOn:   s.FallbackOn,
 		Access: agentspec.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -160,6 +161,7 @@ func toServerSpec(s agentspec.AgentSpec) server.Spec {
 		Approvers:    s.Approvers,
 		SelfApproval: s.SelfApproval,
 		Answerers:    s.Answerers,
+		FallbackOn:   s.FallbackOn,
 		Access: server.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -236,6 +238,7 @@ func toRuntimeRevision(r agentspec.Revision) agentrt.Revision {
 		Approvers:    r.Spec.Approvers,
 		SelfApproval: r.Spec.SelfApproval,
 		Answerers:    r.Spec.Answerers,
+		FallbackOn:   r.Spec.FallbackOn,
 		Access: agentrt.Access{
 			Spawn:          r.Spec.Access.Spawn,
 			WorkspaceAreas: r.Spec.Access.WorkspaceAreas,

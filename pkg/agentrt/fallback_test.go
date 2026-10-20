@@ -177,3 +177,67 @@ func TestAFallbackCallIsPricedOnItsOwnModel(t *testing.T) {
 		t.Fatalf("call is %+v cost %+v, want model small-model-20260101 priced %d micros on the backup's card with its window", c, c.Cost, want)
 	}
 }
+
+// FallbackOn narrows when a call falls through, never widens it, and an
+// empty one is the default. Each case fails the primary once with one error
+// class and reports whether the backup answered.
+func TestFallbackOnDecidesWhichFailuresFallThrough(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		on   []string
+		kind saigetypes.ErrorKind
+		want bool
+	}{
+		{"named: a rate limit falls through", []string{agentrt.FallbackOnRateLimit}, saigetypes.ErrorKindRateLimit, true},
+		{"named: an outage does not", []string{agentrt.FallbackOnRateLimit}, saigetypes.ErrorKindUnavailable, false},
+		{"unset: an outage falls through", nil, saigetypes.ErrorKindUnavailable, true},
+		{"any: an auth failure falls through", []string{agentrt.FallbackOnAny}, saigetypes.ErrorKindAuth, true},
+		{"transient: covers an outage", []string{agentrt.FallbackOnTransient}, saigetypes.ErrorKindUnavailable, true},
+		{"named: an invalid request never does", []string{agentrt.FallbackOnRateLimit, agentrt.FallbackOnTransient}, saigetypes.ErrorKindInvalidRequest, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			primary := &agenttest.ScriptedProvider{Errors: []error{providerError(tc.kind)}}
+			backup := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("from the backup")}}
+			m := newModels(map[string]saigetypes.Provider{"primary": primary, "backup": backup})
+			rev := fallbackRevision()
+			rev.Spec.FallbackOn = tc.on
+			r, err := agentrt.New(rev, m.opts...)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			res, err := r.Run(context.Background(), agentrt.Turn{Text: "hi"}, nil)
+			if got := err == nil && res.Text == "from the backup"; got != tc.want {
+				t.Fatalf("backup answered = %v (err %v), want %v", got, err, tc.want)
+			}
+			if !tc.want && saigetypes.KindOf(err) != tc.kind {
+				t.Errorf("error %v is of kind %v, want the primary's %v", err, saigetypes.KindOf(err), tc.kind)
+			}
+		})
+	}
+}
+
+// A condition this runtime does not know, "any" mixed with another, or a
+// condition with nothing to fall back to fails the build: ignoring it would
+// fall back more or less often than the spec says.
+func TestAFallbackRuleThatCannotBeHonouredFailsTheBuild(t *testing.T) {
+	t.Parallel()
+	m := newModels(map[string]saigetypes.Provider{"primary": &agenttest.ScriptedProvider{}, "backup": &agenttest.ScriptedProvider{}})
+	for name, mutate := range map[string]func(*agentrt.Revision){
+		"unknown":   func(r *agentrt.Revision) { r.Spec.FallbackOn = []string{"timeout"} },
+		"any mixed": func(r *agentrt.Revision) { r.Spec.FallbackOn = []string{agentrt.FallbackOnAny, agentrt.FallbackOnAuth} },
+		"no fallbacks": func(r *agentrt.Revision) {
+			r.Spec.FallbackOn = []string{agentrt.FallbackOnAuth}
+			r.Spec.Fallbacks = nil
+		},
+	} {
+		rev := fallbackRevision()
+		mutate(&rev)
+		if _, err := agentrt.New(rev, m.opts...); !errors.Is(err, agentrt.ErrInvalid) {
+			t.Errorf("%s: New returned %v, want ErrInvalid", name, err)
+		}
+	}
+}

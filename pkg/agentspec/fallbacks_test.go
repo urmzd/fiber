@@ -110,3 +110,68 @@ func TestFallbacksUseTheDeploymentsProviderTable(t *testing.T) {
 		t.Fatalf("a table naming bedrock refused it: %v", err)
 	}
 }
+
+// When to fall back is part of the revision as a set: an empty FallbackOn
+// hashes as before it existed, a named one does not, and the order it is
+// listed in does not matter.
+func TestFallbackOnIsHashedAsASetAndAbsentAsBefore(t *testing.T) {
+	t.Parallel()
+	base := valid()
+	base.Fallbacks = []agentspec.ModelRef{{Provider: agentspec.ProviderOpenAI, Model: "gpt-5"}}
+	empty := base
+	empty.FallbackOn = []string{}
+	if empty.Hash() != base.Hash() {
+		t.Fatal("an empty FallbackOn changed the hash")
+	}
+	ab, ba := base, base
+	ab.FallbackOn = []string{agentspec.FallbackOnRateLimit, agentspec.FallbackOnUnavailable}
+	ba.FallbackOn = []string{" Unavailable", agentspec.FallbackOnRateLimit}
+	if ab.Hash() == base.Hash() {
+		t.Error("naming fallback conditions did not change the hash")
+	}
+	if ab.Hash() != ba.Hash() {
+		t.Error("the order or case of fallback conditions changed the hash")
+	}
+	if err := ba.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+// FallbackOn names known conditions, once each, "any" alone, and only for an
+// agent that has something to fall back to.
+func TestFallbackOnIsValidated(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		on        []string
+		fallbacks bool
+		want      string
+	}{
+		{"every condition alone", nil, true, ""},
+		{"any alone", []string{"any"}, true, ""},
+		{"several classes", []string{"rate_limit", "unavailable", "transient", "auth", "context_length", "content_filter"}, true, ""},
+		{"an unknown condition", []string{"rate_limit", "timeout"}, true, `falls back on "timeout"`},
+		{"any with another", []string{"any", "auth"}, true, `"any" together with other conditions`},
+		{"a duplicate", []string{"auth", "AUTH"}, true, `fallback condition "auth" twice`},
+		{"an empty condition", []string{""}, true, "empty fallback condition"},
+		{"no fallbacks", []string{"rate_limit"}, false, "names no fallback models"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := valid()
+			s.FallbackOn = tc.on
+			if tc.fallbacks {
+				s.Fallbacks = []agentspec.ModelRef{{Provider: agentspec.ProviderOpenAI, Model: "gpt-5"}}
+			}
+			err := s.Validate()
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("Validate: %v", err)
+			case tc.want != "" && !errors.Is(err, agentspec.ErrInvalid):
+				t.Fatalf("Validate returned %v, want ErrInvalid", err)
+			case tc.want != "" && !strings.Contains(err.Error(), tc.want):
+				t.Fatalf("error %q does not say %q", err, tc.want)
+			}
+		})
+	}
+}

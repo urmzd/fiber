@@ -28,6 +28,7 @@ type Spec struct {
 	Sources      []Source
 	Access       Access
 	Fallbacks    []ModelRef
+	FallbackOn   []string
 	Approvals    []string
 	Approvers    []string
 	SelfApproval bool

@@ -109,6 +109,10 @@ func (s AgentSpec) Hash() string {
 			writeString(h, fb.Model)
 		}
 	}
+	if len(c.FallbackOn) > 0 {
+		writeString(h, "fallback_on")
+		writeStrings(h, c.FallbackOn)
+	}
 	return HashAlgorithm + ":" + hex.EncodeToString(h.Sum(nil))
 }
 

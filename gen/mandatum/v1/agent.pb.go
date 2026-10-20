@@ -118,7 +118,14 @@ type AgentSpec struct {
 	// none repeats the primary or another fallback, and there are at most
 	// four. Order is content: reordering them is a new revision. Empty means
 	// the primary alone.
-	Fallbacks     []*ModelRef `protobuf:"bytes,13,rep,name=fallbacks,proto3" json:"fallbacks,omitempty"`
+	Fallbacks []*ModelRef `protobuf:"bytes,13,rep,name=fallbacks,proto3" json:"fallbacks,omitempty"`
+	// FallbackOn is when a call moves on to the next fallback: the error
+	// classes that fall through, from "unavailable", "rate_limit",
+	// "transient", "auth", "context_length", "content_filter", or "any" alone.
+	// Empty means "any". Whatever is named, a cancelled run, an invalid
+	// request or an exhausted budget never falls through. It is a set, and
+	// naming it without fallbacks is invalid.
+	FallbackOn    []string `protobuf:"bytes,14,rep,name=fallback_on,json=fallbackOn,proto3" json:"fallback_on,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -240,6 +247,13 @@ func (x *AgentSpec) GetAnswerers() []string {
 func (x *AgentSpec) GetFallbacks() []*ModelRef {
 	if x != nil {
 		return x.Fallbacks
+	}
+	return nil
+}
+
+func (x *AgentSpec) GetFallbackOn() []string {
+	if x != nil {
+		return x.FallbackOn
 	}
 	return nil
 }
@@ -1125,7 +1139,7 @@ var File_mandatum_v1_agent_proto protoreflect.FileDescriptor
 
 const file_mandatum_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x17mandatum/v1/agent.proto\x12\vmandatum.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc4\x03\n" +
+	"\x17mandatum/v1/agent.proto\x12\vmandatum.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe5\x03\n" +
 	"\tAgentSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x14\n" +
@@ -1140,7 +1154,9 @@ const file_mandatum_v1_agent_proto_rawDesc = "" +
 	" \x03(\tR\tapprovers\x12#\n" +
 	"\rself_approval\x18\v \x01(\bR\fselfApproval\x12\x1c\n" +
 	"\tanswerers\x18\f \x03(\tR\tanswerers\x123\n" +
-	"\tfallbacks\x18\r \x03(\v2\x15.mandatum.v1.ModelRefR\tfallbacksJ\x04\b\x0e\x10\x19\"<\n" +
+	"\tfallbacks\x18\r \x03(\v2\x15.mandatum.v1.ModelRefR\tfallbacks\x12\x1f\n" +
+	"\vfallback_on\x18\x0e \x03(\tR\n" +
+	"fallbackOnJ\x04\b\x0f\x10\x19\"<\n" +
 	"\bModelRef\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\"\xac\x01\n" +

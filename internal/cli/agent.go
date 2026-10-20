@@ -53,6 +53,7 @@ type specFile struct {
 	Model        string            `json:"model,omitempty"`
 	Provider     string            `json:"provider,omitempty"`
 	Fallbacks    []specFileModel   `json:"fallbacks,omitempty"`
+	FallbackOn   []string          `json:"fallback_on,omitempty"`
 	SystemPrompt string            `json:"system_prompt"`
 	Tools        []string          `json:"tools,omitempty"`
 	Approvals    []string          `json:"approvals,omitempty"`
@@ -106,6 +107,7 @@ func loadSpec(path string) (*mandatumv1.AgentSpec, error) {
 		Approvers:    f.Approvers,
 		SelfApproval: f.SelfApproval,
 		Answerers:    f.Answerers,
+		FallbackOn:   f.FallbackOn,
 		Access: &mandatumv1.Access{
 			Spawn:          f.Access.Spawn,
 			WorkspaceAreas: f.Access.WorkspaceAreas,
@@ -395,6 +397,9 @@ func printRevisionFull(u *ui, r *mandatumv1.Revision) error {
 	for _, fb := range s.GetFallbacks() {
 		u.printf("  fallback     %s %s\n", fb.GetProvider(), fb.GetModel())
 	}
+	if len(s.GetFallbackOn()) > 0 {
+		u.printf("  fallback on  %v\n", s.GetFallbackOn())
+	}
 	if len(s.GetTools()) > 0 {
 		u.printf("  tools        %v\n", s.GetTools())
 	}
@@ -446,6 +451,7 @@ func revisionMap(r *mandatumv1.Revision) map[string]any {
 		"provider":      s.GetProvider(),
 		"model":         s.GetModel(),
 		"fallbacks":     fallbacks,
+		"fallback_on":   s.GetFallbackOn(),
 		"system_prompt": s.GetSystemPrompt(),
 		"tools":         s.GetTools(),
 		"approvals":     s.GetApprovals(),
