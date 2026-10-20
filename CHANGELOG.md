@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.2 (2026-10-20)
+
+### Bug Fixes
+
+- **mcptools**: confine the credential to its origin and harden tool schemas (#25) ([05018fd](https://github.com/urmzd/fiber/commit/05018fd418af3a8c3575a7136048b2d7d979b278))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.14.1...v0.14.2)
+
+
 ## 0.14.1 (2026-10-18)
 
 ### Bug Fixes
