@@ -43,7 +43,7 @@ const specSchema = `{
           "description": "When to move to the next fallback model. Omit for any. \"any\" cannot be combined with others. Requires fallbacks."
         },
         "system_prompt": {"type": "string", "description": "The agent's instructions."},
-        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"mcp:<provider>\" grants every accepted tool of that MCP provider."},
+        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"mcp:<provider>\" grants the accepted read tools of that MCP provider, \"mcp:<provider>:write\" its write tools too."},
         "sources": {
           "type": "array",
           "description": "Corpora the agent may retrieve from.",

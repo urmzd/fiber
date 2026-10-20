@@ -54,12 +54,16 @@
 // accepted description and schema, and a Capability of read or write.
 // Execute returns a Go error for a refusal (ErrHeldBack, ErrDenied) and for a
 // tool that reported failure, which saige records as the call's error and
-// shows the model; the turn continues. A spec grants a whole provider as
-// "mcp:<name>"; the host turns a Toolset into that group with
+// shows the model; the turn continues.
 //
-//	agentrt.ToolGroup{Name: agentrt.MCPGroup(p.Name), Tools: ts.All()}
+// # Provider grants
 //
-// and this package stays independent of agentrt.
+// A spec grants a whole provider as "mcp:<name>" (its read tools) or
+// "mcp:<name>:write" (read and write). Grants expands such a grant against
+// the store, for one tenant, into the members of that tool group, under the
+// grant's class, on a session kept per provider record version. pkg/runtime's
+// WithToolGroupSource takes a *Grants and hands the members to pkg/agentrt
+// as an agentrt.ToolGroup, so this package stays independent of agentrt.
 package mcptools
 
 import (

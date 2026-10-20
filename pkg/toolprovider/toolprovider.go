@@ -142,6 +142,10 @@ const MaxQualifiedName = 64
 // unambiguous.
 func QualifiedName(provider, tool string) string { return provider + "__" + tool }
 
+// ValidName reports whether name is one a provider may have: lowercase
+// letters, digits and hyphens, starting with a letter, at most 32 characters.
+func ValidName(name string) bool { return providerName.MatchString(name) }
+
 // Validate reports whether p is a record a store will accept.
 func (p Provider) Validate() error {
 	if p.Tenant == "" {

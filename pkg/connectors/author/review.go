@@ -91,7 +91,8 @@ type World struct {
 //     Without, it is a backticked identifier sharing a connector prefix with a
 //     tool the spec does grant, which catches the common slip (granting
 //     jira_comment, instructing the agent to use jira_transition) without
-//     flagging every snake_case word. A tool group "mcp:docs" counts as
+//     flagging every snake_case word. A tool group "mcp:docs" (or
+//     "mcp:docs:write") counts as
 //     granting every identifier with the docs_ prefix, since an MCP tool's
 //     name is qualified by its provider ("docs__search").
 //   - Volatile content is a date, a clock time, or phrasing such as "today
@@ -130,9 +131,12 @@ func Review(draft agentspec.AgentSpec, world World) []Finding {
 	grantedPrefixes := map[string]bool{}
 	groups := map[string]bool{}
 	for t := range granted {
-		if g, ok := strings.CutPrefix(t, agentspec.MCPGroupPrefix); ok {
-			groups[g] = true
-			grantedPrefixes[g] = true
+		if g, ok, err := agentspec.ParseMCPGrant(t); ok {
+			if err == nil {
+				// "mcp:docs:write" is the docs group too.
+				groups[g.Provider] = true
+				grantedPrefixes[g.Provider] = true
+			}
 			continue
 		}
 		if p, _, ok := strings.Cut(t, "_"); ok {
