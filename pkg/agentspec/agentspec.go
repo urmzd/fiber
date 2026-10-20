@@ -369,6 +369,10 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	if err := uniqueNonEmpty("answerer", c.Name, c.Answerers); err != nil {
 		return err
 	}
+	groups, err := mcpGrants(c.Name, c.Tools)
+	if err != nil {
+		return err
+	}
 	if len(c.Approvals) == 0 && (len(c.Approvers) > 0 || c.SelfApproval) {
 		return fmt.Errorf("%w: agent %q names who may approve but requires no approvals", ErrInvalid, c.Name)
 	}
@@ -378,6 +382,11 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 		// that is refused.
 		granted := slices.Contains(c.Tools, name)
 		if target, ok := strings.CutPrefix(name, "tag_"); ok && slices.Contains(c.Access.Spawn, target) {
+			granted = true
+		}
+		// A tool an MCP provider grant expands to, "<provider>_<tool>".
+		// Whether the provider offers it is a property of the deployment.
+		if slices.ContainsFunc(groups, func(g MCPGrant) bool { return g.Covers(name) }) {
 			granted = true
 		}
 		if !granted {

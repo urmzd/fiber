@@ -40,10 +40,12 @@ import (
 	"github.com/urmzd/fiber/pkg/durable"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/router"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/toolprovider"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -163,8 +165,11 @@ type core struct {
 	cfg coreConfig
 	log *slog.Logger
 
-	store   registry.Store
-	docs    knowledge.Store
+	store registry.Store
+	docs  knowledge.Store
+	// tools are the MCP tool providers agents reach through "mcp:<name>"
+	// grants, and the tool lists admins accepted from each.
+	tools   toolprovider.Store
 	blobs   blob.Store
 	broker  bus.Bus
 	sinks   *connector.Registry
@@ -257,6 +262,22 @@ func newCore(cfg coreConfig) (*core, error) {
 		return nil, err
 	}
 
+	// External tools: the MCP servers a tenant may reach and the tools an
+	// admin accepted from each. An "mcp:<name>" grant expands against it.
+	c.tools, err = newToolProviders(ctx, pool)
+	if err != nil {
+		_ = c.close()
+		return nil, err
+	}
+	// Sessions are opened on first use and kept per provider record. A
+	// credential reference resolves from this process's environment
+	// ("env:NAME"), and never reaches a log or an error.
+	grants := mcptools.NewGrants(c.tools, mcptools.Dialer(
+		mcptools.WithResolver(mcptools.EnvResolver()),
+		mcptools.WithLogger(log),
+	))
+	c.closers = append(c.closers, grants.Close)
+
 	// The mesh. Roles are derived from the interfaces each connector
 	// implements, never declared, so registering is the whole wiring.
 	sinks, err := buildConnectors(cfg, c.store, c.blobs)
@@ -286,7 +307,7 @@ func newCore(cfg coreConfig) (*core, error) {
 	// The agent side. A turn runs as a playscape task under the NGAC policy
 	// compiled from the pinned revision's Access grant, so what an agent may
 	// touch is enforced rather than documented.
-	exec, err := newExecutor(cfg, c.store, c.docs, c.blobs, sinks, log, rec)
+	exec, err := newExecutor(cfg, c.store, c.docs, c.blobs, sinks, grants, log, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -465,6 +486,20 @@ func newThreads(ctx context.Context, pool *pgxpool.Pool) (thread.Store, error) {
 	return store, nil
 }
 
+// newToolProviders selects the MCP tool provider store: Postgres when there is
+// a pool, so accepted tool lists survive a restart with the agents that use
+// them.
+func newToolProviders(ctx context.Context, pool *pgxpool.Pool) (toolprovider.Store, error) {
+	if pool == nil {
+		return toolprovider.NewMemory(), nil
+	}
+	store := toolprovider.NewPostgres(pool)
+	if err := store.Migrate(ctx); err != nil {
+		return nil, fmt.Errorf("%w: $%s: %w", errUnavailable, EnvPostgres, err)
+	}
+	return store, nil
+}
+
 // surfaceMessageID names the surface message that raised a tag, from the
 // metadata the triggers already set. It is what lets a later reconcile
 // recognise that message instead of journaling it a second time.
@@ -513,7 +548,7 @@ func workspaceDir(cfg coreConfig) string {
 // scopes what that tool can see comes from the pinned revision, one deployment
 // per (agent, revision), which is what stops a revised Access grant from
 // widening a run already in flight.
-func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, files blob.Store, sinks *connector.Registry, log *slog.Logger, rec metrics.Recorder) (runtime.Executor, error) {
+func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, files blob.Store, sinks *connector.Registry, groups runtime.ToolGroups, log *slog.Logger, rec metrics.Recorder) (runtime.Executor, error) {
 	dir := filepath.Join(workspaceDir(cfg), "workspace")
 	ws, err := workspace.NewLocal(dir)
 	if err != nil {
@@ -542,6 +577,9 @@ func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, fil
 		// connector advertises, so granting "github.comment" in a spec is the
 		// whole of wiring an agent to GitHub's write side.
 		runtime.WithCatalog(runtime.Connectors(sinks)),
+		// "mcp:<provider>" grants expand to that provider's accepted
+		// tools, named "<provider>_<tool>", under the grant's class.
+		runtime.WithToolGroups(groups),
 		runtime.WithKnowledge(retrieverFor(docs)),
 		runtime.WithSandboxLogger(log),
 	)

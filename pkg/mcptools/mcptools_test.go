@@ -194,7 +194,7 @@ func TestOnlyToolsAnAdminAcceptedAreCallable(t *testing.T) {
 	if got := ts.All(); len(got) != 0 {
 		t.Fatalf("callable before any accept: %v", names(got))
 	}
-	if _, err := ts.Lookup("fake__search"); !errors.Is(err, mcptools.ErrHeldBack) {
+	if _, err := ts.Lookup("fake_search"); !errors.Is(err, mcptools.ErrHeldBack) {
 		t.Fatalf("Lookup of an unaccepted tool: %v, want ErrHeldBack", err)
 	}
 
@@ -203,13 +203,13 @@ func TestOnlyToolsAnAdminAcceptedAreCallable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := names(ts.All()); !slices.Equal(got, []string{"fake__create_issue", "fake__search"}) {
+	if got := names(ts.All()); !slices.Equal(got, []string{"fake_create_issue", "fake_search"}) {
 		t.Fatalf("callable after accept = %v", got)
 	}
-	if _, err := ts.Lookup("fake__echo_auth"); !errors.Is(err, mcptools.ErrHeldBack) {
+	if _, err := ts.Lookup("fake_echo_auth"); !errors.Is(err, mcptools.ErrHeldBack) {
 		t.Fatalf("Lookup of a tool left pending: %v, want ErrHeldBack", err)
 	}
-	search, err := ts.Lookup("fake__search")
+	search, err := ts.Lookup("fake_search")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestAToolTheServerChangesIsHeldBackUntilAcceptedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	search, err := ts.Lookup("fake__search")
+	search, err := ts.Lookup("fake_search")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestAToolTheServerChangesIsHeldBackUntilAcceptedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	search, err = ts.Lookup("fake__search")
+	search, err = ts.Lookup("fake_search")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,10 +296,10 @@ func TestAReadOnlyGrantCannotReachAWriteTool(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := names(ts.All()); !slices.Equal(got, []string{"fake__search"}) {
+		if got := names(ts.All()); !slices.Equal(got, []string{"fake_search"}) {
 			t.Errorf("grant %q: All = %v, want only the read tool", grant, got)
 		}
-		if _, err := ts.Lookup("fake__create_issue"); !errors.Is(err, mcptools.ErrDenied) {
+		if _, err := ts.Lookup("fake_create_issue"); !errors.Is(err, mcptools.ErrDenied) {
 			t.Errorf("grant %q: Lookup of a write tool: %v, want ErrDenied", grant, err)
 		}
 	}
@@ -310,7 +310,7 @@ func TestAReadOnlyGrantCannotReachAWriteTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	create, err := write.Lookup("fake__create_issue")
+	create, err := write.Lookup("fake_create_issue")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +407,7 @@ func TestTheCredentialReachesTheServerAndIsRedactedFromEverythingElse(t *testing
 		t.Fatal(err)
 	}
 
-	echo, _ := ts.Lookup("fake__echo_auth")
+	echo, _ := ts.Lookup("fake_echo_auth")
 	out, err := echo.Execute(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +416,7 @@ func TestTheCredentialReachesTheServerAndIsRedactedFromEverythingElse(t *testing
 		t.Fatalf("a tool result echoing the credential reached the model as %q", out)
 	}
 
-	fail, _ := ts.Lookup("fake__fail_auth")
+	fail, _ := ts.Lookup("fake_fail_auth")
 	_, err = fail.Execute(ctx, nil)
 	if !errors.Is(err, mcptools.ErrToolFailed) {
 		t.Fatalf("failing tool: %v, want ErrToolFailed", err)
@@ -498,7 +498,7 @@ func TestAStdioServerGetsItsCredentialAndNothingElseFromTheEnvironment(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, err := ts.Lookup("fake__env")
+	env, err := ts.Lookup("fake_env")
 	if err != nil {
 		t.Fatal(err)
 	}

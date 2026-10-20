@@ -49,12 +49,19 @@
 //	var tools agentrt.Tools = ts
 //
 // and each callable is a plain saige types.Tool whose Definition carries the
-// qualified name (toolprovider.QualifiedName, "<provider>__<tool>"), the
+// qualified name (toolprovider.QualifiedName, "<provider>_<tool>"), the
 // accepted description and schema, and a Capability of read or write.
 // Execute returns a Go error for a refusal (ErrHeldBack, ErrDenied) and for a
 // tool that reported failure, which saige records as the call's error and
-// shows the model; the turn continues. Grouping a provider's tools under an
-// "mcp:<name>" grant is the wiring's job, not this package's.
+// shows the model; the turn continues.
+//
+// # Provider grants
+//
+// An agent spec grants a provider's tools as a group: "mcp:<name>" for its
+// read tools, "mcp:<name>:write" for read and write. Grants expands such a
+// grant against the store into the provider's toolset for that class, so the
+// grant's class is the one every call is checked against. pkg/runtime's
+// WithToolGroups takes a *Grants.
 package mcptools
 
 import (

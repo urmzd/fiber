@@ -137,10 +137,29 @@ var (
 // longest QualifiedName may produce.
 const MaxQualifiedName = 64
 
-// QualifiedName is the name a model sees for a provider's tool. The separator
-// is two underscores, which a provider name cannot contain, so the split is
-// unambiguous.
-func QualifiedName(provider, tool string) string { return provider + "__" + tool }
+// QualifiedName is the name a model sees for a provider's tool:
+// "<provider>_<tool>". A provider name cannot contain an underscore, so the
+// first one splits the two unambiguously.
+//
+// Model APIs accept tool names of [a-zA-Z0-9_-] up to 64 characters, so the
+// result is held to that whatever it is given: any other character becomes an
+// underscore, and a name still too long keeps its first 55 characters and
+// ends in "_" and 8 hex digits of its hash, so two long names stay distinct.
+// Accept refuses tools whose names would need either, so for an accepted tool
+// this is the plain concatenation; the rest is a guarantee, not a habit.
+func QualifiedName(provider, tool string) string {
+	q := []byte(provider + "_" + tool)
+	for i, c := range q {
+		if !toolName.Match([]byte{c}) {
+			q[i] = '_'
+		}
+	}
+	if len(q) <= MaxQualifiedName {
+		return string(q)
+	}
+	sum := sha256.Sum256([]byte(provider + "\x00" + tool))
+	return string(q[:MaxQualifiedName-9]) + "_" + hex.EncodeToString(sum[:4])
+}
 
 // Validate reports whether p is a record a store will accept.
 func (p Provider) Validate() error {
@@ -384,7 +403,9 @@ func prepareTools(provider string, tools []Tool) ([]Tool, error) {
 		if !toolName.MatchString(t.Name) {
 			return nil, fmt.Errorf("%w: tool name %q must match %s", ErrInvalid, t.Name, toolName)
 		}
-		if q := QualifiedName(provider, t.Name); len(q) > MaxQualifiedName {
+		if q := provider + "_" + t.Name; len(q) > MaxQualifiedName {
+			// Refused rather than shortened: a model is shown the name,
+			// and an admin should accept the name the model will see.
 			return nil, fmt.Errorf("%w: tool %q: qualified name %q is longer than %d", ErrInvalid, t.Name, q, MaxQualifiedName)
 		}
 		if seen[t.Name] {

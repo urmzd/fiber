@@ -1,6 +1,8 @@
 package toolprovider_test
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -64,5 +66,34 @@ func TestClassDefaultsToWriteAndGrantDefaultsToRead(t *testing.T) {
 		if got := c.grant.Permits(c.class); got != c.want {
 			t.Errorf("Grant(%q).Permits(%q) = %v, want %v", c.grant, c.class, got, c.want)
 		}
+	}
+}
+
+// A qualified name is what a model API is sent, so it must always be one the
+// API accepts: [a-zA-Z0-9_-], at most 64 characters, and distinct for
+// distinct tools even when it had to be shortened.
+func TestQualifiedNamesAreAlwaysValidModelToolNames(t *testing.T) {
+	valid := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+	long := strings.Repeat("x", 70)
+	cases := []struct{ provider, tool, want string }{
+		{"github", "create_issue", "github_create_issue"},
+		{"my-server", "Search-2", "my-server_Search-2"},
+		{"github", "issues.list/all", "github_issues_list_all"},
+		{"github", long + "a", ""},
+		{"github", long + "b", ""},
+	}
+	seen := map[string]bool{}
+	for _, tc := range cases {
+		got := toolprovider.QualifiedName(tc.provider, tc.tool)
+		if !valid.MatchString(got) {
+			t.Errorf("QualifiedName(%q, %q) = %q, not a valid model tool name", tc.provider, tc.tool, got)
+		}
+		if tc.want != "" && got != tc.want {
+			t.Errorf("QualifiedName(%q, %q) = %q, want %q", tc.provider, tc.tool, got, tc.want)
+		}
+		if seen[got] {
+			t.Errorf("QualifiedName(%q, %q) = %q collides with another tool's", tc.provider, tc.tool, got)
+		}
+		seen[got] = true
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/envelope"
 
@@ -49,6 +51,18 @@ const (
 // "the work got done" lands on the bus next to the conversation that decided to
 // do it.
 type Catalog func(req Request, action func(payload.Action) error) (agentrt.Tools, error)
+
+// ToolGroups expands a grant that stands for many tools, such as an MCP
+// provider grant ("mcp:github"), into the tools it stands for in one tenant.
+// *mcptools.Grants implements it.
+type ToolGroups interface {
+	// Expand returns the tools grant stands for. ok is false for a name
+	// that is not a group this source knows, which is then resolved as an
+	// ordinary tool. An error leaves the grant unexpanded: the turn goes
+	// ahead without it and the model is told, as for any tool the
+	// deployment cannot resolve.
+	Expand(ctx context.Context, tenant, grant string) (tools []saigetypes.Tool, ok bool, err error)
+}
 
 // Connectors returns a Catalog resolving tool names against the actions every
 // registered connector contributes, bound to the tag's own surface.
@@ -118,6 +132,8 @@ type Sandbox struct {
 	tools   *tool.Registry
 	specs   Specs
 	catalog Catalog
+	// groups expands group grants; nil leaves them to the catalog.
+	groups ToolGroups
 	// delegator, when set, carries out a delegation for a turn that is a
 	// durable run, in place of the in-turn sub-task.
 	delegator Delegator
@@ -191,6 +207,17 @@ func WithCatalog(c Catalog) SandboxOption {
 	return func(s *Sandbox) {
 		if c != nil {
 			s.catalog = c
+		}
+	}
+}
+
+// WithToolGroups expands group grants such as "mcp:<provider>" with g before
+// a turn's tools are resolved. The expanded tools are offered under their own
+// names, after the catalog's.
+func WithToolGroups(g ToolGroups) SandboxOption {
+	return func(s *Sandbox) {
+		if g != nil {
+			s.groups = g
 		}
 	}
 }
@@ -612,14 +639,16 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	// Every call this turn makes is keyed under one prefix, which a sub-task
 	// it delegates to extends.
 	req.Accounting = accountingOf(req)
-	tools, granted, err := s.turnTools(rt, req, send)
+	tools, granted, err := s.turnTools(ctx, rt, req, send)
 	if err != nil {
 		return nil, err
 	}
 	// The runner registers exactly the names the revision grants, so the
-	// delegation tools have to be in that list. The revision here is a local
-	// copy: the pinned definition itself is never edited.
+	// delegation tools and the tools a group grant expanded to have to be in
+	// that list. The revision here is a local copy: the pinned definition
+	// itself is never edited.
 	rev.Spec.Tools = granted
+	rev.Spec.Approvals = grantedApprovals(req.Revision.Spec, granted)
 
 	// The sandbox's logger goes first so a host's own agent options can
 	// replace it; it is where a granted tool the turn had to drop is
@@ -679,7 +708,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 // It returns the catalog and the effective list of granted tool names, in a
 // stable order so that two turns of the same revision show the model the same
 // tools in the same sequence.
-func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chunk) error) (agentrt.Tools, []string, error) {
+func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, send func(agentrt.Chunk) error) (agentrt.Tools, []string, error) {
 	report := func(a payload.Action) error {
 		body, err := payload.Encode(a)
 		if err != nil {
@@ -697,8 +726,33 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 		seen[name] = true
 		granted = append(granted, name)
 	}
+	// A group grant is replaced by the tools it expands to. One that cannot
+	// be expanded stays a name whose lookup fails with the reason, so the
+	// runner drops it and tells the model, like any unresolvable tool.
+	expanded := map[string]saigetypes.Tool{}
+	unexpanded := map[string]error{}
 	for _, name := range req.Revision.Spec.Tools {
-		add(name)
+		if s.groups == nil {
+			add(name)
+			continue
+		}
+		group, ok, err := s.groups.Expand(ctx, req.Tenant, name)
+		switch {
+		case !ok:
+			add(name)
+		case err != nil:
+			unexpanded[name] = err
+			add(name)
+		default:
+			for _, t := range group {
+				n := t.Definition().Name
+				if seen[n] {
+					continue
+				}
+				expanded[n] = t
+				add(n)
+			}
+		}
 	}
 
 	delegates := make(map[string]saigetypes.Tool, len(req.Revision.Spec.Access.Spawn))
@@ -726,6 +780,12 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 		if t, ok := delegates[name]; ok {
 			return t, nil
 		}
+		if t, ok := expanded[name]; ok {
+			return t, nil
+		}
+		if err, ok := unexpanded[name]; ok {
+			return nil, err
+		}
 		if base == nil {
 			return nil, fmt.Errorf("%w: %q (no tool catalog configured)", agentrt.ErrNoSuchTool, name)
 		}
@@ -738,6 +798,33 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 		}
 		return t, nil
 	}), granted, nil
+}
+
+// grantedApprovals is the revision's approvals less those naming a tool a
+// group grant could have expanded to and did not this turn (held back, or
+// the provider unreachable). Such a tool is not offered, so there is nothing
+// to approve, and keeping the approval would fail the turn for it. Every
+// other approval is kept, so a definition that names something it was never
+// granted still fails as it always has.
+func grantedApprovals(spec agentrt.Spec, granted []string) []string {
+	if len(spec.Approvals) == 0 {
+		return spec.Approvals
+	}
+	var groups []agentspec.MCPGrant
+	for _, name := range spec.Tools {
+		if g, ok, err := agentspec.ParseMCPGrant(name); ok && err == nil {
+			groups = append(groups, g)
+		}
+	}
+	out := make([]string, 0, len(spec.Approvals))
+	for _, name := range spec.Approvals {
+		covered := slices.ContainsFunc(groups, func(g agentspec.MCPGrant) bool { return g.Covers(name) })
+		if covered && !slices.Contains(granted, name) && !slices.Contains(spec.Tools, name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // delegateTool lets an agent tag another agent, gated by the spawn allowlist.
