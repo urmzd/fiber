@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
@@ -178,5 +179,45 @@ func TestASpecApprovalAndAPerCallApprovalAskOnce(t *testing.T) {
 	res := open.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a1"})
 	if res.Parked == nil || res.Parked.Question.Approvers != nil || len(open.tool.Calls) != 0 {
 		t.Fatalf("an unguarded call to a tool the spec guards: parked %+v, ran %d", res.Parked, len(open.tool.Calls))
+	}
+}
+
+// expiringCall asks for approval of every call, waiting as long as it says.
+type expiringCall struct {
+	*agenttest.MockTool
+	wait time.Duration
+}
+
+func (e expiringCall) Approval(saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
+	return agentrt.ApprovalRequest{Approvers: []string{"role:admin"}, ExpiresIn: e.wait}, true
+}
+
+// A tool's own wait sets when its question expires, never past the cap.
+func TestAnApprovalWaitsAsLongAsTheToolSays(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		wait, want time.Duration
+	}{
+		{2 * time.Hour, 2 * time.Hour},
+		{30 * 24 * time.Hour, agentrt.MaxApprovalWait},
+	} {
+		tool := expiringCall{newCallAgent().MockTool, tc.wait}
+		model := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{callTo("any")}}
+		rev := offlineRevision(1, "You delegate.")
+		rev.Spec.Tools = []string{"call_agent"}
+		r, err := agentrt.New(rev,
+			agentrt.WithTools(agentrt.StaticTools(tool)),
+			agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := r.Run(context.Background(), agentrt.Turn{Text: "go", Park: true, Accounting: "r/e1"}, nil)
+		if err != nil || res.Parked == nil {
+			t.Fatalf("Run: %v, parked %v", err, res.Parked)
+		}
+		q := res.Parked.Question
+		if got := q.ExpiresAt.Sub(q.At); got != tc.want {
+			t.Errorf("wait %v: question expires after %v, want %v", tc.wait, got, tc.want)
+		}
 	}
 }

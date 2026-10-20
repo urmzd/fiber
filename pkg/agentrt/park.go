@@ -188,7 +188,14 @@ type ApprovalRequest struct {
 	// this call. It counts only with Approvers: without them the spec's
 	// SelfApproval governs.
 	SelfApproval bool
+	// ExpiresIn is how long the question waits before it is denied. Zero
+	// keeps the runner's question lifetime. It is capped at MaxApprovalWait.
+	ExpiresIn time.Duration
 }
+
+// MaxApprovalWait bounds how long an Approving tool may ask a question to
+// wait for an answer.
+const MaxApprovalWait = 7 * 24 * time.Hour
 
 // Approving is a tool whose calls may each need a person's approval, decided
 // per call rather than per tool: a delegation tool that asks only when its
@@ -478,6 +485,9 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 			q.Prompt, q.AskedOf = clipText(req.Prompt), clipText(req.AskedOf)
 			q.Approvers = cleanApprovers(req.Approvers)
 			q.SelfApproval = req.SelfApproval && len(q.Approvers) > 0
+			if req.ExpiresIn > 0 {
+				q.ExpiresAt = now.Add(min(req.ExpiresIn, MaxApprovalWait))
+			}
 			return p.approval(q, tc, t), true
 		}
 	}
