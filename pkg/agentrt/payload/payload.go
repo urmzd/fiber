@@ -255,6 +255,14 @@ type Question struct {
 	// for routing the question to a person, not an authorization: the host
 	// decides who may answer.
 	AskedOf string `json:"asked_of,omitempty"`
+	// Approvers, when set on an approval, are the only people who may
+	// answer it, in place of the agent spec's approvers: principals, or
+	// "role:<name>" for a role the host resolves. The tool that asked set
+	// them for this call (agentrt.Approving). Empty leaves the spec's rule.
+	Approvers []string `json:"approvers,omitempty"`
+	// SelfApproval, with Approvers, lets the person whose request raised
+	// the run approve this call. Without Approvers the spec's governs.
+	SelfApproval bool `json:"self_approval,omitempty"`
 	// ExpiresAt is when an unanswered question is resolved by its default.
 	ExpiresAt time.Time `json:"expires_at,omitzero"`
 	// Default is the answer applied when the question expires unanswered:

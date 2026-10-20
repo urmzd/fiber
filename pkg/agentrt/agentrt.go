@@ -611,6 +611,9 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 		MaxIter:      r.maxIter,
 		Logger:       r.logger,
 		Hooks:        []saige.Hooks{park.hooks()},
+		// Calls an Approving tool wants approved stop and ask, as a marked
+		// tool's do (see park.go).
+		ToolGate: approvalGate(r.tools),
 	}
 	// requests is how a host's request to compact reaches the agent loop;
 	// nil when this deployment does not take them.

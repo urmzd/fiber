@@ -562,6 +562,17 @@ of the options; a reply must have text. Answer wakes the run through the queue
 (`runtime.WithWaker`); without it, or if that enqueue is lost, the janitor's
 poll wakes it.
 
+A tool can decide per call whether it needs approval by implementing
+`agentrt.Approving`: `Approval(call) (ApprovalRequest, bool)` sees the call's
+name and arguments and returns the prompt, the `asked_of` hint, and
+optionally the approvers and self-approval for that one call. A delegation
+tool uses it to apply the callee's policy, asking only for the callees that
+require it. saige is told through a tool gate, so the call stops and asks
+exactly as a marked tool does: it runs only once approved, a denial or an
+expiry reaches the model as a refusal, and a turn that cannot park refuses
+it. A tool also listed in `approvals` is asked about once, with the per-call
+question when there is one.
+
 ### Who may answer
 
 Being in the tenant is not enough to approve a call. The rules are decided
@@ -571,6 +582,7 @@ answer a question its run already asked:
 | Question | Who may answer |
 |---|---|
 | `approval` | Anyone in the tenant except the requester, unless the spec sets `self_approval`. With `approvers` set, only those people: principals as the host names them (`ana`, `slack:U1`) or `role:<name>` entries, which the host resolves (`runtime.WithRoles`; without it a role admits nobody). |
+| `approval` asked per call | When the tool that asked names approvers of its own on the question (`approvers`, `self_approval`), those replace the spec's: only they may answer, named as above, and the requester only with the question's `self_approval`. A question without them follows the row above. |
 | `choice`, `reply` | Anyone in the tenant, the requester included. With `answerers` set, only those people, named as approvers are. |
 
 The requester is the actor on the tag that raised the run, under its id and

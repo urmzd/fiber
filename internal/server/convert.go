@@ -453,6 +453,8 @@ func questionToProto(q *payload.Question) *mandatumv1.Question {
 		ExpiresAt:     timeToProto(q.ExpiresAt),
 		DefaultAnswer: answerToProto(q.Default),
 		AskedAt:       timeToProto(q.At),
+		Approvers:     q.Approvers,
+		SelfApproval:  q.SelfApproval,
 	}
 	if t := q.Tool; t != nil {
 		out.Tool = &mandatumv1.QuestionTool{Name: t.Name, CallId: t.CallID, ArgumentsJson: string(t.Arguments), SchemaJson: string(t.Schema)}
