@@ -197,12 +197,19 @@ of the revision: reordering fallbacks is an edit. A spec without fallbacks
 hashes exactly as it did before they existed.
 
 An agent can be granted an MCP provider's tools as one name:
-`"tools": ["mcp:urmzd"]` grants every tool an admin accepted on the provider
-`urmzd`. The model is shown each member tool (`urmzd__create_issue`), never
-the group, and approvals name members: `"approvals": ["urmzd__create_issue"]`.
-The group is expanded each time a run builds the agent, so a newly accepted
-tool reaches the agent without a new revision. `fiber serve` does not connect
-to MCP servers yet; a host embedding `pkg/agentrt` supplies groups with
+`"tools": ["mcp:urmzd"]` grants the tools an admin accepted on the provider
+`urmzd` as read, and `"mcp:urmzd:write"` its write tools as well. Read only is
+the default, so leaving the class off can only grant less, and the class is
+checked again on every call. The model is shown each member tool
+(`urmzd__create_issue`), never the group, and approvals name members:
+`"approvals": ["urmzd__create_issue"]`. The group is expanded for the run's
+tenant each time a run builds the agent, so a newly accepted tool reaches the
+agent without a new revision; tools that are not accepted, or that changed
+since, are never offered. `fiber serve` expands groups against its tool
+provider store (Postgres when `FIBER_POSTGRES_URL` is set) and resolves
+`env:NAME` credential references from its environment. A host embedding
+`pkg/runtime` does the same with `runtime.WithToolGroupSource` and an
+`mcptools.Grants`; one embedding `pkg/agentrt` alone supplies groups with
 `agentrt.WithToolGroups` or from its tool catalog.
 
 After configuring the GitHub and webhook connectors, route the same agent's
@@ -320,6 +327,7 @@ connecting from a host CLI. Connector setup is covered in the
 - Agent specs load from JSON, not YAML.
 - Stopping a run is the HTTP route `POST /v1/runs/{id}/stop`, not an RPC; `GetRun` reports the result as `RUN_STATUS_STOPPED`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
 - Compacting a running turn on request is the HTTP route `POST /v1/runs/{id}/compact`, not an RPC. The request is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
+- There is no API or CLI command to register MCP tool providers or accept their tools yet; an admin writes them to the tool provider store (`pkg/toolprovider`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) fails the run's build with `agentrt.ErrNoSuchToolGroup`, unlike a single tool, which is dropped.
 - A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
 - A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).

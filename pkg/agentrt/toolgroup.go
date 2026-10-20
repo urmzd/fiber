@@ -8,11 +8,16 @@ import (
 )
 
 // MCPGroupPrefix marks an entry of Spec.Tools as a tool group: "mcp:urmzd"
-// grants every tool of the MCP provider named urmzd as one name.
+// grants the read tools of the MCP provider named urmzd as one name, and
+// "mcp:urmzd:write" its read and write tools.
 const MCPGroupPrefix = "mcp:"
 
-// MCPGroup returns the grant name of an MCP provider's tool group.
+// MCPGroup returns the grant name of an MCP provider's read-only tool group.
 func MCPGroup(provider string) string { return MCPGroupPrefix + provider }
+
+// MCPWriteGroup returns the grant name of an MCP provider's tool group with
+// its write tools as well as its read tools.
+func MCPWriteGroup(provider string) string { return MCPGroupPrefix + provider + ":write" }
 
 // IsToolGroup reports whether a Spec.Tools entry names a tool group rather
 // than a tool.
@@ -31,14 +36,19 @@ var ErrNoSuchToolGroup = fmt.Errorf("%w: no such tool group", ErrInvalid)
 // call. That keeps approvals, tool events and usage about the tool that ran
 // ("urmzd__create_issue"), which is the thing a person can judge.
 //
-// The wiring from pkg/mcptools is one line, and lives with the host because
-// this package does not depend on MCP:
+// The wiring from pkg/mcptools lives with the host because this package does
+// not depend on MCP. pkg/runtime's WithToolGroupSource with an
+// *mcptools.Grants supplies every "mcp:" group from the tool provider store,
+// per tenant; a host with a single session can also build one by hand:
 //
-//	ts, err := session.Toolset(ctx, snapshot, grant)
+//	ts, err := session.Toolset(ctx, snapshot, toolprovider.GrantRead)
 //	group := agentrt.ToolGroup{Name: agentrt.MCPGroup(provider.Name), Tools: ts.All()}
 //
-// The read/write class of the members is the host's choice of grant, made
-// when it builds the group; a spec grants the group, not a class.
+// The read/write class is part of the group's name: "mcp:<provider>" is read
+// only and "mcp:<provider>:write" admits write tools too, and whoever builds
+// the group builds its members under that class. A spec granting both gets
+// the union, which is the write group: a read tool behaves the same under
+// either.
 //
 // # When a group is expanded
 //

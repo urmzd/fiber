@@ -118,6 +118,9 @@ type Sandbox struct {
 	tools   *tool.Registry
 	specs   Specs
 	catalog Catalog
+	// groups supplies tool groups per turn ahead of the catalog's own; nil
+	// leaves them to the catalog.
+	groups ToolGroupSource
 	// delegator, when set, carries out a delegation for a turn that is a
 	// durable run, in place of the in-turn sub-task.
 	delegator Delegator
@@ -191,6 +194,32 @@ func WithCatalog(c Catalog) SandboxOption {
 	return func(s *Sandbox) {
 		if c != nil {
 			s.catalog = c
+		}
+	}
+}
+
+// ToolGroupSource supplies the members of a tool group grant, such as
+// "mcp:github" or "mcp:github:write", for one tenant. *mcptools.Grants is the
+// store-backed one: it expands a grant to the MCP provider's accepted tools
+// under the grant's class.
+type ToolGroupSource interface {
+	// Expand returns the tools grant stands for in tenant. ok is false for
+	// a group this source does not supply, which is then asked of the
+	// catalog. An error means the group could not be expanded now.
+	Expand(ctx context.Context, tenant, grant string) (tools []saigetypes.Tool, ok bool, err error)
+}
+
+// WithToolGroupSource supplies a turn's tool groups from src, for the turn's
+// tenant and under its context. It feeds the one group mechanism
+// pkg/agentrt has: the turn's catalog answers agentrt's ToolGroups face from
+// src first and from the deployment catalog's own groups otherwise, and the
+// runner registers the members, never the group. A group src knows and cannot
+// expand fails the turn's build with agentrt.ErrNoSuchToolGroup, as any
+// unresolvable group does.
+func WithToolGroupSource(src ToolGroupSource) SandboxOption {
+	return func(s *Sandbox) {
+		if src != nil {
+			s.groups = src
 		}
 	}
 }
@@ -612,7 +641,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	// Every call this turn makes is keyed under one prefix, which a sub-task
 	// it delegates to extends.
 	req.Accounting = accountingOf(req)
-	tools, granted, err := s.turnTools(rt, req, send)
+	tools, granted, err := s.turnTools(ctx, rt, req, send)
 	if err != nil {
 		return nil, err
 	}
@@ -679,7 +708,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 // It returns the catalog and the effective list of granted tool names, in a
 // stable order so that two turns of the same revision show the model the same
 // tools in the same sequence.
-func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chunk) error) (agentrt.Tools, []string, error) {
+func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, send func(agentrt.Chunk) error) (agentrt.Tools, []string, error) {
 	report := func(a payload.Action) error {
 		body, err := payload.Encode(a)
 		if err != nil {
@@ -722,7 +751,7 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 		base = b
 	}
 
-	return turnCatalog{base: base, lookup: func(name string) (saigetypes.Tool, error) {
+	return turnCatalog{ctx: ctx, tenant: req.Tenant, groups: s.groups, base: base, lookup: func(name string) (saigetypes.Tool, error) {
 		if t, ok := delegates[name]; ok {
 			return t, nil
 		}
@@ -740,11 +769,18 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 	}}, granted, nil
 }
 
-// turnCatalog is a turn's tools: the lookup turnTools builds, plus the
-// deployment catalog's tool groups, so a spec granting "mcp:<provider>"
-// expands against the same per-turn catalog its single tools resolve from.
-// Delegation tools belong to no group: Access.Spawn alone grants them.
+// turnCatalog is a turn's tools: the lookup turnTools builds, plus the turn's
+// tool groups, so a spec granting "mcp:<provider>" expands for the turn's
+// tenant from the group source, or else against the same per-turn catalog its
+// single tools resolve from. Delegation tools belong to no group: Access.Spawn
+// alone grants them.
 type turnCatalog struct {
+	// ctx is the turn's: agentrt asks for groups while it builds the
+	// runner, inside the turn, and an expansion that dials a server must
+	// stop when the turn does.
+	ctx    context.Context
+	tenant string
+	groups ToolGroupSource
 	base   agentrt.Tools
 	lookup func(name string) (saigetypes.Tool, error)
 }
@@ -752,6 +788,15 @@ type turnCatalog struct {
 func (c turnCatalog) Lookup(name string) (saigetypes.Tool, error) { return c.lookup(name) }
 
 func (c turnCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
+	if c.groups != nil {
+		tools, ok, err := c.groups.Expand(c.ctx, c.tenant, name)
+		switch {
+		case ok && err != nil:
+			return agentrt.ToolGroup{}, fmt.Errorf("%w: %q: %w", agentrt.ErrNoSuchToolGroup, name, err)
+		case ok:
+			return agentrt.ToolGroup{Name: name, Tools: tools}, nil
+		}
+	}
 	groups, ok := c.base.(agentrt.ToolGroups)
 	if !ok {
 		return agentrt.ToolGroup{}, fmt.Errorf("%w: %q (this deployment's tool catalog has no groups)", agentrt.ErrNoSuchToolGroup, name)

@@ -109,10 +109,11 @@ const (
 )
 
 // MCPGroupPrefix marks an entry of Tools as a tool group: "mcp:urmzd"
-// grants every tool of the MCP provider named urmzd as one name. It mirrors
-// pkg/agentrt's. Which tools a group holds is a property of a deployment
-// (which tools an admin accepted), so a group is expanded when an agent is
-// built, never here.
+// grants the accepted read tools of the MCP provider named urmzd as one name,
+// and "mcp:urmzd:write" its read and write tools (see ParseMCPGrant). It
+// mirrors pkg/agentrt's. Which tools a group holds is a property of a
+// deployment (which tools an admin accepted), so a group is expanded when an
+// agent is built, never here.
 const MCPGroupPrefix = "mcp:"
 
 // MaxFallbacks bounds how many models an agent may fall back to. Every
@@ -439,12 +440,12 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	}
 	groups := false
 	for _, name := range c.Tools {
-		group, ok := strings.CutPrefix(name, MCPGroupPrefix)
+		_, ok, err := ParseMCPGrant(name)
 		if !ok {
 			continue
 		}
-		if group == "" || strings.TrimSpace(group) != group {
-			return fmt.Errorf("%w: agent %q grants tool group %q, which names no group", ErrInvalid, c.Name, name)
+		if err != nil {
+			return fmt.Errorf("agent %q: %w", c.Name, err)
 		}
 		groups = true
 	}
