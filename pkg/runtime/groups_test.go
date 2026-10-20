@@ -196,15 +196,13 @@ func TestAnApprovalOnAToolTheGrantsClassExcludesRefusesToBuild(t *testing.T) {
 
 // Groups are expanded for the turn's tenant: another tenant granting the same
 // provider name reaches acme's record and tools no more than it could name
-// them.
+// them. For globex the group does not exist, so its turn runs without it.
 func TestAGroupGrantExpandsForTheTurnsTenantOnly(t *testing.T) {
 	sb, history, ran := groupsSandbox(t, map[string][][]saigetypes.Delta{"triage": {agenttest.TextResponse("ok")}})
 	rev := history.revise("triage", "Triage.")
 	rev.Spec.Tools = []string{agentrt.MCPGroup("issues")}
-	_, _, err := runTurnAs(t, sb, "globex", rev)
-	// The error crosses the playscape task boundary as text.
-	if err == nil || !strings.Contains(err.Error(), "no such tool group") {
-		t.Fatalf("globex expanding acme's provider: %v, want no such tool group", err)
+	if _, _, err := runTurnAs(t, sb, "globex", rev); err != nil {
+		t.Fatalf("globex's turn: %v, want it to run without the group", err)
 	}
 	if ran["search"].Load() != 0 {
 		t.Fatal("globex's turn reached acme's server")

@@ -28,6 +28,26 @@ func IsToolGroup(name string) bool { return strings.HasPrefix(name, MCPGroupPref
 // also ErrInvalid.
 var ErrNoSuchToolGroup = fmt.Errorf("%w: no such tool group", ErrInvalid)
 
+// errMalformedGroup is a group whose members cannot be registered: a bug in
+// whatever built it, which always fails the build rather than being dropped
+// as unavailable.
+var errMalformedGroup = fmt.Errorf("%w: malformed tool group", ErrInvalid)
+
+// groupMembers returns the prefix every member of an MCP group's tools
+// carries, "<provider>__", so an approval naming a member of a group that
+// was dropped can be recognised. Empty for a name that is not an MCP group.
+func groupMembers(name string) string {
+	provider := strings.TrimPrefix(name, MCPGroupPrefix)
+	if provider == name {
+		return ""
+	}
+	provider = strings.TrimSuffix(strings.TrimSuffix(provider, ":write"), ":read")
+	if provider == "" {
+		return ""
+	}
+	return provider + "__"
+}
+
 // ToolGroup is a set of tools a spec grants under one name: an MCP
 // provider's callable tools, as pkg/mcptools builds them for one grant.
 //
@@ -49,6 +69,15 @@ var ErrNoSuchToolGroup = fmt.Errorf("%w: no such tool group", ErrInvalid)
 // the group builds its members under that class. A spec granting both gets
 // the union, which is the write group: a read tool behaves the same under
 // either.
+//
+// # When a group cannot be expanded
+//
+// A group this process cannot expand right now (no such provider for the
+// tenant, the server unreachable, nothing the grant's class admits) is
+// dropped like a single unavailable tool: the run continues without its
+// tools, the model is told the group is unavailable, the operator is logged
+// why, and Runner.Unavailable lists it. WithStrictTools refuses the build
+// instead. A group with a malformed member is a bug and always refuses.
 //
 // # When a group is expanded
 //
@@ -109,7 +138,7 @@ func (c *config) group(rev Revision, name string) (ToolGroup, error) {
 	}
 	for _, t := range g.Tools {
 		if n := t.Definition().Name; n == "" || IsToolGroup(n) {
-			return ToolGroup{}, fmt.Errorf("%w: group %q has a member named %q", ErrInvalid, name, n)
+			return ToolGroup{}, fmt.Errorf("%w: group %q has a member named %q", errMalformedGroup, name, n)
 		}
 	}
 	return g, nil
