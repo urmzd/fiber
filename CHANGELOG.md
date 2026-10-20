@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.0 (2026-10-20)
+
+### Features
+
+- host-triggered compaction and tool arguments on tool events (#23) ([c8c1d6d](https://github.com/urmzd/fiber/commit/c8c1d6d7c7c19a3939d82e40b1d13857b48566b6))
+
+### Misc
+
+- **runtime**: prove an inline sub-task's workspace and spawn confinement (#22) ([52b5e2a](https://github.com/urmzd/fiber/commit/52b5e2ae571e3b800547749d21e713fe4dfc975b))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.14.2...v0.15.0)
+
+
 ## 0.14.2 (2026-10-20)
 
 ### Bug Fixes
