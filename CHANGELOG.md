@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.1 (2026-10-20)
+
+### Bug Fixes
+
+- **agentrt**: drop a granted tool the deployment cannot resolve (#27) ([d1ff855](https://github.com/urmzd/fiber/commit/d1ff855e7611e6bc456a2db1e1649cb99b4a8a05))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.17.0...v0.17.1)
+
+
 ## 0.17.0 (2026-10-20)
 
 ### Features
