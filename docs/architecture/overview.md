@@ -338,8 +338,11 @@ keys); a deployment that needs Redis bounded sets an eviction policy.
 
 A host can ask a running turn to summarize the older part of its history now,
 instead of waiting for the deployment's budget (`FIBER_COMPACT_TOKENS`). The
-deployment has to take requests (`agentrt.Compaction.OnRequest`,
-`FIBER_COMPACT_ON_REQUEST`).
+deployment has to take requests (`agentrt.Compaction.OnRequest` on its agents
+and `runtime.WithCompactRequests` on the runtime, both set by
+`FIBER_COMPACT_ON_REQUEST`). A turn of a runtime that takes them holds a
+second control subscription, beside the stop one, for as long as it runs; the
+binary sizes its Redis pool for both.
 
 ```
 POST /v1/runs/{id}/compact         a host calls runtime.Compact instead
