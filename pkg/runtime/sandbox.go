@@ -621,7 +621,10 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	// copy: the pinned definition itself is never edited.
 	rev.Spec.Tools = granted
 
-	opts := append(append([]agentrt.Option{}, s.agentOpts...), agentrt.WithTools(tools))
+	// The sandbox's logger goes first so a host's own agent options can
+	// replace it; it is where a granted tool the turn had to drop is
+	// reported to the operator.
+	opts := append(append([]agentrt.Option{agentrt.WithLogger(s.logger)}, s.agentOpts...), agentrt.WithTools(tools))
 	if s.knowledge != nil {
 		names := make([]string, 0, len(rev.Spec.Sources))
 		for _, src := range rev.Spec.Sources {
