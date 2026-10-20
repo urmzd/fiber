@@ -51,9 +51,10 @@ message AgentSpec {
   // "claude-haiku-5-5". Empty takes the deployment default.
   string model = 3;
 
-  // Provider selects the LLM backend ("anthropic", "ollama"). Empty takes the
-  // deployment default. Provider and model are separate fields because the
-  // same model name can be served by more than one provider.
+  // Provider selects the LLM backend ("anthropic", "ollama", "openai" for
+  // OpenAI or any OpenAI-compatible server). Empty takes the deployment
+  // default. Provider and model are separate fields because the same model
+  // name can be served by more than one provider.
   string provider = 4;
 
   // SystemPrompt is the agent's standing instruction. It is the single largest
@@ -66,7 +67,9 @@ message AgentSpec {
   // deployment's catalog of connector actions ("jira_transition",
   // "github_comment"). A name that the deployment does not offer is rejected
   // at create time rather than silently ignored, so a spec cannot appear to
-  // grant a capability it does not have. Empty grants no tools.
+  // grant a capability it does not have. An entry "mcp:<provider>"
+  // ("mcp:urmzd") grants every accepted tool of that MCP provider; the
+  // model is shown the member tools, never the group. Empty grants no tools.
   repeated string tools = 6;
 
   // Sources are the corpora this agent retrieves from. Retrieval is

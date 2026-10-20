@@ -78,7 +78,7 @@ event. Each run pins an agent revision, so retries use the same definition.
 | Prebuilt CLI | macOS or Linux |
 | Build or run examples | Go version from [`go.mod`](go.mod), Git |
 | Persistent local stack | Docker with Compose v2, Make |
-| Real model inference | Provider credentials or a local Ollama service |
+| Real model inference | Provider credentials, a local Ollama service, or an OpenAI-compatible server |
 
 ### Script (macOS / Linux)
 
@@ -156,6 +156,27 @@ JSON
 fiber agent create -f docs-bot.json
 fiber tag docs-bot "how does a release get out the door?"
 ```
+
+To use OpenAI, or any server that speaks its Chat Completions API (vLLM,
+LM Studio, llama.cpp, OpenRouter, Groq), set `"provider": "openai"` and the
+model that server hosts. For a local server, point fiber at it instead of
+setting a key:
+
+```sh
+export OPENAI_BASE_URL="http://localhost:8000/v1"   # omit for OpenAI itself
+export OPENAI_API_KEY="your-api-key"                # optional for a local server
+```
+
+Models saige's catalog does not know report their token usage and no cost.
+
+An agent can be granted an MCP provider's tools as one name:
+`"tools": ["mcp:urmzd"]` grants every tool an admin accepted on the provider
+`urmzd`. The model is shown each member tool (`urmzd__create_issue`), never
+the group, and approvals name members: `"approvals": ["urmzd__create_issue"]`.
+The group is expanded each time a run builds the agent, so a newly accepted
+tool reaches the agent without a new revision. `fiber serve` does not connect
+to MCP servers yet; a host embedding `pkg/agentrt` supplies groups with
+`agentrt.WithToolGroups` or from its tool catalog.
 
 After configuring the GitHub and webhook connectors, route the same agent's
 answer to multiple destinations. Replace the example addresses with yours:
@@ -238,6 +259,8 @@ adds product workflows and a web surface on top of the platform.
 | `FIBER_POSTGRES_URL` | Persist the registry, run ledger, queue, and knowledge |
 | `FIBER_REDIS_URL` | Use Redis Streams for the event bus |
 | `ANTHROPIC_API_KEY` | Authenticate the Anthropic provider |
+| `OPENAI_API_KEY` | Authenticate the `openai` provider; optional with `OPENAI_BASE_URL` |
+| `OPENAI_BASE_URL` | Point the `openai` provider at an OpenAI-compatible server |
 | `FIBER_EMBEDDINGS_URL`, `_MODEL`, `_KEY`, `_DIMENSIONS` | Configure an OpenAI-compatible embeddings endpoint |
 | `FIBER_AUTHOR_PROVIDER`, `FIBER_AUTHOR_MODEL` | Select the built-in author agent's model |
 | `FIBER_COMPACT_TOKENS` | Enable history compaction at a token threshold; off by default |

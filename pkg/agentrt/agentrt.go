@@ -317,6 +317,7 @@ type config struct {
 	providers map[string]ProviderFunc
 	script    [][]saigetypes.Delta
 	tools     Tools
+	groups    map[string]ToolGroup
 	retriever Retriever
 	maxIter   int
 	logger    *slog.Logger
@@ -446,6 +447,17 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	// the cache for an edit that only reordered a list.
 	tools := saigetypes.NewToolRegistry()
 	for _, name := range rev.Spec.Tools {
+		if IsToolGroup(name) {
+			// The members are registered, never the group itself.
+			g, err := cfg.group(rev, name)
+			if err != nil {
+				return nil, err
+			}
+			for _, t := range g.Tools {
+				tools.Register(t)
+			}
+			continue
+		}
 		if name == AskPersonToolName {
 			// Built in: its answer comes from the turn, which no catalog
 			// can know.

@@ -719,7 +719,7 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 		base = b
 	}
 
-	return agentrt.ToolsFunc(func(name string) (saigetypes.Tool, error) {
+	return turnCatalog{base: base, lookup: func(name string) (saigetypes.Tool, error) {
 		if t, ok := delegates[name]; ok {
 			return t, nil
 		}
@@ -734,7 +734,26 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 			return &hostCallTool{Tool: t, sandbox: s, parent: req, send: send}, nil
 		}
 		return t, nil
-	}), granted, nil
+	}}, granted, nil
+}
+
+// turnCatalog is a turn's tools: the lookup turnTools builds, plus the
+// deployment catalog's tool groups, so a spec granting "mcp:<provider>"
+// expands against the same per-turn catalog its single tools resolve from.
+// Delegation tools belong to no group: Access.Spawn alone grants them.
+type turnCatalog struct {
+	base   agentrt.Tools
+	lookup func(name string) (saigetypes.Tool, error)
+}
+
+func (c turnCatalog) Lookup(name string) (saigetypes.Tool, error) { return c.lookup(name) }
+
+func (c turnCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
+	groups, ok := c.base.(agentrt.ToolGroups)
+	if !ok {
+		return agentrt.ToolGroup{}, fmt.Errorf("%w: %q (this deployment's tool catalog has no groups)", agentrt.ErrNoSuchToolGroup, name)
+	}
+	return groups.ToolGroup(name)
 }
 
 // delegateTool lets an agent tag another agent, gated by the spawn allowlist.

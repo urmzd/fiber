@@ -54,8 +54,12 @@
 // accepted description and schema, and a Capability of read or write.
 // Execute returns a Go error for a refusal (ErrHeldBack, ErrDenied) and for a
 // tool that reported failure, which saige records as the call's error and
-// shows the model; the turn continues. Grouping a provider's tools under an
-// "mcp:<name>" grant is the wiring's job, not this package's.
+// shows the model; the turn continues. A spec grants a whole provider as
+// "mcp:<name>"; the host turns a Toolset into that group with
+//
+//	agentrt.ToolGroup{Name: agentrt.MCPGroup(p.Name), Tools: ts.All()}
+//
+// and this package stays independent of agentrt.
 package mcptools
 
 import (

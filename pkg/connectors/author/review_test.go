@@ -67,6 +67,24 @@ func TestReviewFindsWhatIsWrongWithADraftAndNothingElse(t *testing.T) {
 			want: []string{author.CodeUngrantedTool + ":jira_transition"},
 		},
 		{
+			name: "an MCP tool group grants its provider's tools and needs no mention",
+			edit: func(s *agentspec.AgentSpec) {
+				s.Tools = []string{"mcp:docs"}
+				s.SystemPrompt += " Look things up with docs__search."
+			},
+			world: author.World{
+				Tools: []string{"jira_comment", "docs__search", "mcp:docs"},
+			},
+		},
+		{
+			name: "an MCP tool group the deployment cannot resolve",
+			edit: func(s *agentspec.AgentSpec) { s.Tools = []string{"mcp:linear"} },
+			world: author.World{
+				Tools: []string{"jira_comment", "mcp:docs"},
+			},
+			want: []string{author.CodeUnknownTool + ":mcp:linear"},
+		},
+		{
 			name: "with no catalog, a backticked sibling of a granted tool",
 			edit: func(s *agentspec.AgentSpec) {
 				s.Tools = []string{"jira_comment"}
