@@ -155,7 +155,7 @@ func tagToProto(t envelope.Tag) *mandatumv1.Tag {
 		Agent:  t.Agent,
 		Origin: t.Origin,
 		Text:   t.Text,
-		Actor:  &mandatumv1.Actor{Id: t.Actor.ID, Display: t.Actor.Display, Bot: t.Actor.Bot},
+		Actor:  &mandatumv1.Actor{Id: t.Actor.ID, Display: t.Actor.Display, Bot: t.Actor.Bot, User: t.Actor.User},
 		Meta:   t.Meta,
 		At:     timeToProto(t.At),
 	}
@@ -185,7 +185,7 @@ func actorFromProto(p *mandatumv1.Actor) envelope.Actor {
 	if p == nil {
 		return envelope.Actor{}
 	}
-	return envelope.Actor{ID: p.GetId(), Display: p.GetDisplay(), Bot: p.GetBot()}
+	return envelope.Actor{ID: p.GetId(), Display: p.GetDisplay(), Bot: p.GetBot(), User: p.GetUser()}
 }
 
 // addressFromProto rebuilds an address and revalidates it. The structured form

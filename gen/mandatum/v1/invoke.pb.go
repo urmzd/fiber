@@ -295,7 +295,13 @@ type Actor struct {
 	// Bot reports whether the actor is automation rather than a person. It is the
 	// field a connector checks to avoid answering its own messages, which is the
 	// usual way an agent loop becomes an infinite loop.
-	Bot           bool `protobuf:"varint,3,opt,name=bot,proto3" json:"bot,omitempty"`
+	Bot bool `protobuf:"varint,3,opt,name=bot,proto3" json:"bot,omitempty"`
+	// User is the host's own account for the actor, when the surface that
+	// raised the tag knows it: the user id of the product a person signed in
+	// to, as opposed to the connector-native Id. Like the rest of the actor it
+	// is set by the server from the credential and kept only from a credential
+	// trusted to act for others; a caller cannot name it for itself.
+	User          string `protobuf:"bytes,4,opt,name=user,proto3" json:"user,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -349,6 +355,13 @@ func (x *Actor) GetBot() bool {
 		return x.Bot
 	}
 	return false
+}
+
+func (x *Actor) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
 }
 
 // Tag is a request to an agent: the canonical form every trigger translates
@@ -1754,11 +1767,12 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x05\x10\x10\"Q\n" +
 	"\x05Route\x12,\n" +
 	"\x06target\x18\x01 \x01(\v2\x14.mandatum.v1.AddressR\x06target\x12\x14\n" +
-	"\x05kinds\x18\x02 \x03(\tR\x05kindsJ\x04\b\x03\x10\x10\"I\n" +
+	"\x05kinds\x18\x02 \x03(\tR\x05kindsJ\x04\b\x03\x10\x10\"]\n" +
 	"\x05Actor\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\adisplay\x18\x02 \x01(\tR\adisplay\x12\x10\n" +
-	"\x03bot\x18\x03 \x01(\bR\x03botJ\x04\b\x04\x10\x10\"\xb3\x03\n" +
+	"\x03bot\x18\x03 \x01(\bR\x03bot\x12\x12\n" +
+	"\x04user\x18\x04 \x01(\tR\x04userJ\x04\b\x05\x10\x10\"\xb3\x03\n" +
 	"\x03Tag\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x16\n" +

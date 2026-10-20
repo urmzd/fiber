@@ -101,8 +101,15 @@ message Actor {
   // usual way an agent loop becomes an infinite loop.
   bool bot = 3;
 
+  // User is the host's own account for the actor, when the surface that
+  // raised the tag knows it: the user id of the product a person signed in
+  // to, as opposed to the connector-native Id. Like the rest of the actor it
+  // is set by the server from the credential and kept only from a credential
+  // trusted to act for others; a caller cannot name it for itself.
+  string user = 4;
+
   // Reserved for growth.
-  reserved 4 to 15;
+  reserved 5 to 15;
 }
 
 // Tag is a request to an agent: the canonical form every trigger translates

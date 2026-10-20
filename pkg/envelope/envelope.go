@@ -141,6 +141,11 @@ type Actor struct {
 	Display string `json:"display,omitempty"`
 	// Bot reports whether the actor is automation rather than a person.
 	Bot bool `json:"bot,omitempty"`
+	// User is the host's own account for the actor (the user id of the
+	// product a person signed in to), when the surface knows it. It is an
+	// authorization fact like ID: the server keeps it only from a credential
+	// trusted to act for others.
+	User string `json:"user,omitempty"`
 }
 
 // Route is one delivery instruction: where to send events, and which ones.

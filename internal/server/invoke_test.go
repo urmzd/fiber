@@ -103,6 +103,12 @@ func TestTheActorComesFromTheCredentialUnlessItMayActForOthers(t *testing.T) {
 			&mandatumv1.Actor{Id: "U1", Display: "Alice"}, envelope.Actor{ID: "U1", Display: "Alice"}},
 		{"a surface credential that names nobody is itself", tokenSurface,
 			nil, envelope.Actor{ID: "slack-surface"}},
+		{"a plain credential cannot claim a host user", tokenAcme,
+			&mandatumv1.Actor{Id: subjectAcme, User: "user-42"}, envelope.Actor{ID: subjectAcme}},
+		{"a surface credential keeps the host user it names", tokenSurface,
+			&mandatumv1.Actor{Id: "U1", Display: "Alice", User: "user-42"}, envelope.Actor{ID: "U1", Display: "Alice", User: "user-42"}},
+		{"a surface credential naming a user and no id is itself", tokenSurface,
+			&mandatumv1.Actor{User: "user-42"}, envelope.Actor{ID: "slack-surface"}},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
