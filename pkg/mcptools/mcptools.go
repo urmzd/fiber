@@ -286,11 +286,11 @@ func (s *Session) Offered(ctx context.Context) ([]toolprovider.Tool, error) {
 		}
 		schema, err := marshalSchema(t.InputSchema)
 		if err != nil {
-			return nil, fmt.Errorf("mcptools: tool %q of %q: %w", t.Name, s.provider.Name, err)
+			return nil, s.red.err(fmt.Errorf("mcptools: tool %q of %q: %w", t.Name, s.provider.Name, err))
 		}
 		tool, err := toolprovider.NewTool(t.Name, t.Description, schema)
 		if err != nil {
-			return nil, fmt.Errorf("mcptools: provider %q: %w", s.provider.Name, err)
+			return nil, s.red.err(fmt.Errorf("mcptools: provider %q: %w", s.provider.Name, err))
 		}
 		out = append(out, tool)
 	}

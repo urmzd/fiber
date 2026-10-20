@@ -22,6 +22,7 @@ type Toolset struct {
 	grant   toolprovider.Grant
 	diff    toolprovider.Diff
 	byName  map[string]*callable
+	denied  map[string]toolprovider.Tool
 	names   []string
 }
 
@@ -37,11 +38,17 @@ func (s *Session) Toolset(ctx context.Context, accepted toolprovider.Snapshot, g
 	if err != nil {
 		return nil, err
 	}
-	ts := &Toolset{session: s, grant: grant, diff: diff, byName: map[string]*callable{}}
+	ts := &Toolset{session: s, grant: grant, diff: diff, byName: map[string]*callable{}, denied: map[string]toolprovider.Tool{}}
 	for _, t := range diff.Unchanged {
+		// A tool the grant does not permit is never converted, so its schema
+		// cannot keep the tools the grant does permit from loading.
+		if !grant.Permits(t.Class) {
+			ts.denied[toolprovider.QualifiedName(s.provider.Name, t.Name)] = t
+			continue
+		}
 		c, err := newCallable(s, t, grant)
 		if err != nil {
-			return nil, err
+			return nil, s.red.err(err)
 		}
 		ts.byName[c.def.Name] = c
 		ts.names = append(ts.names, c.def.Name)
@@ -58,14 +65,14 @@ func (ts *Toolset) Diff() toolprovider.Diff { return ts.diff }
 // tool that is not accepted as offered, or ErrDenied for one the grant does
 // not permit.
 func (ts *Toolset) Lookup(name string) (saigetypes.Tool, error) {
+	if t, ok := ts.denied[name]; ok {
+		return nil, ts.session.red.err(fmt.Errorf("%w: %q is a %s tool and the grant is %s",
+			ErrDenied, name, t.Class.Effective(), grantName(ts.grant)))
+	}
 	c, ok := ts.byName[name]
 	if !ok {
-		return nil, fmt.Errorf("%w: %q is not an accepted tool of provider %q, have %v",
-			ErrHeldBack, name, ts.session.provider.Name, ts.names)
-	}
-	if !ts.grant.Permits(c.tool.Class) {
-		return nil, fmt.Errorf("%w: %q is a %s tool and the grant is %s",
-			ErrDenied, name, c.tool.Class.Effective(), grantName(ts.grant))
+		return nil, ts.session.red.err(fmt.Errorf("%w: %q is not an accepted tool of provider %q, have %v",
+			ErrHeldBack, name, ts.session.provider.Name, ts.names))
 	}
 	return c, nil
 }
@@ -119,8 +126,8 @@ func (c *callable) Definition() saigetypes.ToolDef { return c.def }
 // as accepted, and only then calls it.
 func (c *callable) Execute(ctx context.Context, args map[string]any) (string, error) {
 	if !c.grant.Permits(c.tool.Class) {
-		return "", fmt.Errorf("%w: %q is a %s tool and the grant is %s",
-			ErrDenied, c.def.Name, c.tool.Class.Effective(), grantName(c.grant))
+		return "", c.session.red.err(fmt.Errorf("%w: %q is a %s tool and the grant is %s",
+			ErrDenied, c.def.Name, c.tool.Class.Effective(), grantName(c.grant)))
 	}
 	offered, ok, err := c.session.current(ctx, c.tool.Name)
 	if err != nil {
@@ -128,9 +135,9 @@ func (c *callable) Execute(ctx context.Context, args map[string]any) (string, er
 	}
 	switch {
 	case !ok:
-		return "", fmt.Errorf("%w: %q is no longer offered by %q", ErrHeldBack, c.def.Name, c.session.provider.Name)
+		return "", c.session.red.err(fmt.Errorf("%w: %q is no longer offered by %q", ErrHeldBack, c.def.Name, c.session.provider.Name))
 	case offered.Description != c.tool.Description || offered.SchemaHash != c.tool.SchemaHash:
-		return "", fmt.Errorf("%w: %q changed on %q since it was accepted", ErrHeldBack, c.def.Name, c.session.provider.Name)
+		return "", c.session.red.err(fmt.Errorf("%w: %q changed on %q since it was accepted", ErrHeldBack, c.def.Name, c.session.provider.Name))
 	}
 	if args == nil {
 		args = map[string]any{}
@@ -201,19 +208,31 @@ func marshalSchema(schema any) (json.RawMessage, error) {
 
 // parameterSchema decodes an accepted JSON schema into saige's form, with the
 // same rules pkg/agentrt applies to connector actions: an object, or nothing,
-// and no $defs, whose references saige cannot resolve.
+// and no $defs, whose references saige cannot resolve. A nullable property,
+// written as anyOf/oneOf of one type and {"type":"null"} or as a type array of
+// one type and "null", becomes that type with Nullable set. Any other anyOf,
+// oneOf, allOf, $ref or multi-type array is refused rather than dropped, so a
+// tool is never offered to a model with a schema that means something else.
 func parameterSchema(raw json.RawMessage) (saigetypes.ParameterSchema, error) {
 	if len(raw) == 0 {
 		return saigetypes.ParameterSchema{Type: saigetypes.SchemaObject}, nil
 	}
-	var s saigetypes.ParameterSchema
-	if err := json.Unmarshal(raw, &s); err != nil {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
 		return saigetypes.ParameterSchema{}, fmt.Errorf("schema is not JSON Schema: %w", err)
 	}
-	var refs struct {
-		Defs map[string]json.RawMessage `json:"$defs"`
+	if defs, ok := doc["$defs"].(map[string]any); ok && len(defs) > 0 {
+		return saigetypes.ParameterSchema{}, errors.New("schema uses $defs/$ref, which is not supported")
 	}
-	if err := json.Unmarshal(raw, &refs); err != nil {
+	if err := normalizeProperties(doc, "", 0); err != nil {
+		return saigetypes.ParameterSchema{}, err
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return saigetypes.ParameterSchema{}, fmt.Errorf("schema is not JSON Schema: %w", err)
+	}
+	var s saigetypes.ParameterSchema
+	if err := json.Unmarshal(b, &s); err != nil {
 		return saigetypes.ParameterSchema{}, fmt.Errorf("schema is not JSON Schema: %w", err)
 	}
 	if s.Type == "" {
@@ -222,8 +241,98 @@ func parameterSchema(raw json.RawMessage) (saigetypes.ParameterSchema, error) {
 	if s.Type != saigetypes.SchemaObject {
 		return saigetypes.ParameterSchema{}, fmt.Errorf("schema type %q, want object", s.Type)
 	}
-	if len(refs.Defs) > 0 {
-		return saigetypes.ParameterSchema{}, errors.New("schema uses $defs/$ref, which is not supported")
-	}
 	return s, nil
+}
+
+// maxSchemaDepth bounds recursion through nested properties and items.
+const maxSchemaDepth = 32
+
+// normalizeProperties rewrites node's properties and items in place, see
+// parameterSchema.
+func normalizeProperties(node map[string]any, path string, depth int) error {
+	if depth > maxSchemaDepth {
+		return fmt.Errorf("schema nests deeper than %d levels", maxSchemaDepth)
+	}
+	if props, ok := node["properties"].(map[string]any); ok {
+		for name, v := range props {
+			p, ok := v.(map[string]any)
+			if !ok {
+				return fmt.Errorf("schema property %s is not an object", path+"."+name)
+			}
+			if err := normalizeNode(p, path+"."+name, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	if items, ok := node["items"].(map[string]any); ok {
+		if err := normalizeNode(items, path+"[]", depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeNode(p map[string]any, path string, depth int) error {
+	if _, ok := p["$ref"]; ok {
+		return fmt.Errorf("schema property %s uses $ref, which is not supported", path)
+	}
+	if _, ok := p["allOf"]; ok {
+		return fmt.Errorf("schema property %s uses allOf, which is not supported", path)
+	}
+	for _, key := range []string{"anyOf", "oneOf"} {
+		alts, ok := p[key]
+		if !ok {
+			continue
+		}
+		list, _ := alts.([]any)
+		var only map[string]any
+		nulls := 0
+		for _, a := range list {
+			m, ok := a.(map[string]any)
+			if !ok {
+				return fmt.Errorf("schema property %s: %s entry is not an object", path, key)
+			}
+			if t, _ := m["type"].(string); t == "null" && len(m) == 1 {
+				nulls++
+				continue
+			}
+			if only != nil {
+				return fmt.Errorf("schema property %s uses %s of several types, which is not supported", path, key)
+			}
+			only = m
+		}
+		if only == nil || nulls != 1 {
+			return fmt.Errorf("schema property %s uses %s other than one type or null, which is not supported", path, key)
+		}
+		delete(p, key)
+		for k, v := range only {
+			if _, set := p[k]; !set {
+				p[k] = v
+			}
+		}
+		p["nullable"] = true
+	}
+	if types, ok := p["type"].([]any); ok {
+		var only string
+		nulls := 0
+		for _, t := range types {
+			s, _ := t.(string)
+			switch {
+			case s == "null":
+				nulls++
+			case s != "" && only == "":
+				only = s
+			default:
+				return fmt.Errorf("schema property %s has several types, which is not supported", path)
+			}
+		}
+		if only == "" || nulls > 1 {
+			return fmt.Errorf("schema property %s has no single type", path)
+		}
+		p["type"] = only
+		if nulls == 1 {
+			p["nullable"] = true
+		}
+	}
+	return normalizeProperties(p, path, depth)
 }
