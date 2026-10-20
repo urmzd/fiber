@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.18.0 (2026-10-20)
+
+### Features
+
+- **envelope**: carry the host's user id on a tag's actor (#34) ([5c5fc31](https://github.com/urmzd/fiber/commit/5c5fc315c6be07facb4ab7df191f84ee45edb681))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.17.1...v0.18.0)
+
+
 ## 0.17.0 (2026-10-20)
 
 ### Features
