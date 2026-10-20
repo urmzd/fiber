@@ -149,7 +149,9 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   caller's credential and overwrites whatever the client sent.
 - **Neither is the actor.** A tag's actor is the credential's subject unless
   the credential is marked `ActAs`, which is what a surface that authenticated
-  the person itself holds. Authorship and approvals are decided on it.
+  the person itself holds. Authorship and approvals are decided on it. The
+  same holds for every actor field, `user` (the host's account id) included:
+  a credential without `ActAs` cannot set any of them.
 - This is a v0 alpha: keep the surface small and document limitations honestly
   rather than papering over them.
 
