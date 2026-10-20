@@ -174,7 +174,7 @@ func Connect(ctx context.Context, p toolprovider.Provider, opts ...Option) (*Ses
 	client := mcp.NewClient(&mcp.Implementation{Name: "fiber", Version: "v0"}, &mcp.ClientOptions{Logger: logger})
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return nil, fmt.Errorf("mcptools: connect %q: %w", p.Name, red.err(err))
+		return nil, red.err(fmt.Errorf("mcptools: connect %q: %w", p.Name, err))
 	}
 	s.cs = cs
 	logger.Debug("mcptools: connected", "transport", string(p.Transport), "credential", secret)
@@ -278,19 +278,28 @@ func (s *Session) Close() error { return s.red.err(s.cs.Close()) }
 
 // Offered lists the tools the server offers now, as toolprovider tools with
 // canonical schemas and hashes and no class.
+//
+// Every error an exported method returns passes through the session's
+// redactor at one point, so text a server supplied (a tool name, a schema, a
+// failure message) can never carry the credential out.
 func (s *Session) Offered(ctx context.Context) ([]toolprovider.Tool, error) {
+	out, err := s.offered(ctx)
+	return out, s.red.err(err)
+}
+
+func (s *Session) offered(ctx context.Context) ([]toolprovider.Tool, error) {
 	var out []toolprovider.Tool
 	for t, err := range s.cs.Tools(ctx, nil) {
 		if err != nil {
-			return nil, fmt.Errorf("mcptools: list tools of %q: %w", s.provider.Name, s.red.err(err))
+			return nil, fmt.Errorf("mcptools: list tools of %q: %w", s.provider.Name, err)
 		}
 		schema, err := marshalSchema(t.InputSchema)
 		if err != nil {
-			return nil, s.red.err(fmt.Errorf("mcptools: tool %q of %q: %w", t.Name, s.provider.Name, err))
+			return nil, fmt.Errorf("mcptools: tool %q of %q: %w", t.Name, s.provider.Name, err)
 		}
 		tool, err := toolprovider.NewTool(t.Name, t.Description, schema)
 		if err != nil {
-			return nil, s.red.err(fmt.Errorf("mcptools: provider %q: %w", s.provider.Name, err))
+			return nil, fmt.Errorf("mcptools: provider %q: %w", s.provider.Name, err)
 		}
 		out = append(out, tool)
 	}
@@ -300,7 +309,12 @@ func (s *Session) Offered(ctx context.Context) ([]toolprovider.Tool, error) {
 // Diff lists what the server offers and compares it with accepted, which is
 // what an admin reviews before calling toolprovider.Store.Accept.
 func (s *Session) Diff(ctx context.Context, accepted toolprovider.Snapshot) (toolprovider.Diff, error) {
-	offered, err := s.Offered(ctx)
+	d, err := s.diff(ctx, accepted)
+	return d, s.red.err(err)
+}
+
+func (s *Session) diff(ctx context.Context, accepted toolprovider.Snapshot) (toolprovider.Diff, error) {
+	offered, err := s.offered(ctx)
 	if err != nil {
 		return toolprovider.Diff{}, err
 	}
@@ -312,7 +326,7 @@ func (s *Session) Diff(ctx context.Context, accepted toolprovider.Snapshot) (too
 // list_changed notification, which is sent asynchronously (the Go SDK delays
 // it on purpose) and so can arrive after a call to the changed tool.
 func (s *Session) current(ctx context.Context, name string) (toolprovider.Tool, bool, error) {
-	offered, err := s.Offered(ctx)
+	offered, err := s.offered(ctx)
 	if err != nil {
 		return toolprovider.Tool{}, false, err
 	}

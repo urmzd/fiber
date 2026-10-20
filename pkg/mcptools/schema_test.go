@@ -168,3 +168,107 @@ func TestServerSuppliedToolNamesAreRedactedInErrors(t *testing.T) {
 		t.Fatalf("Lookup error = %v, want an error without the credential", err)
 	}
 }
+
+// TestNoErrorCarriesTheCredential drives every error path an exported
+// function has with a tool whose name is the credential, and checks that no
+// error text contains it.
+func TestNoErrorCarriesTheCredential(t *testing.T) {
+	ctx := context.Background()
+	f := newFake()
+	leaky := "leak_" + token
+	f.srv.AddTool(&mcp.Tool{Name: leaky, Description: "fails", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			r := textResult("failure")
+			r.IsError = true
+			return r, nil
+		})
+	url, _ := httpFake(t, f)
+	s, err := mcptools.Connect(ctx, httpProvider(url+"/mcp"), mcptools.WithResolver(resolver(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	var errs []error
+	check := func(where string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Errorf("%s: want an error", where)
+			return
+		}
+		errs = append(errs, err)
+		if strings.Contains(err.Error(), token) {
+			t.Errorf("%s leaked the credential: %v", where, err)
+		}
+	}
+
+	offered, err := s.Offered(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tools []toolprovider.Tool
+	for _, o := range offered {
+		if o.Name == leaky {
+			tools = append(tools, o) // no class: a write tool
+		}
+	}
+	snap := toolprovider.Snapshot{Tenant: tenant, Provider: "fake", Version: 1, Tools: tools}
+
+	read, err := s.Toolset(ctx, snap, toolprovider.GrantRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = read.Lookup("fake__" + leaky)
+	check("Lookup of a denied tool", err)
+	_, err = read.Lookup("fake__missing_" + token)
+	check("Lookup of a missing tool", err)
+
+	write, err := s.Toolset(ctx, snap, toolprovider.GrantWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := write.Lookup("fake__" + leaky)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Execute(ctx, nil)
+	check("Execute of a failing tool", err)
+	if !errors.Is(err, mcptools.ErrToolFailed) {
+		t.Errorf("Execute: %v, want ErrToolFailed", err)
+	}
+
+	// The server rewords the tool: the call is held back, and says so
+	// without the name.
+	f.srv.AddTool(&mcp.Tool{Name: leaky, Description: "reworded", InputSchema: map[string]any{"type": "object"}}, noop)
+	_, err = tool.Execute(ctx, nil)
+	check("Execute of a changed tool", err)
+	if !errors.Is(err, mcptools.ErrHeldBack) {
+		t.Errorf("Execute: %v, want ErrHeldBack", err)
+	}
+
+	_, err = s.Toolset(ctx, toolprovider.Snapshot{Tenant: tenant, Provider: "other_" + token}, toolprovider.GrantRead)
+	check("Toolset of another provider's snapshot", err)
+	if len(errs) != 5 {
+		t.Errorf("checked %d errors, want 5", len(errs))
+	}
+}
+
+func TestARootCompositionIsRefused(t *testing.T) {
+	for name, schema := range map[string]map[string]any{
+		"all_of": {"type": "object", "allOf": []any{map[string]any{"type": "object", "required": []any{"a"}, "properties": map[string]any{"a": map[string]any{"type": "string"}}}}},
+		"any_of": {"type": "object", "anyOf": []any{map[string]any{"type": "object"}, map[string]any{"type": "object", "properties": map[string]any{"b": map[string]any{"type": "string"}}}}},
+		"ref":    {"type": "object", "$ref": "#/elsewhere"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := toolprovider.NewMemory()
+			f := newFake()
+			f.srv.AddTool(&mcp.Tool{Name: "root", Description: "Root composition", InputSchema: schema}, noop)
+			s := connectInMemory(t, f, provider(store, t))
+			snap := accept(t, store, s, 0, map[string]toolprovider.Class{"root": toolprovider.ClassRead})
+			if _, err := s.Toolset(ctx, snap, toolprovider.GrantRead); err == nil || !strings.Contains(err.Error(), "not supported") {
+				t.Fatalf("Toolset = %v, want the root schema refused as not supported", err)
+			}
+		})
+	}
+}

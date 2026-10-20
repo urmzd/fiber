@@ -30,11 +30,16 @@ type Toolset struct {
 // the callable view for grant. accepted must be a snapshot of this session's
 // provider.
 func (s *Session) Toolset(ctx context.Context, accepted toolprovider.Snapshot, grant toolprovider.Grant) (*Toolset, error) {
+	ts, err := s.toolset(ctx, accepted, grant)
+	return ts, s.red.err(err)
+}
+
+func (s *Session) toolset(ctx context.Context, accepted toolprovider.Snapshot, grant toolprovider.Grant) (*Toolset, error) {
 	if accepted.Provider != s.provider.Name || (accepted.Tenant != "" && accepted.Tenant != s.provider.Tenant) {
 		return nil, fmt.Errorf("mcptools: snapshot of %s/%q given to a session on %s/%q",
 			accepted.Tenant, accepted.Provider, s.provider.Tenant, s.provider.Name)
 	}
-	diff, err := s.Diff(ctx, accepted)
+	diff, err := s.diff(ctx, accepted)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +53,7 @@ func (s *Session) Toolset(ctx context.Context, accepted toolprovider.Snapshot, g
 		}
 		c, err := newCallable(s, t, grant)
 		if err != nil {
-			return nil, s.red.err(err)
+			return nil, err
 		}
 		ts.byName[c.def.Name] = c
 		ts.names = append(ts.names, c.def.Name)
@@ -65,14 +70,22 @@ func (ts *Toolset) Diff() toolprovider.Diff { return ts.diff }
 // tool that is not accepted as offered, or ErrDenied for one the grant does
 // not permit.
 func (ts *Toolset) Lookup(name string) (saigetypes.Tool, error) {
+	c, err := ts.lookup(name)
+	if err != nil {
+		return nil, ts.session.red.err(err)
+	}
+	return c, nil
+}
+
+func (ts *Toolset) lookup(name string) (*callable, error) {
 	if t, ok := ts.denied[name]; ok {
-		return nil, ts.session.red.err(fmt.Errorf("%w: %q is a %s tool and the grant is %s",
-			ErrDenied, name, t.Class.Effective(), grantName(ts.grant)))
+		return nil, fmt.Errorf("%w: %q is a %s tool and the grant is %s",
+			ErrDenied, name, t.Class.Effective(), grantName(ts.grant))
 	}
 	c, ok := ts.byName[name]
 	if !ok {
-		return nil, ts.session.red.err(fmt.Errorf("%w: %q is not an accepted tool of provider %q, have %v",
-			ErrHeldBack, name, ts.session.provider.Name, ts.names))
+		return nil, fmt.Errorf("%w: %q is not an accepted tool of provider %q, have %v",
+			ErrHeldBack, name, ts.session.provider.Name, ts.names)
 	}
 	return c, nil
 }
@@ -125,9 +138,17 @@ func (c *callable) Definition() saigetypes.ToolDef { return c.def }
 // Execute checks the grant, checks the server still offers the tool exactly
 // as accepted, and only then calls it.
 func (c *callable) Execute(ctx context.Context, args map[string]any) (string, error) {
+	out, err := c.execute(ctx, args)
+	if err != nil {
+		return "", c.session.red.err(err)
+	}
+	return c.session.red.text(out), nil
+}
+
+func (c *callable) execute(ctx context.Context, args map[string]any) (string, error) {
 	if !c.grant.Permits(c.tool.Class) {
-		return "", c.session.red.err(fmt.Errorf("%w: %q is a %s tool and the grant is %s",
-			ErrDenied, c.def.Name, c.tool.Class.Effective(), grantName(c.grant)))
+		return "", fmt.Errorf("%w: %q is a %s tool and the grant is %s",
+			ErrDenied, c.def.Name, c.tool.Class.Effective(), grantName(c.grant))
 	}
 	offered, ok, err := c.session.current(ctx, c.tool.Name)
 	if err != nil {
@@ -135,9 +156,9 @@ func (c *callable) Execute(ctx context.Context, args map[string]any) (string, er
 	}
 	switch {
 	case !ok:
-		return "", c.session.red.err(fmt.Errorf("%w: %q is no longer offered by %q", ErrHeldBack, c.def.Name, c.session.provider.Name))
+		return "", fmt.Errorf("%w: %q is no longer offered by %q", ErrHeldBack, c.def.Name, c.session.provider.Name)
 	case offered.Description != c.tool.Description || offered.SchemaHash != c.tool.SchemaHash:
-		return "", c.session.red.err(fmt.Errorf("%w: %q changed on %q since it was accepted", ErrHeldBack, c.def.Name, c.session.provider.Name))
+		return "", fmt.Errorf("%w: %q changed on %q since it was accepted", ErrHeldBack, c.def.Name, c.session.provider.Name)
 	}
 	if args == nil {
 		args = map[string]any{}
@@ -147,15 +168,15 @@ func (c *callable) Execute(ctx context.Context, args map[string]any) (string, er
 	if err != nil {
 		// The logger scrubs the credential itself, so the raw error is safe here.
 		log.Warn("mcptools: call failed", "err", err)
-		return "", fmt.Errorf("mcptools: call %q: %w", c.def.Name, c.session.red.err(err))
+		return "", fmt.Errorf("mcptools: call %q: %w", c.def.Name, err)
 	}
 	raw := render(res)
 	if res.IsError {
 		log.Warn("mcptools: tool reported failure", "result", raw)
-		return "", fmt.Errorf("%w: %s: %s", ErrToolFailed, c.def.Name, c.session.red.text(raw))
+		return "", fmt.Errorf("%w: %s: %s", ErrToolFailed, c.def.Name, raw)
 	}
 	log.Debug("mcptools: call", "class", string(c.tool.Class.Effective()))
-	return c.session.red.text(raw), nil
+	return raw, nil
 }
 
 // render turns a tool result into the text a model reads. Text blocks are
@@ -224,7 +245,7 @@ func parameterSchema(raw json.RawMessage) (saigetypes.ParameterSchema, error) {
 	if defs, ok := doc["$defs"].(map[string]any); ok && len(defs) > 0 {
 		return saigetypes.ParameterSchema{}, errors.New("schema uses $defs/$ref, which is not supported")
 	}
-	if err := normalizeProperties(doc, "", 0); err != nil {
+	if err := normalizeNode(doc, "$", 0); err != nil {
 		return saigetypes.ParameterSchema{}, err
 	}
 	b, err := json.Marshal(doc)
@@ -248,7 +269,8 @@ func parameterSchema(raw json.RawMessage) (saigetypes.ParameterSchema, error) {
 const maxSchemaDepth = 32
 
 // normalizeProperties rewrites node's properties and items in place, see
-// parameterSchema.
+// parameterSchema. The root goes through normalizeNode too, so a root
+// allOf, $ref or union is refused rather than read as an empty object.
 func normalizeProperties(node map[string]any, path string, depth int) error {
 	if depth > maxSchemaDepth {
 		return fmt.Errorf("schema nests deeper than %d levels", maxSchemaDepth)
@@ -257,7 +279,7 @@ func normalizeProperties(node map[string]any, path string, depth int) error {
 		for name, v := range props {
 			p, ok := v.(map[string]any)
 			if !ok {
-				return fmt.Errorf("schema property %s is not an object", path+"."+name)
+				return fmt.Errorf("schema at %s is not an object", path+"."+name)
 			}
 			if err := normalizeNode(p, path+"."+name, depth+1); err != nil {
 				return err
@@ -274,10 +296,10 @@ func normalizeProperties(node map[string]any, path string, depth int) error {
 
 func normalizeNode(p map[string]any, path string, depth int) error {
 	if _, ok := p["$ref"]; ok {
-		return fmt.Errorf("schema property %s uses $ref, which is not supported", path)
+		return fmt.Errorf("schema at %s uses $ref, which is not supported", path)
 	}
 	if _, ok := p["allOf"]; ok {
-		return fmt.Errorf("schema property %s uses allOf, which is not supported", path)
+		return fmt.Errorf("schema at %s uses allOf, which is not supported", path)
 	}
 	for _, key := range []string{"anyOf", "oneOf"} {
 		alts, ok := p[key]
@@ -290,19 +312,19 @@ func normalizeNode(p map[string]any, path string, depth int) error {
 		for _, a := range list {
 			m, ok := a.(map[string]any)
 			if !ok {
-				return fmt.Errorf("schema property %s: %s entry is not an object", path, key)
+				return fmt.Errorf("schema at %s: %s entry is not an object", path, key)
 			}
 			if t, _ := m["type"].(string); t == "null" && len(m) == 1 {
 				nulls++
 				continue
 			}
 			if only != nil {
-				return fmt.Errorf("schema property %s uses %s of several types, which is not supported", path, key)
+				return fmt.Errorf("schema at %s uses %s of several types, which is not supported", path, key)
 			}
 			only = m
 		}
 		if only == nil || nulls != 1 {
-			return fmt.Errorf("schema property %s uses %s other than one type or null, which is not supported", path, key)
+			return fmt.Errorf("schema at %s uses %s other than one type or null, which is not supported", path, key)
 		}
 		delete(p, key)
 		for k, v := range only {
@@ -323,11 +345,11 @@ func normalizeNode(p map[string]any, path string, depth int) error {
 			case s != "" && only == "":
 				only = s
 			default:
-				return fmt.Errorf("schema property %s has several types, which is not supported", path)
+				return fmt.Errorf("schema at %s has several types, which is not supported", path)
 			}
 		}
 		if only == "" || nulls > 1 {
-			return fmt.Errorf("schema property %s has no single type", path)
+			return fmt.Errorf("schema at %s has no single type", path)
 		}
 		p["type"] = only
 		if nulls == 1 {
