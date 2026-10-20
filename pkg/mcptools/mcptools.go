@@ -33,7 +33,8 @@
 //
 // A provider's CredentialRef is resolved through a Resolver when Connect is
 // called, and the value is held only by the HTTP round tripper (as a bearer
-// token) or the stdio command's environment (in CredentialEnv). Every error,
+// token, sent only to the endpoint's own origin and never across a redirect
+// to another host, port or plain HTTP) or the stdio command's environment (in CredentialEnv). Every error,
 // tool result and log record that leaves this package is scrubbed of the
 // value, and Secret prints as Redacted through every fmt verb, slog and JSON.
 // A stdio server inherits only PATH and HOME from this process, not its
@@ -62,9 +63,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -80,6 +84,10 @@ var (
 	// ErrHeldBack reports a tool that is not callable because it was never
 	// accepted, or because the server changed it since it was.
 	ErrHeldBack = errors.New("mcptools: tool held back pending acceptance")
+
+	// ErrRedirectDowngrade reports a provider served over HTTPS that
+	// redirected to plain HTTP. The redirect is not followed.
+	ErrRedirectDowngrade = errors.New("mcptools: refused a redirect from https to http")
 
 	// ErrDenied reports a call the grant does not permit, such as a write
 	// tool under a read-only grant.
@@ -166,7 +174,7 @@ func Connect(ctx context.Context, p toolprovider.Provider, opts ...Option) (*Ses
 	client := mcp.NewClient(&mcp.Implementation{Name: "fiber", Version: "v0"}, &mcp.ClientOptions{Logger: logger})
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return nil, fmt.Errorf("mcptools: connect %q: %w", p.Name, red.err(err))
+		return nil, red.err(fmt.Errorf("mcptools: connect %q: %w", p.Name, err))
 	}
 	s.cs = cs
 	logger.Debug("mcptools: connected", "transport", string(p.Transport), "credential", secret)
@@ -193,21 +201,73 @@ func buildTransport(p toolprovider.Provider, secret Secret, c config) mcp.Transp
 		if next == nil {
 			next = http.DefaultTransport
 		}
-		client.Transport = bearer{next: next, secret: secret}
+		origin, ok := originOf(p.Endpoint)
+		client.Transport = bearer{next: next, secret: secret, origin: origin, ok: ok}
+		client.CheckRedirect = noDowngrade(client.CheckRedirect)
 	}
 	return &mcp.StreamableClientTransport{Endpoint: p.Endpoint, HTTPClient: &client}
 }
 
-// bearer adds the credential to every request to the provider.
+// bearer adds the credential to requests bound for the provider's own origin
+// (scheme, host and port of its endpoint) and to nothing else. A redirect to
+// another host, another port or plain HTTP gets no Authorization header, so a
+// server, or anyone who can make it redirect, cannot send the credential
+// somewhere the admin did not configure.
 type bearer struct {
 	next   http.RoundTripper
 	secret Secret
+	origin string
+	ok     bool
 }
 
 func (b bearer) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", "Bearer "+b.secret.Reveal())
+	req.Header.Del("Authorization")
+	if o, ok := originOf(req.URL.String()); b.ok && ok && o == b.origin {
+		req.Header.Set("Authorization", "Bearer "+b.secret.Reveal())
+	}
 	return b.next.RoundTrip(req)
+}
+
+// originOf returns raw's scheme://host:port with the scheme and host lowered
+// and the default port filled in, so equal origins compare equal as strings.
+func originOf(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return "", false
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port), true
+}
+
+// noDowngrade refuses a redirect from HTTPS to HTTP, then defers to next (or
+// to net/http's default limit of 10 redirects when next is nil).
+func noDowngrade(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		for _, v := range via {
+			if strings.EqualFold(v.URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return ErrRedirectDowngrade
+			}
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
 }
 
 // Provider returns the record this session was opened from.
@@ -218,11 +278,20 @@ func (s *Session) Close() error { return s.red.err(s.cs.Close()) }
 
 // Offered lists the tools the server offers now, as toolprovider tools with
 // canonical schemas and hashes and no class.
+//
+// Every error an exported method returns passes through the session's
+// redactor at one point, so text a server supplied (a tool name, a schema, a
+// failure message) can never carry the credential out.
 func (s *Session) Offered(ctx context.Context) ([]toolprovider.Tool, error) {
+	out, err := s.offered(ctx)
+	return out, s.red.err(err)
+}
+
+func (s *Session) offered(ctx context.Context) ([]toolprovider.Tool, error) {
 	var out []toolprovider.Tool
 	for t, err := range s.cs.Tools(ctx, nil) {
 		if err != nil {
-			return nil, fmt.Errorf("mcptools: list tools of %q: %w", s.provider.Name, s.red.err(err))
+			return nil, fmt.Errorf("mcptools: list tools of %q: %w", s.provider.Name, err)
 		}
 		schema, err := marshalSchema(t.InputSchema)
 		if err != nil {
@@ -240,7 +309,12 @@ func (s *Session) Offered(ctx context.Context) ([]toolprovider.Tool, error) {
 // Diff lists what the server offers and compares it with accepted, which is
 // what an admin reviews before calling toolprovider.Store.Accept.
 func (s *Session) Diff(ctx context.Context, accepted toolprovider.Snapshot) (toolprovider.Diff, error) {
-	offered, err := s.Offered(ctx)
+	d, err := s.diff(ctx, accepted)
+	return d, s.red.err(err)
+}
+
+func (s *Session) diff(ctx context.Context, accepted toolprovider.Snapshot) (toolprovider.Diff, error) {
+	offered, err := s.offered(ctx)
 	if err != nil {
 		return toolprovider.Diff{}, err
 	}
@@ -252,7 +326,7 @@ func (s *Session) Diff(ctx context.Context, accepted toolprovider.Snapshot) (too
 // list_changed notification, which is sent asynchronously (the Go SDK delays
 // it on purpose) and so can arrive after a call to the changed tool.
 func (s *Session) current(ctx context.Context, name string) (toolprovider.Tool, bool, error) {
-	offered, err := s.Offered(ctx)
+	offered, err := s.offered(ctx)
 	if err != nil {
 		return toolprovider.Tool{}, false, err
 	}
