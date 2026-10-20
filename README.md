@@ -157,6 +157,17 @@ fiber agent create -f docs-bot.json
 fiber tag docs-bot "how does a release get out the door?"
 ```
 
+Any OpenAI-compatible endpoint (Fireworks, vLLM, Together) works the same way
+with no code change. Point the `openai` provider at it, name the variable that
+holds its key, and set `"provider": "openai"` and that host's model on the spec:
+
+```sh
+export FIREWORKS_API_KEY="your-api-key"
+export FIBER_OPENAI_BASE_URL="https://api.fireworks.ai/inference/v1"
+export FIBER_OPENAI_API_KEY_ENV="FIREWORKS_API_KEY"
+fiber serve
+```
+
 After configuring the GitHub and webhook connectors, route the same agent's
 answer to multiple destinations. Replace the example addresses with yours:
 
@@ -238,6 +249,8 @@ adds product workflows and a web surface on top of the platform.
 | `FIBER_POSTGRES_URL` | Persist the registry, run ledger, queue, and knowledge |
 | `FIBER_REDIS_URL` | Use Redis Streams for the event bus |
 | `ANTHROPIC_API_KEY` | Authenticate the Anthropic provider |
+| `OPENAI_API_KEY` | Authenticate the `openai` provider when it talks to OpenAI |
+| `FIBER_OPENAI_BASE_URL`, `FIBER_OPENAI_API_KEY_ENV` | Point the `openai` provider at any OpenAI-compatible endpoint; the second names the variable that holds the key |
 | `FIBER_EMBEDDINGS_URL`, `_MODEL`, `_KEY`, `_DIMENSIONS` | Configure an OpenAI-compatible embeddings endpoint |
 | `FIBER_AUTHOR_PROVIDER`, `FIBER_AUTHOR_MODEL` | Select the built-in author agent's model |
 | `FIBER_COMPACT_TOKENS` | Enable history compaction at a token threshold; off by default |

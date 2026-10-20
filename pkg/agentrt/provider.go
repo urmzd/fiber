@@ -55,6 +55,7 @@ func defaultProviders() map[string]ProviderFunc {
 	return map[string]ProviderFunc{
 		ProviderAnthropic: nil, // resolved per Runner: it needs the cache lifetime
 		ProviderOllama:    ollamaProvider,
+		ProviderOpenAI:    OpenAICompatibleProvider(OpenAICompatible{Name: ProviderOpenAI}),
 		ProviderOffline:   nil, // resolved per Runner: it needs the script
 	}
 }

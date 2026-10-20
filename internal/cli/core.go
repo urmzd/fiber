@@ -68,6 +68,13 @@ const (
 	EnvAuthorProvider = "FIBER_AUTHOR_PROVIDER"
 	EnvAuthorModel    = "FIBER_AUTHOR_MODEL"
 
+	// EnvOpenAIBaseURL and EnvOpenAIKeyEnv point the built-in "openai"
+	// provider at any OpenAI-compatible endpoint (Fireworks, vLLM,
+	// Together). The second holds the NAME of the variable the key is in,
+	// never the key. Unset keeps OpenAI and $OPENAI_API_KEY.
+	EnvOpenAIBaseURL = "FIBER_OPENAI_BASE_URL"
+	EnvOpenAIKeyEnv  = "FIBER_OPENAI_API_KEY_ENV"
+
 	// EnvCompactTokens is the input size, in tokens, above which a run's
 	// history is compacted. Unset or zero never compacts.
 	EnvCompactTokens = "FIBER_COMPACT_TOKENS"
@@ -110,6 +117,10 @@ type coreConfig struct {
 	// AuthorProvider and AuthorModel are what the built-in author agent runs
 	// on. Empty takes the offline provider.
 	AuthorProvider, AuthorModel string
+
+	// OpenAI repoints the built-in "openai" provider. The zero value keeps
+	// OpenAI's own endpoint and $OPENAI_API_KEY.
+	OpenAI agentrt.OpenAICompatible
 
 	// CompactTokens is the history size that triggers compaction. Zero never
 	// compacts on its own.
@@ -512,6 +523,11 @@ func newExecutor(cfg coreConfig, store registry.Store, docs knowledge.Store, fil
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), rec)
 
 	agentOpts := []agentrt.Option{agentrt.WithAttachments(resolve.New(files))}
+	if cfg.OpenAI != (agentrt.OpenAICompatible{}) {
+		ep := cfg.OpenAI
+		ep.Name = agentrt.ProviderOpenAI
+		agentOpts = append(agentOpts, agentrt.WithOpenAICompatible(ep))
+	}
 	if cfg.CompactTokens > 0 || cfg.CompactOnRequest {
 		agentOpts = append(agentOpts, agentrt.WithCompaction(agentrt.Compaction{
 			MaxInputTokens: cfg.CompactTokens,

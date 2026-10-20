@@ -17,6 +17,7 @@ import (
 	"github.com/urmzd/playscape/pkg/metrics"
 
 	"github.com/urmzd/fiber/internal/server"
+	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/registry"
 )
 
@@ -120,6 +121,11 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 		return err
 	}
 
+	openAI, err := openAIFromEnv()
+	if err != nil {
+		return err
+	}
+
 	c, err := newCore(coreConfig{
 		Tenant:     opts.tenant,
 		Redis:      os.Getenv(EnvRedis),
@@ -128,6 +134,7 @@ func runServe(ctx context.Context, ui *ui, opts serveOptions) error {
 
 		AuthorProvider:   strings.TrimSpace(os.Getenv(EnvAuthorProvider)),
 		AuthorModel:      strings.TrimSpace(os.Getenv(EnvAuthorModel)),
+		OpenAI:           openAI,
 		CompactTokens:    compact,
 		CompactKeepTurns: keepTurns,
 		CompactOnRequest: onRequest,
@@ -278,6 +285,24 @@ func announce(ui *ui, c *core, opts serveOptions, addr, token string, generated 
 		ui.logf("    export %s=%s\n", EnvToken, token)
 	}
 	ui.logf("\n")
+}
+
+// openAIFromEnv reads where the built-in "openai" provider points. It is
+// validated here so a malformed URL, or a key pasted where its variable's name
+// belongs, stops the server at startup instead of failing every run.
+func openAIFromEnv() (agentrt.OpenAICompatible, error) {
+	ep := agentrt.OpenAICompatible{
+		Name:      agentrt.ProviderOpenAI,
+		BaseURL:   strings.TrimSpace(os.Getenv(EnvOpenAIBaseURL)),
+		APIKeyEnv: strings.TrimSpace(os.Getenv(EnvOpenAIKeyEnv)),
+	}
+	if err := ep.Validate(); err != nil {
+		return agentrt.OpenAICompatible{}, usagef("$%s/$%s: %v", EnvOpenAIBaseURL, EnvOpenAIKeyEnv, err)
+	}
+	if ep.BaseURL == "" && ep.APIKeyEnv == "" {
+		return agentrt.OpenAICompatible{}, nil
+	}
+	return ep, nil
 }
 
 // intFromEnv reads a non-negative integer, treating unset as zero.

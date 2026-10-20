@@ -101,12 +101,15 @@ const (
 	// ProviderOffline replays a canned script instead of calling a model.
 	// It is what makes a deployment demonstrable with no API key.
 	ProviderOffline = "offline"
+	// ProviderOpenAI is any OpenAI-compatible Chat Completions endpoint:
+	// OpenAI itself unless the deployment points it elsewhere.
+	ProviderOpenAI = "openai"
 )
 
 // KnownProviders returns the built-in provider names, sorted. It returns a
 // fresh slice so a caller extending it cannot edit this package's answer.
 func KnownProviders() []string {
-	return []string{ProviderAnthropic, ProviderOffline, ProviderOllama}
+	return []string{ProviderAnthropic, ProviderOffline, ProviderOllama, ProviderOpenAI}
 }
 
 // AgentSpec is what an agent IS.
