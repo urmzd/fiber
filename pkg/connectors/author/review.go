@@ -91,7 +91,9 @@ type World struct {
 //     Without, it is a backticked identifier sharing a connector prefix with a
 //     tool the spec does grant, which catches the common slip (granting
 //     jira_comment, instructing the agent to use jira_transition) without
-//     flagging every snake_case word.
+//     flagging every snake_case word. A tool group "group:jira" counts as
+//     granting every identifier with the jira_ prefix, since a connector's
+//     actions are named after it.
 //   - Volatile content is a date, a clock time, or phrasing such as "today
 //     is". The system prompt is the cached prefix of every request, so
 //     anything in it that changes between runs defeats prompt caching.
@@ -126,7 +128,13 @@ func Review(draft agentspec.AgentSpec, world World) []Finding {
 	agents[spec.Name] = spec
 
 	grantedPrefixes := map[string]bool{}
+	groups := map[string]bool{}
 	for t := range granted {
+		if g, ok := strings.CutPrefix(t, agentspec.ToolGroupPrefix); ok {
+			groups[g] = true
+			grantedPrefixes[g] = true
+			continue
+		}
 		if p, _, ok := strings.Cut(t, "_"); ok {
 			grantedPrefixes[p] = true
 		}
@@ -135,6 +143,11 @@ func Review(draft agentspec.AgentSpec, world World) []Finding {
 	// Instructions that reach for something the spec does not grant.
 	for _, w := range sortedKeys(words) {
 		if !strings.ContainsAny(w, "_.") || granted[w] {
+			continue
+		}
+		// A connector's actions are named after it, so a tool sharing a
+		// granted group's prefix is taken as granted through the group.
+		if groups[prefixOf(w)] {
 			continue
 		}
 		if target, ok := strings.CutPrefix(w, delegatePrefix); ok {
@@ -161,7 +174,7 @@ func Review(draft agentspec.AgentSpec, world World) []Finding {
 			add(CodeUnknownTool, SeverityError, t,
 				"the spec grants %s, which this deployment cannot resolve; an agent naming a missing tool fails to build", t)
 		}
-		if !words[key] {
+		if !words[key] && !strings.HasPrefix(key, agentspec.ToolGroupPrefix) {
 			add(CodeUnusedTool, SeverityInfo, t,
 				"the spec grants %s but the prompt never mentions it; say when to use it or drop the grant", t)
 		}

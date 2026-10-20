@@ -67,6 +67,24 @@ func TestReviewFindsWhatIsWrongWithADraftAndNothingElse(t *testing.T) {
 			want: []string{author.CodeUngrantedTool + ":jira_transition"},
 		},
 		{
+			name: "a tool group grants its connector's tools and needs no mention",
+			edit: func(s *agentspec.AgentSpec) {
+				s.Tools = []string{"group:jira"}
+				s.SystemPrompt += " Close tickets with jira_transition."
+			},
+			world: author.World{
+				Tools: []string{"jira_comment", "jira_transition", "group:jira"},
+			},
+		},
+		{
+			name: "a tool group the deployment cannot resolve",
+			edit: func(s *agentspec.AgentSpec) { s.Tools = []string{"group:linear"} },
+			world: author.World{
+				Tools: []string{"jira_comment", "group:jira"},
+			},
+			want: []string{author.CodeUnknownTool + ":group:linear"},
+		},
+		{
 			name: "with no catalog, a backticked sibling of a granted tool",
 			edit: func(s *agentspec.AgentSpec) {
 				s.Tools = []string{"jira_comment"}

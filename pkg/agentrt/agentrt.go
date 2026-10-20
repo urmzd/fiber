@@ -444,8 +444,12 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	// matters beyond tidiness: tool definitions are the first bytes of the
 	// cached prefix, and an order that followed the spec would invalidate
 	// the cache for an edit that only reordered a list.
+	granted, err := expandTools(rev, cfg.tools)
+	if err != nil {
+		return nil, err
+	}
 	tools := saigetypes.NewToolRegistry()
-	for _, name := range rev.Spec.Tools {
+	for _, name := range granted {
 		if name == AskPersonToolName {
 			// Built in: its answer comes from the turn, which no catalog
 			// can know.
@@ -490,6 +494,40 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		compaction: cfg.compaction,
 		toolArgs:   cfg.toolArgs,
 	}, nil
+}
+
+// expandTools replaces each tool group in the spec's grant with the group's
+// members, in place, and drops repeats. The registry sorts what it is given,
+// so the order here never reaches a request.
+func expandTools(rev Revision, catalog Tools) ([]string, error) {
+	out := make([]string, 0, len(rev.Spec.Tools))
+	seen := make(map[string]bool, len(rev.Spec.Tools))
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, name := range rev.Spec.Tools {
+		group, ok := strings.CutPrefix(name, ToolGroupPrefix)
+		if !ok {
+			add(name)
+			continue
+		}
+		groups, can := catalog.(ToolGroups)
+		if !can {
+			return nil, fmt.Errorf("%w: agent %q revision %d grants %q but this deployment's tool catalog has no groups",
+				ErrNoSuchToolGroup, rev.Spec.Name, rev.Rev, name)
+		}
+		members, err := groups.Group(group)
+		if err != nil {
+			return nil, fmt.Errorf("agentrt: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
+		}
+		for _, m := range members {
+			add(m)
+		}
+	}
+	return out, nil
 }
 
 // Revision returns the pinned revision this runner executes. Callers assert on

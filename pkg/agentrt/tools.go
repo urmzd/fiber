@@ -33,6 +33,34 @@ func (f ToolsFunc) Lookup(name string) (saigetypes.Tool, error) { return f(name)
 // ErrNoSuchTool reports a spec naming a tool this deployment has not loaded.
 var ErrNoSuchTool = fmt.Errorf("%w: no such tool", ErrInvalid)
 
+// ToolGroupPrefix marks an entry of Spec.Tools as a tool group rather than a
+// tool: "group:github" grants every tool in the group named github.
+const ToolGroupPrefix = "group:"
+
+// ErrNoSuchToolGroup reports a spec granting a group this deployment cannot
+// resolve.
+var ErrNoSuchToolGroup = fmt.Errorf("%w: no such tool group", ErrInvalid)
+
+// ToolGroups is the optional face of a Tools catalog that also resolves tool
+// groups. Group returns the names of the tools in the group, each of which
+// Lookup resolves.
+//
+// # When a group is expanded
+//
+// A group is expanded when a Runner is built, against the catalog that
+// Runner is given, exactly as a single tool name is resolved then. The spec,
+// its hash and its pinned revision record the group, not its members, so a
+// deployment that adds an action to a connector adds it to every agent
+// granted that connector's group on the next run. That is the point of a
+// group, and also its cost: the tool definitions are the first bytes of the
+// cached prefix, so such a deployment change invalidates the prompt cache for
+// those agents once. Grant tools one by one when the set must not move.
+//
+// A tool granted both by name and through a group is granted once.
+type ToolGroups interface {
+	Group(name string) ([]string, error)
+}
+
 // ConnectorTools resolves tool names against the actions every registered
 // connector contributes, and binds each one to a target.
 //
@@ -51,24 +79,80 @@ func ConnectorTools(reg *connector.Registry, target address.Address, after func(
 
 // ConnectorToolsForRun also binds the durable run identity for actions whose
 // authorization must not be replayed from another run.
+//
+// The catalog it returns also resolves tool groups (see ToolGroups): the group
+// "group:<connector>" is every action that connector contributes.
 func ConnectorToolsForRun(reg *connector.Registry, target address.Address, runID string, after func(payload.Action) error) Tools {
-	return ToolsFunc(func(name string) (saigetypes.Tool, error) {
-		if reg == nil {
-			return nil, fmt.Errorf("%w: %q (no connector registry configured)", ErrNoSuchTool, name)
-		}
-		for _, a := range reg.Actions() {
-			if a.Name == name {
-				invoke := a.Invoke
-				if invoke != nil {
-					a.Invoke = func(ctx context.Context, target address.Address, args json.RawMessage) (connector.Result, error) {
-						return invoke(connector.WithRunID(ctx, runID), target, args)
-					}
+	return &connectorTools{reg: reg, target: target, runID: runID, after: after}
+}
+
+type connectorTools struct {
+	reg    *connector.Registry
+	target address.Address
+	runID  string
+	after  func(payload.Action) error
+}
+
+func (c *connectorTools) Lookup(name string) (saigetypes.Tool, error) {
+	if c.reg == nil {
+		return nil, fmt.Errorf("%w: %q (no connector registry configured)", ErrNoSuchTool, name)
+	}
+	for _, a := range c.reg.Actions() {
+		if a.Name == name {
+			invoke := a.Invoke
+			if invoke != nil {
+				runID := c.runID
+				a.Invoke = func(ctx context.Context, target address.Address, args json.RawMessage) (connector.Result, error) {
+					return invoke(connector.WithRunID(ctx, runID), target, args)
 				}
-				return ActionTool(a, target, after)
 			}
+			return ActionTool(a, c.target, c.after)
 		}
-		return nil, fmt.Errorf("%w: %q is not contributed by any registered connector %v", ErrNoSuchTool, name, reg.Names())
-	})
+	}
+	return nil, fmt.Errorf("%w: %q is not contributed by any registered connector %v", ErrNoSuchTool, name, c.reg.Names())
+}
+
+// Group implements ToolGroups: a group is named after a connector, and its
+// members are the actions that connector contributes.
+func (c *connectorTools) Group(name string) ([]string, error) {
+	if c.reg == nil {
+		return nil, fmt.Errorf("%w: %q (no connector registry configured)", ErrNoSuchToolGroup, name)
+	}
+	return ConnectorGroup(c.reg, name)
+}
+
+// ConnectorGroup returns the names of the actions the connector called name
+// contributes, sorted. A connector that is not registered, or that
+// contributes no actions, is ErrNoSuchToolGroup: a grant that grants nothing
+// is a mistake to report, not an empty set to accept.
+func ConnectorGroup(reg *connector.Registry, name string) ([]string, error) {
+	conn, err := reg.Get(name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %q is not a registered connector %v", ErrNoSuchToolGroup, name, reg.Names())
+	}
+	actor, ok := conn.(connector.Actor)
+	if !ok || len(actor.Actions()) == 0 {
+		return nil, fmt.Errorf("%w: connector %q contributes no actions", ErrNoSuchToolGroup, name)
+	}
+	out := make([]string, 0, len(actor.Actions()))
+	for _, a := range actor.Actions() {
+		out = append(out, a.Name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ConnectorGroups returns the tool group grant of every registered connector
+// that contributes actions, "group:<connector>", sorted. A host lists them
+// next to the action names when it reports what a spec may grant.
+func ConnectorGroups(reg *connector.Registry) []string {
+	var out []string
+	for _, name := range reg.Names() {
+		if _, err := ConnectorGroup(reg, name); err == nil {
+			out = append(out, ToolGroupPrefix+name)
+		}
+	}
+	return out
 }
 
 // StaticTools resolves names against a fixed set, for deployments (and tests)

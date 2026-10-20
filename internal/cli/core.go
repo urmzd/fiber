@@ -366,7 +366,7 @@ func (c *core) addAuthor(ctx context.Context) error {
 			for _, act := range c.sinks.Actions() {
 				names = append(names, act.Name)
 			}
-			return names
+			return append(names, agentrt.ConnectorGroups(c.sinks)...)
 		},
 	})
 	if err != nil {

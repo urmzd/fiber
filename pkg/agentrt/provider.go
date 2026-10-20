@@ -9,6 +9,7 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	"github.com/urmzd/saige/agent/provider/anthropic"
 	"github.com/urmzd/saige/agent/provider/ollama"
+	"github.com/urmzd/saige/agent/provider/openai"
 	"github.com/urmzd/saige/agent/provider/retry"
 )
 
@@ -21,6 +22,11 @@ const (
 	ProviderAnthropic = "anthropic"
 	// ProviderOllama talks to a local daemon (see EnvOllamaHost).
 	ProviderOllama = "ollama"
+	// ProviderOpenAI speaks the OpenAI Chat Completions API: OpenAI itself,
+	// or any server that implements the same API (vLLM, LM Studio, llama.cpp,
+	// OpenRouter, Groq, Together, a gateway) when EnvOpenAIBaseURL points at
+	// it. See OpenAICompatible.
+	ProviderOpenAI = "openai"
 	// ProviderOffline replays a canned script instead of calling a model.
 	// It is what makes an fiber deployment demonstrable with no API key,
 	// no daemon, and no network: the whole path from tag to delivered event
@@ -34,10 +40,20 @@ const (
 const (
 	EnvAnthropicKey = "ANTHROPIC_API_KEY"
 	EnvOllamaHost   = "OLLAMA_HOST"
+	// EnvOpenAIKey authenticates the openai provider. It is required for
+	// the OpenAI API and optional for a compatible server, many of which
+	// run locally with no key.
+	EnvOpenAIKey = "OPENAI_API_KEY"
+	// EnvOpenAIBaseURL points the openai provider at an OpenAI-compatible
+	// server, for example http://localhost:8000/v1. Unset is OpenAI.
+	EnvOpenAIBaseURL = "OPENAI_BASE_URL"
 )
 
 // DefaultOllamaHost is used when EnvOllamaHost is unset.
 const DefaultOllamaHost = "http://localhost:11434"
+
+// DefaultOpenAIBaseURL is the OpenAI API, used when no base URL is given.
+const DefaultOpenAIBaseURL = "https://api.openai.com/v1"
 
 // ProviderFunc builds the LLM provider a spec asks for.
 //
@@ -55,6 +71,7 @@ func defaultProviders() map[string]ProviderFunc {
 	return map[string]ProviderFunc{
 		ProviderAnthropic: nil, // resolved per Runner: it needs the cache lifetime
 		ProviderOllama:    ollamaProvider,
+		ProviderOpenAI:    openaiFromEnv,
 		ProviderOffline:   nil, // resolved per Runner: it needs the script
 	}
 }
@@ -120,6 +137,59 @@ func ollamaProvider(spec Spec) (saigetypes.Provider, error) {
 		return nil, fmt.Errorf("%w: agent %q: %v", ErrInvalid, spec.Name, err)
 	}
 	return withRetry(a)
+}
+
+// openaiFromEnv builds the openai provider from EnvOpenAIBaseURL and
+// EnvOpenAIKey, read at build time like every built-in provider.
+func openaiFromEnv(spec Spec) (saigetypes.Provider, error) {
+	base := os.Getenv(EnvOpenAIBaseURL)
+	key := os.Getenv(EnvOpenAIKey)
+	if base == "" && key == "" {
+		return nil, fmt.Errorf("%w: agent %q asks for the %s provider but %s is unset (set %s to use a compatible server instead)",
+			ErrInvalid, spec.Name, ProviderOpenAI, EnvOpenAIKey, EnvOpenAIBaseURL)
+	}
+	return OpenAICompatible(base, key)(spec)
+}
+
+// OpenAICompatible returns a ProviderFunc for a server that speaks the OpenAI
+// Chat Completions API at baseURL, authenticated with key. An empty baseURL is
+// DefaultOpenAIBaseURL; an empty key sends none, which is what a local server
+// expects.
+//
+// The arguments are the whole configuration. OpenAI's SDK also reads
+// OPENAI_BASE_URL and OPENAI_API_KEY from the environment, and both are
+// overridden here, so a provider registered for one server never sends the
+// OpenAI key to it or follows the environment somewhere else. The SDK's other
+// environment settings (OPENAI_ORG_ID, OPENAI_PROJECT_ID,
+// OPENAI_CUSTOM_HEADERS) still apply to every client in the process; leave
+// them unset in a deployment that also talks to third-party servers.
+//
+// The built-in "openai" provider is this function configured from the
+// environment. A deployment that talks to more than one such server registers
+// each under its own name:
+//
+//	agentrt.WithProvider("vllm", agentrt.OpenAICompatible("http://gpu-box:8000/v1", ""))
+//
+// Two things differ from the Anthropic provider and are worth knowing. There
+// are no cache breakpoints to place: OpenAI caches a request's prefix on its
+// own, which the stable-to-volatile layout already serves, and a compatible
+// server caches or not as it chooses. And a model saige's catalog does not
+// know (most models a compatible server hosts) resolves to conservative
+// capabilities and no price, so its usage reports tokens and no cost.
+func OpenAICompatible(baseURL, key string) ProviderFunc {
+	return func(spec Spec) (saigetypes.Provider, error) {
+		if spec.Model == "" {
+			return nil, fmt.Errorf("%w: agent %q asks for an OpenAI-compatible provider with no model", ErrInvalid, spec.Name)
+		}
+		if baseURL == "" {
+			baseURL = DefaultOpenAIBaseURL
+		}
+		a, err := openai.New(openai.Config{APIKey: key, Model: saigetypes.ModelID(spec.Model)}, openai.WithBaseURL(baseURL))
+		if err != nil {
+			return nil, fmt.Errorf("%w: agent %q: %v", ErrInvalid, spec.Name, err)
+		}
+		return withRetry(a)
+	}
 }
 
 // withRetry wraps a model adapter in saige's retry decorator. saige's adapters

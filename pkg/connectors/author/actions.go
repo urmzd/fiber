@@ -24,9 +24,9 @@ const specSchema = `{
         "name": {"type": "string", "description": "Agent name: letters, digits, dash and underscore."},
         "description": {"type": "string", "description": "One line on what the agent is for."},
         "model": {"type": "string", "description": "Model id."},
-        "provider": {"type": "string", "description": "Provider name, such as anthropic, ollama or offline."},
+        "provider": {"type": "string", "description": "Provider name, such as anthropic, openai (also any OpenAI-compatible server), ollama or offline."},
         "system_prompt": {"type": "string", "description": "The agent's instructions."},
-        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call."},
+        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"group:<connector>\" grants every action of that connector."},
         "sources": {
           "type": "array",
           "description": "Corpora the agent may retrieve from.",
