@@ -476,7 +476,16 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 			// The members are registered, never the group itself.
 			g, err := cfg.group(rev, name)
 			if err != nil {
-				return nil, err
+				if cfg.strictTools || errors.Is(err, errMalformedGroup) {
+					return nil, err
+				}
+				// Like a single tool this process cannot honour, a group
+				// it cannot expand right now costs the agent those tools,
+				// not the run.
+				unavailable = append(unavailable, UnavailableTool{Name: name, Reason: err.Error()})
+				cfg.logger.Warn("fiber/agentrt: a granted tool group is unavailable; the run continues without it",
+					"agent", rev.Spec.Name, "rev", rev.Rev, "group", name, "error", err)
+				continue
 			}
 			for _, t := range g.Tools {
 				tools.Register(t)
@@ -518,9 +527,12 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	for _, name := range rev.Spec.Approvals {
 		t, ok := tools.Get(name)
 		if !ok {
-			if slices.ContainsFunc(unavailable, func(u UnavailableTool) bool { return u.Name == name }) {
-				// Dropped above, so it cannot be called and there is
-				// nothing to approve.
+			if slices.ContainsFunc(unavailable, func(u UnavailableTool) bool {
+				prefix := groupMembers(u.Name)
+				return u.Name == name || (prefix != "" && strings.HasPrefix(name, prefix))
+			}) {
+				// Dropped above, alone or with its group, so it cannot be
+				// called and there is nothing to approve.
 				continue
 			}
 			return nil, fmt.Errorf("%w: agent %q revision %d requires approval for %q, which it is not granted",

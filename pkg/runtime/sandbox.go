@@ -213,9 +213,10 @@ type ToolGroupSource interface {
 // tenant and under its context. It feeds the one group mechanism
 // pkg/agentrt has: the turn's catalog answers agentrt's ToolGroups face from
 // src first and from the deployment catalog's own groups otherwise, and the
-// runner registers the members, never the group. A group src knows and cannot
-// expand fails the turn's build with agentrt.ErrNoSuchToolGroup, as any
-// unresolvable group does.
+// runner registers the members, never the group. A group src cannot expand
+// reaches the runner as agentrt.ErrNoSuchToolGroup, which drops it as
+// unavailable for that turn (or fails the build under agentrt.WithStrictTools),
+// as any unresolvable group does.
 func WithToolGroupSource(src ToolGroupSource) SandboxOption {
 	return func(s *Sandbox) {
 		if src != nil {
