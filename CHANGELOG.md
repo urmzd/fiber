@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.0 (2026-10-20)
+
+### Features
+
+- **agentrt**: OpenAI-compatible endpoints and MCP tool groups (#31) ([a108412](https://github.com/urmzd/fiber/commit/a108412281f8b769f7e8e5405d89ee131ecb4b6f))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.15.0...v0.16.0)
+
+
 ## 0.15.0 (2026-10-20)
 
 ### Features
