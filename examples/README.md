@@ -7,6 +7,7 @@ for Postgres, Redis and a model provider, so `go run` is the only setup.
 
 | Example | Command | What it proves |
 | --- | --- | --- |
+| [`downstream`](downstream) | `go run ./examples/downstream serve` | A team's own binary on fiber with no fork: it registers a model provider, an OpenAI-compatible endpoint and a tool through `fiberapp`, then runs the same server and CLI. |
 | [`local`](local) | `go run ./examples/local` | The whole architecture end to end: a declarative agent, immutable revisions, a tag raised in one connector answered in two others, N:M selectivity, an uninvolved third party reading the stream, first-class citations, and a replayed run that does not re-execute a recorded activity. |
 
 ## local

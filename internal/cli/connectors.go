@@ -119,6 +119,13 @@ func buildConnectors(cfg coreConfig, store registry.Store, blobs blob.Store) (*c
 			return nil, fmt.Errorf("cli: register %s: %w", c.Name(), err)
 		}
 	}
+	// Connectors a binary built on fiber added, after the built-in ones: a
+	// name both claim is refused by the registry rather than shadowed.
+	for _, c := range cfg.Ext.Connectors {
+		if err := reg.Register(c); err != nil {
+			return nil, fmt.Errorf("cli: register %s: %w", c.Name(), err)
+		}
+	}
 	return reg, nil
 }
 

@@ -36,7 +36,8 @@
 - Composition: pkg/agentrt/{agentrt,translate,citation,provider,spec,tools,usage,park}.go, pkg/agentrt/payload/payload.go, pkg/runtime/{runtime,sandbox,seq,stop,compact,usage,park}.go, pkg/router/{router,delivery}.go
 - Connectors: pkg/connectors/{slack,github,jira,cron,webhook}/, shared helpers in pkg/connectors/internal/{httpjson,inbound,render,sink}/ and pkg/connectors/mention/
 - Transport: proto/mandatum/v1/{agent,bus,invoke}.proto, gen/mandatum/v1/ (committed), internal/server/{server,agent,bus,invoke,stop,compact,answer,sse,webhook,auth,convert}.go
-- CLI: cmd/fiber/main.go, internal/cli/core.go (the composition root), internal/cli/{serve,work,agent,tag,stop,answer,listen,version,update,format,client,render}.go
+- Extending without a fork: fiberapp/fiberapp.go (`Main` plus options for model providers, tool sources, connectors, MCP tool providers), `serve --providers FILE` (JSON model endpoints and MCP tool providers), examples/downstream/main.go
+- CLI: cmd/fiber/main.go, internal/cli/core.go (the composition root), internal/cli/extensions.go, internal/cli/{serve,work,agent,tag,stop,answer,listen,version,update,format,client,render}.go
 - Example: examples/local/main.go (zero infrastructure, no API key, no network)
 
 ## API Cheatsheet
