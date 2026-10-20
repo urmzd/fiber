@@ -39,7 +39,7 @@ sandboxing and access control.
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
 | `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
-| `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. Providers: `anthropic`, `ollama`, `offline`, and `openai`, which `WithOpenAICompatible` points at any Chat Completions endpoint by base URL and key variable name. A granted tool it cannot resolve is dropped and announced to the model (`WithStrictTools` refuses instead). `payload/` holds typed event bodies. |
+| `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model (`WithStrictTools` refuses instead). `payload/` holds typed event bodies. |
 | `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
 | `internal/server` | Connect handlers, SSE, webhook ingress, tenant interceptor. |

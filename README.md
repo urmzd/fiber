@@ -78,7 +78,7 @@ event. Each run pins an agent revision, so retries use the same definition.
 | Prebuilt CLI | macOS or Linux |
 | Build or run examples | Go version from [`go.mod`](go.mod), Git |
 | Persistent local stack | Docker with Compose v2, Make |
-| Real model inference | Provider credentials or a local Ollama service |
+| Real model inference | Provider credentials, a local Ollama service, or an OpenAI-compatible server |
 
 ### Script (macOS / Linux)
 
@@ -157,16 +157,53 @@ fiber agent create -f docs-bot.json
 fiber tag docs-bot "how does a release get out the door?"
 ```
 
-Any OpenAI-compatible endpoint (Fireworks, vLLM, Together) works the same way
-with no code change. Point the `openai` provider at it, name the variable that
-holds its key, and set `"provider": "openai"` and that host's model on the spec:
+To use OpenAI, or any server that speaks its Chat Completions API (vLLM,
+LM Studio, llama.cpp, OpenRouter, Groq), set `"provider": "openai"` and the
+model that server hosts. For a local server, point fiber at it instead of
+setting a key:
 
 ```sh
-export FIREWORKS_API_KEY="your-api-key"
-export FIBER_OPENAI_BASE_URL="https://api.fireworks.ai/inference/v1"
-export FIBER_OPENAI_API_KEY_ENV="FIREWORKS_API_KEY"
-fiber serve
+export OPENAI_BASE_URL="http://localhost:8000/v1"   # omit for OpenAI itself
+export OPENAI_API_KEY="your-api-key"                # optional for a local server
 ```
+
+Models saige's catalog does not know report their token usage and no cost.
+
+An agent can name fallback models, tried in order when a call to its primary
+model fails with an error another model could fix (an outage, a rate limit, a
+refused credential):
+
+```json
+"fallbacks": [
+  {"provider": "openai", "model": "gpt-5"},
+  {"provider": "ollama", "model": "llama4"}
+]
+```
+
+Each fallback names a provider the deployment knows and a model, none repeats
+the primary or another fallback, and there are at most four. By default any
+error another model could fix falls through. `"fallback_on"` narrows that to
+named classes: `unavailable` (an outage), `rate_limit`, `transient` (a timeout
+or reset connection, and also a rate limit or outage), `auth`,
+`context_length` and `content_filter`, or `any` alone, which is the default.
+For example `"fallback_on": ["rate_limit", "unavailable"]`. It is a set, and
+naming it without fallbacks is refused. Whatever it names, an invalid
+request, a stopped run or an exhausted budget does not fall through, and a
+stream that already produced output is not replayed on another model. Every
+fallback is built with the agent, so one whose provider is not configured
+(say, `OPENAI_API_KEY` is unset) fails the build like the primary would. Each
+call is priced on the rate card of the model that answered it. Order is part
+of the revision: reordering fallbacks is an edit. A spec without fallbacks
+hashes exactly as it did before they existed.
+
+An agent can be granted an MCP provider's tools as one name:
+`"tools": ["mcp:urmzd"]` grants every tool an admin accepted on the provider
+`urmzd`. The model is shown each member tool (`urmzd__create_issue`), never
+the group, and approvals name members: `"approvals": ["urmzd__create_issue"]`.
+The group is expanded each time a run builds the agent, so a newly accepted
+tool reaches the agent without a new revision. `fiber serve` does not connect
+to MCP servers yet; a host embedding `pkg/agentrt` supplies groups with
+`agentrt.WithToolGroups` or from its tool catalog.
 
 After configuring the GitHub and webhook connectors, route the same agent's
 answer to multiple destinations. Replace the example addresses with yours:
@@ -249,8 +286,8 @@ adds product workflows and a web surface on top of the platform.
 | `FIBER_POSTGRES_URL` | Persist the registry, run ledger, queue, and knowledge |
 | `FIBER_REDIS_URL` | Use Redis Streams for the event bus |
 | `ANTHROPIC_API_KEY` | Authenticate the Anthropic provider |
-| `OPENAI_API_KEY` | Authenticate the `openai` provider when it talks to OpenAI |
-| `FIBER_OPENAI_BASE_URL`, `FIBER_OPENAI_API_KEY_ENV` | Point the `openai` provider at any OpenAI-compatible endpoint; the second names the variable that holds the key |
+| `OPENAI_API_KEY` | Authenticate the `openai` provider; optional with `OPENAI_BASE_URL` |
+| `OPENAI_BASE_URL` | Point the `openai` provider at an OpenAI-compatible server |
 | `FIBER_EMBEDDINGS_URL`, `_MODEL`, `_KEY`, `_DIMENSIONS` | Configure an OpenAI-compatible embeddings endpoint |
 | `FIBER_AUTHOR_PROVIDER`, `FIBER_AUTHOR_MODEL` | Select the built-in author agent's model |
 | `FIBER_COMPACT_TOKENS` | Enable history compaction at a token threshold; off by default |
@@ -285,7 +322,7 @@ connecting from a host CLI. Connector setup is covered in the
 - Compacting a running turn on request is the HTTP route `POST /v1/runs/{id}/compact`, not an RPC. The request is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
 - A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
-- A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
+- A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
 - Cost is reported only for models saige's price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to routes that select `usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
 
 ## Reproduce the Screenshot

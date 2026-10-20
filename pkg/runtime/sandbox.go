@@ -722,7 +722,7 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 		base = b
 	}
 
-	return agentrt.ToolsFunc(func(name string) (saigetypes.Tool, error) {
+	return turnCatalog{base: base, lookup: func(name string) (saigetypes.Tool, error) {
 		if t, ok := delegates[name]; ok {
 			return t, nil
 		}
@@ -737,7 +737,26 @@ func (s *Sandbox) turnTools(rt tool.Runtime, req Request, send func(agentrt.Chun
 			return &hostCallTool{Tool: t, sandbox: s, parent: req, send: send}, nil
 		}
 		return t, nil
-	}), granted, nil
+	}}, granted, nil
+}
+
+// turnCatalog is a turn's tools: the lookup turnTools builds, plus the
+// deployment catalog's tool groups, so a spec granting "mcp:<provider>"
+// expands against the same per-turn catalog its single tools resolve from.
+// Delegation tools belong to no group: Access.Spawn alone grants them.
+type turnCatalog struct {
+	base   agentrt.Tools
+	lookup func(name string) (saigetypes.Tool, error)
+}
+
+func (c turnCatalog) Lookup(name string) (saigetypes.Tool, error) { return c.lookup(name) }
+
+func (c turnCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
+	groups, ok := c.base.(agentrt.ToolGroups)
+	if !ok {
+		return agentrt.ToolGroup{}, fmt.Errorf("%w: %q (this deployment's tool catalog has no groups)", agentrt.ErrNoSuchToolGroup, name)
+	}
+	return groups.ToolGroup(name)
 }
 
 // delegateTool lets an agent tag another agent, gated by the spawn allowlist.
@@ -1092,6 +1111,16 @@ func (t *hostCallTool) Execute(ctx context.Context, args map[string]any) (string
 	defer done()
 	return t.Tool.Execute(ctx, args)
 }
+
+// Approval forwards a per-call approval to the tool the host wraps, so a host
+// call tool that decides per call who must approve it still asks.
+func (t *hostCallTool) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
+	if approving, ok := t.Tool.(agentrt.Approving); ok {
+		return approving.Approval(call)
+	}
+	return agentrt.ApprovalRequest{}, false
+}
+
 func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
 	if awaiting, ok := t.Tool.(agentrt.Awaiting); ok {
 		return awaiting.AwaitQuestion(call)

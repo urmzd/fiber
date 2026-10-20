@@ -396,8 +396,18 @@ message Question {
   // AskedAt is when the run asked.
   google.protobuf.Timestamp asked_at = 10;
 
+  // Approvers, when set on an approval, are the only people who may answer
+  // it, in place of the agent's approvers: principals, or "role:<name>".
+  // The tool that asked set them for this call. Empty leaves the agent's
+  // rule.
+  repeated string approvers = 11;
+
+  // SelfApproval, with approvers, lets the person whose request raised the
+  // run approve this call. Without approvers the agent's rule governs.
+  bool self_approval = 12;
+
   // Reserved for growth.
-  reserved 11 to 19;
+  reserved 13 to 19;
 }
 
 // QuestionTool is the tool call an approval asks about.

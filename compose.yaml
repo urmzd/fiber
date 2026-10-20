@@ -58,6 +58,10 @@ services:
       FIBER_TENANT: ${FIBER_TENANT:-default}
       # Optional. Without it, agents on the "offline" provider still run.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Optional. The "openai" provider: OpenAI, or any compatible server
+      # when OPENAI_BASE_URL is set.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
     ports:
       - "127.0.0.1:${FIBER_PORT:-8383}:8383"
     volumes:

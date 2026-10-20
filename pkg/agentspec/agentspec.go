@@ -41,6 +41,9 @@
 //   - Tools, spawn grants, workspace areas and sources are sets, not
 //     sequences: nothing downstream consumes them in order, so they are sorted.
 //     A reordered tool list is not an edit.
+//   - Fallback models are the exception: they are tried in the order given,
+//     so their order is content and is kept. The conditions they are tried
+//     on (FallbackOn) are a set, and are sorted.
 //
 // Hash then digests the canonical form with a length-prefixed encoding
 // described in hash.go. Together they give the property the registry depends
@@ -98,13 +101,59 @@ const (
 	ProviderAnthropic = "anthropic"
 	// ProviderOllama is a local Ollama daemon.
 	ProviderOllama = "ollama"
+	// ProviderOpenAI is the OpenAI API or any server compatible with it.
+	ProviderOpenAI = "openai"
 	// ProviderOffline replays a canned script instead of calling a model.
 	// It is what makes a deployment demonstrable with no API key.
 	ProviderOffline = "offline"
-	// ProviderOpenAI is any OpenAI-compatible Chat Completions endpoint:
-	// OpenAI itself unless the deployment points it elsewhere.
-	ProviderOpenAI = "openai"
 )
+
+// MCPGroupPrefix marks an entry of Tools as a tool group: "mcp:urmzd"
+// grants every tool of the MCP provider named urmzd as one name. It mirrors
+// pkg/agentrt's. Which tools a group holds is a property of a deployment
+// (which tools an admin accepted), so a group is expanded when an agent is
+// built, never here.
+const MCPGroupPrefix = "mcp:"
+
+// MaxFallbacks bounds how many models an agent may fall back to. Every
+// fallback is a client built with the agent and a model that may answer for
+// it, so the list is a policy, not a search: a short one an operator can
+// reason about. Four alternates is already five models a run may land on.
+const MaxFallbacks = 4
+
+// Conditions a spec's FallbackOn may name: the classes of model error that
+// move a call on to the next fallback model. Whatever is named, an error no
+// other model can fix (a cancelled run, an invalid request or configuration,
+// an exhausted budget) never falls through.
+const (
+	// FallbackOnAny falls through on every error but those. It cannot be
+	// combined with another condition, and it is what an empty FallbackOn
+	// means.
+	FallbackOnAny = "any"
+	// FallbackOnUnavailable is an outage: a 5xx, an overloaded provider.
+	FallbackOnUnavailable = "unavailable"
+	// FallbackOnRateLimit is a rate limit or an exhausted quota.
+	FallbackOnRateLimit = "rate_limit"
+	// FallbackOnTransient is any error a retry could fix: a timeout, a reset
+	// connection, and also a rate limit or an outage.
+	FallbackOnTransient = "transient"
+	// FallbackOnAuth is a refused or missing credential.
+	FallbackOnAuth = "auth"
+	// FallbackOnContextLength is a prompt too long for the model.
+	FallbackOnContextLength = "context_length"
+	// FallbackOnContentFilter is a request or response a provider's safety
+	// system blocked.
+	FallbackOnContentFilter = "content_filter"
+)
+
+// FallbackConditions returns every condition FallbackOn may name, sorted. It
+// returns a fresh slice so a caller cannot edit this package's answer.
+func FallbackConditions() []string {
+	return []string{
+		FallbackOnAny, FallbackOnAuth, FallbackOnContentFilter, FallbackOnContextLength,
+		FallbackOnRateLimit, FallbackOnTransient, FallbackOnUnavailable,
+	}
+}
 
 // KnownProviders returns the built-in provider names, sorted. It returns a
 // fresh slice so a caller extending it cannot edit this package's answer.
@@ -125,9 +174,24 @@ type AgentSpec struct {
 	Tools        []string `json:"tools,omitempty"`
 	Sources      []Source `json:"sources,omitempty"`
 	Access       Access   `json:"access,omitzero"`
+	// Fallbacks are the models tried, in order, when a model call to the
+	// primary (Provider and Model) fails with an error another model could
+	// fix: an outage, a rate limit, a refused credential. A request the
+	// provider rejected as invalid, a cancelled run, or an exhausted budget
+	// does not fall through. Each is built with the agent, so a fallback
+	// this deployment cannot construct fails the build like the primary
+	// would. Empty means the primary alone, which is what every revision
+	// written before fallbacks existed means too.
+	Fallbacks []ModelRef `json:"fallbacks,omitempty"`
+	// FallbackOn is when a call moves on to the next fallback: the error
+	// classes, from FallbackConditions, that fall through. Empty means
+	// FallbackOnAny. It is a set, sorted by Normalize, and naming it without
+	// any Fallbacks is invalid: there is nothing to fall back to.
+	FallbackOn []string `json:"fallback_on,omitempty"`
 	// Approvals names the tools whose every call waits for a person to
-	// approve it. Each must be a tool the agent is granted: one in Tools, or
-	// the delegation tool "tag_<agent>" of an agent in Access.Spawn. A run
+	// approve it. Each must be a tool the agent is granted: one in Tools, one
+	// in a tool group Tools grants (see MCPGroupPrefix), or the delegation
+	// tool "tag_<agent>" of an agent in Access.Spawn. A run
 	// parks on the call and resumes with the person's decision; see the
 	// runtime's "Parking a run on a person".
 	Approvals []string `json:"approvals,omitempty"`
@@ -144,6 +208,14 @@ type AgentSpec struct {
 	// a reply the agent asks with ask_person, named as Approvers are. Empty
 	// lets anyone in the tenant answer, the requester included.
 	Answerers []string `json:"answerers,omitempty"`
+}
+
+// ModelRef names one model behind one provider: a fallback for the agent's
+// primary model. The two fields mean exactly what AgentSpec.Provider and
+// AgentSpec.Model mean.
+type ModelRef struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in. Options are
@@ -238,6 +310,8 @@ func (r Revision) Clone() Revision {
 // Clone returns a deep copy of the definition.
 func (s AgentSpec) Clone() AgentSpec {
 	s.Tools = slices.Clone(s.Tools)
+	s.Fallbacks = slices.Clone(s.Fallbacks)
+	s.FallbackOn = slices.Clone(s.FallbackOn)
 	s.Approvals = slices.Clone(s.Approvals)
 	s.Approvers = slices.Clone(s.Approvers)
 	s.Answerers = slices.Clone(s.Answerers)
@@ -265,7 +339,8 @@ func NormalizeName(name string) string {
 // Normalize returns the canonical form of the definition: names lower-cased,
 // free text trimmed, set-valued fields sorted, and empty collections collapsed
 // to nil so that a spec decoded from JSON with "tools": [] is the same
-// definition as one without the field.
+// definition as one without the field. Fallbacks are a sequence, not a set:
+// their order is the order they are tried in, so it is kept.
 //
 // It never reports an error and never drops content, including content
 // Validate will reject. Dropping an empty tool name here would make the
@@ -279,6 +354,8 @@ func (s AgentSpec) Normalize() AgentSpec {
 		Provider:     NormalizeName(s.Provider),
 		SystemPrompt: strings.TrimSpace(s.SystemPrompt),
 		Tools:        normalizeSet(s.Tools, false),
+		Fallbacks:    normalizeFallbacks(s.Fallbacks),
+		FallbackOn:   normalizeSet(s.FallbackOn, true),
 		Approvals:    normalizeSet(s.Approvals, false),
 		Approvers:    normalizeSet(s.Approvers, false),
 		SelfApproval: s.SelfApproval,
@@ -354,8 +431,22 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 	if !slices.ContainsFunc(providers, func(p string) bool { return strings.EqualFold(p, c.Provider) }) {
 		return fmt.Errorf("%w: agent %q names provider %q; this deployment knows %s", ErrInvalid, c.Name, c.Provider, list(providers))
 	}
+	if err := validFallbacks(c, providers); err != nil {
+		return err
+	}
 	if err := uniqueNonEmpty("tool", c.Name, c.Tools); err != nil {
 		return err
+	}
+	groups := false
+	for _, name := range c.Tools {
+		group, ok := strings.CutPrefix(name, MCPGroupPrefix)
+		if !ok {
+			continue
+		}
+		if group == "" || strings.TrimSpace(group) != group {
+			return fmt.Errorf("%w: agent %q grants tool group %q, which names no group", ErrInvalid, c.Name, name)
+		}
+		groups = true
 	}
 	if err := uniqueNonEmpty("spawn grant", c.Name, c.Access.Spawn); err != nil {
 		return err
@@ -373,11 +464,21 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 		return fmt.Errorf("%w: agent %q names who may approve but requires no approvals", ErrInvalid, c.Name)
 	}
 	for _, name := range c.Approvals {
+		if strings.HasPrefix(name, MCPGroupPrefix) {
+			return fmt.Errorf("%w: agent %q requires approval for %q, which is a tool group; name each tool that needs approval", ErrInvalid, c.Name, name)
+		}
 		// An approval for a tool the agent cannot call would never be asked,
 		// and a definition that reads as guarded and is not is worse than one
 		// that is refused.
 		granted := slices.Contains(c.Tools, name)
 		if target, ok := strings.CutPrefix(name, "tag_"); ok && slices.Contains(c.Access.Spawn, target) {
+			granted = true
+		}
+		// A group's members are known only to a deployment, so a tool that
+		// may come from a granted group passes here. Building the agent
+		// checks it against the expanded grant and refuses to run an
+		// approval it cannot enforce, so the guard fails closed either way.
+		if groups && !strings.HasPrefix(name, MCPGroupPrefix) {
 			granted = true
 		}
 		if !granted {
@@ -408,6 +509,67 @@ func (s AgentSpec) ValidateWith(providers []string) error {
 		seen[src.Name] = struct{}{}
 	}
 	return nil
+}
+
+// validFallbacks holds every fallback to the rules the primary model is held
+// to (a provider this deployment knows, and a model), bounds the list, and
+// refuses a repeat: a fallback identical to the primary or to an earlier
+// fallback would only send the same failing request again, which is the retry
+// decorator's job, not the policy's. c is canonical.
+func validFallbacks(c AgentSpec, providers []string) error {
+	if len(c.Fallbacks) > MaxFallbacks {
+		return fmt.Errorf("%w: agent %q names %d fallback models, the limit is %d", ErrInvalid, c.Name, len(c.Fallbacks), MaxFallbacks)
+	}
+	if err := uniqueNonEmpty("fallback condition", c.Name, c.FallbackOn); err != nil {
+		return err
+	}
+	if len(c.FallbackOn) > 0 && len(c.Fallbacks) == 0 {
+		return fmt.Errorf("%w: agent %q says when to fall back (%s) but names no fallback models", ErrInvalid, c.Name, strings.Join(c.FallbackOn, ", "))
+	}
+	for _, cond := range c.FallbackOn {
+		if !slices.Contains(FallbackConditions(), cond) {
+			return fmt.Errorf("%w: agent %q falls back on %q; the conditions are %s", ErrInvalid, c.Name, cond, list(FallbackConditions()))
+		}
+		if cond == FallbackOnAny && len(c.FallbackOn) > 1 {
+			return fmt.Errorf("%w: agent %q falls back on %q together with other conditions; %q already covers them", ErrInvalid, c.Name, FallbackOnAny, FallbackOnAny)
+		}
+	}
+	seen := make(map[ModelRef]int, len(c.Fallbacks)+1)
+	seen[ModelRef{Provider: c.Provider, Model: c.Model}] = 0
+	for i, fb := range c.Fallbacks {
+		n := i + 1
+		switch {
+		case fb.Provider == "":
+			return fmt.Errorf("%w: agent %q fallback %d names no provider", ErrInvalid, c.Name, n)
+		case fb.Model == "":
+			return fmt.Errorf("%w: agent %q fallback %d (provider %q) names no model", ErrInvalid, c.Name, n, fb.Provider)
+		}
+		if !slices.ContainsFunc(providers, func(p string) bool { return strings.EqualFold(p, fb.Provider) }) {
+			return fmt.Errorf("%w: agent %q fallback %d names provider %q; this deployment knows %s", ErrInvalid, c.Name, n, fb.Provider, list(providers))
+		}
+		if prev, dup := seen[fb]; dup {
+			what := "the primary model"
+			if prev > 0 {
+				what = fmt.Sprintf("fallback %d", prev)
+			}
+			return fmt.Errorf("%w: agent %q fallback %d (%s %q) repeats %s", ErrInvalid, c.Name, n, fb.Provider, fb.Model, what)
+		}
+		seen[fb] = n
+	}
+	return nil
+}
+
+// normalizeFallbacks trims each fallback and lower-cases its provider the way
+// the primary's is, keeping the order and collapsing an empty list to nil.
+func normalizeFallbacks(fallbacks []ModelRef) []ModelRef {
+	if len(fallbacks) == 0 {
+		return nil
+	}
+	out := make([]ModelRef, 0, len(fallbacks))
+	for _, fb := range fallbacks {
+		out = append(out, ModelRef{Provider: NormalizeName(fb.Provider), Model: strings.TrimSpace(fb.Model)})
+	}
+	return out
 }
 
 // uniqueNonEmpty enforces the two rules every set-valued field shares. The

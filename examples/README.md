@@ -63,7 +63,7 @@ paths.
 | Control plane | `pkg/registry.Memory` | a `registry.Store` over Postgres |
 | Bus | `pkg/bus.Memory` | `pkg/bus` Redis Streams |
 | Ledger and queue | anchor `ledger.Memory`, `queue.Memory` | anchor `pgledger` and `redisqueue` |
-| Model | saige `agenttest.ScriptedProvider`, via the spec's `offline` provider | `anthropic`, `ollama` or `openai` (any OpenAI-compatible endpoint), by changing two fields on the spec |
+| Model | saige `agenttest.ScriptedProvider`, via the spec's `offline` provider | `anthropic`, `openai` (or any OpenAI-compatible server) or `ollama`, by changing two fields on the spec |
 | Execution | an in-process `runtime.Executor` | `runtime.NewSandbox`, a playscape node under NGAC |
 | Connectors | two fakes implementing `connector.Sink` | `pkg/connectors/slack`, `pkg/connectors/webhook` |
 

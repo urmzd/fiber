@@ -810,7 +810,9 @@ func watchChild(ctx context.Context, read func(context.Context, string) (payload
 // but a credential that raised a run as itself could otherwise name a
 // stranger to approve its own call. Approvers and answerers, when the spec
 // names them, are the only people admitted; asked_of on a question is a
-// routing hint and admits nobody.
+// routing hint and admits nobody. An approval question that names approvers
+// of its own (set per call by the tool that asked, agentrt.Approving) is
+// governed by them and by its own self-approval instead of the spec's.
 func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, req AnswerRequest) error {
 	rev, err := r.specs.At(ctx, in.Tag.Tenant, in.Tag.Agent, in.Rev)
 	if err != nil {
@@ -820,13 +822,17 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 	var admitted []string
 	switch q.Kind {
 	case payload.QuestionApproval:
-		if !rev.Spec.SelfApproval {
+		self := rev.Spec.SelfApproval
+		admitted = rev.Spec.Approvers
+		if len(q.Approvers) > 0 {
+			self, admitted = q.SelfApproval, q.Approvers
+		}
+		if !self {
 			requester := requesterOf(in.Tag)
 			if requester[by] || requester[strings.TrimSpace(req.Via)] {
 				return fmt.Errorf("%w: the request that raised this call cannot approve it; another person must", ErrNotAllowed)
 			}
 		}
-		admitted = rev.Spec.Approvers
 	case payload.QuestionChoice, payload.QuestionReply:
 		admitted = rev.Spec.Answerers
 	default:

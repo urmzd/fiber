@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.17.0 (2026-10-20)
+
+### Features
+
+- model fallbacks with fallback conditions, and per-call approvals (#32) ([0d43e9b](https://github.com/urmzd/fiber/commit/0d43e9b72b0b6e948ce81681df7664e381b93db2))
+
+### Bug Fixes
+
+- **runtime**: forward per-call approval through the host call tool (#33) ([aa7cc4c](https://github.com/urmzd/fiber/commit/aa7cc4c0105f67ebb981511d6ee8e60546edf21b))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.16.0...v0.17.0)
+
+
+## 0.16.0 (2026-10-20)
+
+### Features
+
+- **agentrt**: OpenAI-compatible endpoints and MCP tool groups (#31) ([a108412](https://github.com/urmzd/fiber/commit/a108412281f8b769f7e8e5405d89ee131ecb4b6f))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.15.0...v0.16.0)
+
+
+## 0.15.0 (2026-10-20)
+
+### Features
+
+- host-triggered compaction and tool arguments on tool events (#23) ([c8c1d6d](https://github.com/urmzd/fiber/commit/c8c1d6d7c7c19a3939d82e40b1d13857b48566b6))
+
+### Misc
+
+- **runtime**: prove an inline sub-task's workspace and spawn confinement (#22) ([52b5e2a](https://github.com/urmzd/fiber/commit/52b5e2ae571e3b800547749d21e713fe4dfc975b))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.14.2...v0.15.0)
+
+
+## 0.14.2 (2026-10-20)
+
+### Bug Fixes
+
+- **mcptools**: confine the credential to its origin and harden tool schemas (#25) ([05018fd](https://github.com/urmzd/fiber/commit/05018fd418af3a8c3575a7136048b2d7d979b278))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.14.1...v0.14.2)
+
+
 ## 0.14.1 (2026-10-18)
 
 ### Bug Fixes

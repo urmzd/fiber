@@ -32,6 +32,13 @@ type Spec struct {
 	Tools        []string `json:"tools,omitempty"`
 	Sources      []Source `json:"sources,omitempty"`
 	Access       Access   `json:"access,omitempty"`
+	// Fallbacks are the models tried, in order, when a call to the primary
+	// fails with an error another model could fix: see
+	// agentspec.AgentSpec.Fallbacks and New.
+	Fallbacks []ModelRef `json:"fallbacks,omitempty"`
+	// FallbackOn is when a call moves on to the next fallback: see
+	// FallbackConditions. Empty means FallbackOnAny.
+	FallbackOn []string `json:"fallback_on,omitempty"`
 	// Approvals names the tools whose calls wait for a person: see
 	// agentspec.AgentSpec.Approvals.
 	Approvals []string `json:"approvals,omitempty"`
@@ -40,6 +47,12 @@ type Spec struct {
 	Approvers    []string `json:"approvers,omitempty"`
 	SelfApproval bool     `json:"self_approval,omitempty"`
 	Answerers    []string `json:"answerers,omitempty"`
+}
+
+// ModelRef names one model behind one provider: one of a spec's fallbacks.
+type ModelRef struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // Source is one retrieval corpus the agent may ground answers in.

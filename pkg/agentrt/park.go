@@ -23,9 +23,10 @@ import (
 //
 //   - A tool call that needs approval. A tool carries saige markers
 //     (types.MarkedTool), either because the host's catalog wrapped it or
-//     because the agent's spec lists it in Approvals. saige stops at the call
-//     and asks; the answer is approve, deny, or approve with edited
-//     arguments.
+//     because the agent's spec lists it in Approvals; or it implements
+//     Approving and its Approval says this particular call needs one, which
+//     saige is told through a tool gate. saige stops at the call and asks;
+//     the answer is approve, deny, or approve with edited arguments.
 //   - The ask_person tool (AskPersonTool), which the agent calls to put a
 //     question to a person: a choice among options, or a free-text reply. Its
 //     result is the answer.
@@ -165,6 +166,102 @@ func (askPerson) Execute(ctx context.Context, args map[string]any) (string, erro
 }
 
 type answersKey struct{}
+
+// MaxApprovers bounds the approvers an ApprovalRequest names. They travel on
+// the question, in an event every sink is sent.
+const MaxApprovers = 32
+
+// ApprovalRequest is the approval one tool call needs, as an Approving tool
+// describes it.
+type ApprovalRequest struct {
+	// Prompt is the question, for a person. Empty asks "Allow <agent> to
+	// call <tool>?".
+	Prompt string
+	// AskedOf is a hint at who should answer, as on payload.Question. It
+	// admits nobody.
+	AskedOf string
+	// Approvers, when set, are the only people who may answer this call's
+	// approval, named as a spec's Approvers are (principals, or
+	// "role:<name>"), in place of the spec's. Empty leaves the spec's rule.
+	Approvers []string
+	// SelfApproval lets the person whose request raised the run approve
+	// this call. It counts only with Approvers: without them the spec's
+	// SelfApproval governs.
+	SelfApproval bool
+	// ExpiresIn is how long the question waits before it is denied. Zero
+	// keeps the runner's question lifetime. It is capped at MaxApprovalWait.
+	ExpiresIn time.Duration
+}
+
+// MaxApprovalWait bounds how long an Approving tool may ask a question to
+// wait for an answer.
+const MaxApprovalWait = 7 * 24 * time.Hour
+
+// Approving is a tool whose calls may each need a person's approval, decided
+// per call rather than per tool: a delegation tool that asks only when its
+// callee's policy says so, say. Approval reports whether call needs one and
+// what to ask. It decides from call.Name and call.Arguments alone (call.ID
+// may be empty), must answer the same for the same arguments, and must be
+// safe for concurrent use.
+//
+// An approved call runs, with the arguments the person approved; a denied or
+// expired one does not, and the model is told why. A turn that cannot park
+// refuses the call. A tool that is also listed in a spec's Approvals is asked
+// about once, with the question Approval describes when it asks.
+type Approving interface {
+	Approval(call saigetypes.ToolCallPart) (ApprovalRequest, bool)
+}
+
+// approvingOf returns the Approving behind a registered tool, unwrapping the
+// marker a spec's Approvals adds.
+func approvingOf(tools *saigetypes.ToolRegistry, name string) (Approving, saigetypes.Tool, bool) {
+	t, ok := tools.Get(name)
+	if !ok {
+		return nil, nil, false
+	}
+	inner := t
+	if marked, ok := t.(*saigetypes.MarkedTool); ok {
+		inner = marked.Inner
+	}
+	a, ok := inner.(Approving)
+	return a, t, ok
+}
+
+// approvalGate tells saige which calls an Approving tool wants approved, so
+// saige stops at them and asks exactly as it does at a marked tool: the ask
+// reaches the turn as a MarkerDelta, which decide answers. Every other call
+// is allowed, leaving markers to the marker path.
+func approvalGate(tools *saigetypes.ToolRegistry) saigetypes.ToolGate {
+	return saigetypes.GateFunc(func(_ context.Context, def saigetypes.ToolDef, args map[string]any) saigetypes.GateDecision {
+		a, _, ok := approvingOf(tools, def.Name)
+		if !ok {
+			return saigetypes.Allow()
+		}
+		req, ok := a.Approval(saigetypes.ToolCallPart{Name: def.Name, Arguments: args})
+		if !ok {
+			return saigetypes.Allow()
+		}
+		d := saigetypes.RequireApproval(req.Prompt)
+		d.Marker = &saigetypes.Marker{Kind: MarkerApproval, Message: req.Prompt}
+		return d
+	})
+}
+
+// cleanApprovers trims, bounds and de-duplicates an Approving tool's
+// approvers, keeping their order.
+func cleanApprovers(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, who := range in {
+		who = clipText(who)
+		if who == "" || seen[who] || len(out) == MaxApprovers {
+			continue
+		}
+		seen[who] = true
+		out = append(out, who)
+	}
+	return out
+}
 
 // Awaiting is a tool whose result does not come from running it in the turn
 // but arrives later from outside: a delegation to a child run that the
@@ -382,6 +479,18 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 		}
 		return q, true
 	}
+	if a, t, ok := approvingOf(p.tools, tc.Name); ok {
+		if req, ok := a.Approval(tc); ok {
+			q.Kind = payload.QuestionApproval
+			q.Prompt, q.AskedOf = clipText(req.Prompt), clipText(req.AskedOf)
+			q.Approvers = cleanApprovers(req.Approvers)
+			q.SelfApproval = req.SelfApproval && len(q.Approvers) > 0
+			if req.ExpiresIn > 0 {
+				q.ExpiresAt = now.Add(min(req.ExpiresIn, MaxApprovalWait))
+			}
+			return p.approval(q, tc, t), true
+		}
+	}
 	t, ok := p.tools.Get(tc.Name)
 	if !ok {
 		return payload.Question{}, false
@@ -399,6 +508,12 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 			q.AskedOf = clipText(who)
 		}
 	}
+	return p.approval(q, tc, t), true
+}
+
+// approval completes an approval question about tc: the default prompt, the
+// call, its id, and a denial as the default on expiry.
+func (p *parker) approval(q payload.Question, tc saigetypes.ToolCallPart, t saigetypes.Tool) payload.Question {
 	if q.Prompt == "" {
 		q.Prompt = fmt.Sprintf("Allow %s to call %s?", p.agent, tc.Name)
 	}
@@ -408,7 +523,7 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 	q.ID = saigetypes.InterruptID(p.scope, nil, q.Kind, tc.ID)
 	q.Default = &payload.Answer{QuestionID: q.ID, Decision: payload.DecisionDeny, Expired: true,
 		Note: "nobody answered before the question expired"}
-	return q, true
+	return q
 }
 
 // await reports the wait a call to an Awaiting tool parks on.
