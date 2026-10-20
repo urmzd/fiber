@@ -157,3 +157,27 @@ func TestASpecWithoutANameIsRefused(t *testing.T) {
 		t.Fatal("want a nameless spec to be refused")
 	}
 }
+
+// Fallback models cross the wire in order, field for field, both ways.
+func TestFallbacksRoundTripThroughTheWire(t *testing.T) {
+	t.Parallel()
+	in := Spec{
+		Name: "docs-bot", Provider: "anthropic", Model: "claude-haiku-5-5", SystemPrompt: "p",
+		Fallbacks:  []ModelRef{{Provider: "openai", Model: "gpt-5"}, {Provider: "ollama", Model: "llama4"}},
+		FallbackOn: []string{"rate_limit", "unavailable"},
+	}
+	out, err := specFromProto(specToProto(in))
+	if err != nil {
+		t.Fatalf("specFromProto: %v", err)
+	}
+	if len(out.Fallbacks) != 2 || out.Fallbacks[0] != in.Fallbacks[0] || out.Fallbacks[1] != in.Fallbacks[1] {
+		t.Fatalf("fallbacks came back as %+v, want %+v", out.Fallbacks, in.Fallbacks)
+	}
+	if len(out.FallbackOn) != 2 || out.FallbackOn[0] != "rate_limit" || out.FallbackOn[1] != "unavailable" {
+		t.Fatalf("fallback_on came back as %v", out.FallbackOn)
+	}
+	none, err := specFromProto(specToProto(Spec{Name: "docs-bot"}))
+	if err != nil || none.Fallbacks != nil {
+		t.Fatalf("a spec without fallbacks came back with %+v (%v)", none.Fallbacks, err)
+	}
+}

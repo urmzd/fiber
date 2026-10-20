@@ -265,6 +265,7 @@ func specFromProto(p *mandatumv1.AgentSpec) (Spec, error) {
 		Approvers:    p.GetApprovers(),
 		SelfApproval: p.GetSelfApproval(),
 		Answerers:    p.GetAnswerers(),
+		FallbackOn:   p.GetFallbackOn(),
 	}
 	for _, src := range p.GetSources() {
 		s.Sources = append(s.Sources, Source{
@@ -275,6 +276,9 @@ func specFromProto(p *mandatumv1.AgentSpec) (Spec, error) {
 	}
 	if a := p.GetAccess(); a != nil {
 		s.Access = Access{Spawn: a.GetSpawn(), WorkspaceAreas: a.GetWorkspaceAreas()}
+	}
+	for _, fb := range p.GetFallbacks() {
+		s.Fallbacks = append(s.Fallbacks, ModelRef{Provider: fb.GetProvider(), Model: fb.GetModel()})
 	}
 	return s, nil
 }
@@ -291,6 +295,7 @@ func specToProto(s Spec) *mandatumv1.AgentSpec {
 		Approvers:    s.Approvers,
 		SelfApproval: s.SelfApproval,
 		Answerers:    s.Answerers,
+		FallbackOn:   s.FallbackOn,
 		Access:       &mandatumv1.Access{Spawn: s.Access.Spawn, WorkspaceAreas: s.Access.WorkspaceAreas},
 	}
 	for _, src := range s.Sources {
@@ -299,6 +304,9 @@ func specToProto(s Spec) *mandatumv1.AgentSpec {
 			Uri:     src.URI,
 			Options: src.Options,
 		})
+	}
+	for _, fb := range s.Fallbacks {
+		p.Fallbacks = append(p.Fallbacks, &mandatumv1.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	return p
 }
@@ -445,6 +453,8 @@ func questionToProto(q *payload.Question) *mandatumv1.Question {
 		ExpiresAt:     timeToProto(q.ExpiresAt),
 		DefaultAnswer: answerToProto(q.Default),
 		AskedAt:       timeToProto(q.At),
+		Approvers:     q.Approvers,
+		SelfApproval:  q.SelfApproval,
 	}
 	if t := q.Tool; t != nil {
 		out.Tool = &mandatumv1.QuestionTool{Name: t.Name, CallId: t.CallID, ArgumentsJson: string(t.Arguments), SchemaJson: string(t.Schema)}

@@ -127,6 +127,7 @@ func fromServerSpec(s server.Spec) agentspec.AgentSpec {
 		Approvers:    s.Approvers,
 		SelfApproval: s.SelfApproval,
 		Answerers:    s.Answerers,
+		FallbackOn:   s.FallbackOn,
 		Access: agentspec.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -138,6 +139,9 @@ func fromServerSpec(s server.Spec) agentspec.AgentSpec {
 			URI:     src.URI,
 			Options: src.Options,
 		})
+	}
+	for _, fb := range s.Fallbacks {
+		out.Fallbacks = append(out.Fallbacks, agentspec.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	// The store owns its memory, and this spec's slices belong to whoever
 	// decoded the request. Normalize copies every one of them, so the store
@@ -157,6 +161,7 @@ func toServerSpec(s agentspec.AgentSpec) server.Spec {
 		Approvers:    s.Approvers,
 		SelfApproval: s.SelfApproval,
 		Answerers:    s.Answerers,
+		FallbackOn:   s.FallbackOn,
 		Access: server.Access{
 			Spawn:          s.Access.Spawn,
 			WorkspaceAreas: s.Access.WorkspaceAreas,
@@ -168,6 +173,9 @@ func toServerSpec(s agentspec.AgentSpec) server.Spec {
 			URI:     src.URI,
 			Options: src.Options,
 		})
+	}
+	for _, fb := range s.Fallbacks {
+		out.Fallbacks = append(out.Fallbacks, server.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	return out
 }
@@ -230,6 +238,7 @@ func toRuntimeRevision(r agentspec.Revision) agentrt.Revision {
 		Approvers:    r.Spec.Approvers,
 		SelfApproval: r.Spec.SelfApproval,
 		Answerers:    r.Spec.Answerers,
+		FallbackOn:   r.Spec.FallbackOn,
 		Access: agentrt.Access{
 			Spawn:          r.Spec.Access.Spawn,
 			WorkspaceAreas: r.Spec.Access.WorkspaceAreas,
@@ -241,6 +250,9 @@ func toRuntimeRevision(r agentspec.Revision) agentrt.Revision {
 			URI:     src.URI,
 			Options: src.Options,
 		})
+	}
+	for _, fb := range r.Spec.Fallbacks {
+		spec.Fallbacks = append(spec.Fallbacks, agentrt.ModelRef{Provider: fb.Provider, Model: fb.Model})
 	}
 	return agentrt.Revision{
 		Spec:      spec,

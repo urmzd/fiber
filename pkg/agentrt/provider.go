@@ -3,11 +3,14 @@ package agentrt
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/saige/agent/agenttest"
 	"github.com/urmzd/saige/agent/provider/anthropic"
+	"github.com/urmzd/saige/agent/provider/fallback"
 	"github.com/urmzd/saige/agent/provider/ollama"
 	"github.com/urmzd/saige/agent/provider/openai"
 	"github.com/urmzd/saige/agent/provider/retry"
@@ -234,6 +237,150 @@ func openaiFromEnv(spec Spec) (saigetypes.Provider, error) {
 			ErrInvalid, spec.Name, ProviderOpenAI, EnvOpenAIKey, EnvOpenAIBaseURL)
 	}
 	return e.Provider()(spec)
+}
+
+// Conditions a spec's FallbackOn may name. They mirror agentspec's, and each
+// is one of saige's error classifications. Whatever is named, an error no
+// other model can fix never falls through: see fallbackRule.
+const (
+	// FallbackOnAny is fallback.DefaultFallbackOn, and what an empty
+	// FallbackOn means. It stands alone.
+	FallbackOnAny = "any"
+	// FallbackOnUnavailable is saigetypes.IsUnavailable: an outage.
+	FallbackOnUnavailable = "unavailable"
+	// FallbackOnRateLimit is saigetypes.IsRateLimit.
+	FallbackOnRateLimit = "rate_limit"
+	// FallbackOnTransient is saigetypes.IsTransient: a timeout or reset
+	// connection, and also a rate limit or an outage.
+	FallbackOnTransient = "transient"
+	// FallbackOnAuth is saigetypes.IsAuth.
+	FallbackOnAuth = "auth"
+	// FallbackOnContextLength is saigetypes.IsContextLength.
+	FallbackOnContextLength = "context_length"
+	// FallbackOnContentFilter is saigetypes.IsContentFilter.
+	FallbackOnContentFilter = "content_filter"
+)
+
+// fallbackClasses maps each condition but FallbackOnAny to saige's test.
+var fallbackClasses = map[string]func(error) bool{
+	FallbackOnUnavailable:   saigetypes.IsUnavailable,
+	FallbackOnRateLimit:     saigetypes.IsRateLimit,
+	FallbackOnTransient:     saigetypes.IsTransient,
+	FallbackOnAuth:          saigetypes.IsAuth,
+	FallbackOnContextLength: saigetypes.IsContextLength,
+	FallbackOnContentFilter: saigetypes.IsContentFilter,
+}
+
+// FallbackConditions returns every condition FallbackOn may name, sorted.
+func FallbackConditions() []string {
+	out := []string{FallbackOnAny}
+	for c := range fallbackClasses {
+		out = append(out, c)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// fallbackRule turns a spec's FallbackOn into the predicate saige's fallback
+// provider asks of each failed call. Nil means fallback.DefaultFallbackOn.
+// A named class narrows that default and never widens it: an error is
+// passed on only when the default would pass it on (so a cancelled run, an
+// invalid request or an exhausted budget never is) and it is of a named
+// class. An unknown condition is refused rather than ignored, since ignoring
+// it would fall back more or less often than the spec says.
+func fallbackRule(spec Spec) (func(error) bool, error) {
+	if len(spec.FallbackOn) == 0 {
+		return nil, nil
+	}
+	if len(spec.Fallbacks) == 0 {
+		return nil, fmt.Errorf("%w: agent %q says when to fall back but names no fallback models", ErrInvalid, spec.Name)
+	}
+	if len(spec.FallbackOn) == 1 && spec.FallbackOn[0] == FallbackOnAny {
+		return nil, nil
+	}
+	tests := make([]func(error) bool, 0, len(spec.FallbackOn))
+	for _, c := range spec.FallbackOn {
+		test, ok := fallbackClasses[c]
+		if !ok {
+			return nil, fmt.Errorf("%w: agent %q falls back on %q; the conditions are %s (%q alone)",
+				ErrInvalid, spec.Name, c, strings.Join(FallbackConditions(), ", "), FallbackOnAny)
+		}
+		tests = append(tests, test)
+	}
+	return func(err error) bool {
+		if !fallback.DefaultFallbackOn(err) {
+			return false
+		}
+		for _, test := range tests {
+			if test(err) {
+				return true
+			}
+		}
+		return false
+	}, nil
+}
+
+// modelChain builds the provider a revision's turns call, and the members
+// behind it, primary first.
+//
+// Each model, the primary and every fallback, is built through the same
+// provider table from a copy of the spec that names that model alone, so a
+// ProviderFunc builds one model and never sees the policy around it. A
+// fallback this process cannot build fails the build exactly as the primary
+// would: an agent that reads as having a safety net and silently does not is
+// worse than one that does not start.
+//
+// With fallbacks the members are composed with saige's fallback provider
+// under the spec's FallbackOn (see fallbackRule). Its default, an empty
+// FallbackOn, moves a call on to the next model on an outage, a rate limit,
+// an auth or context-length failure, and stops on a cancelled run, an
+// invalid request, or an exhausted budget, which no other model can fix. Each built-in member already retries its own
+// transient failures, so a member is given up on only once its retries are
+// spent. A stream that fails after it has delivered output is not replayed
+// on another model, since that would duplicate what the run already
+// published.
+func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Provider, error) {
+	rule, err := fallbackRule(rev.Spec)
+	if err != nil {
+		return nil, nil, err
+	}
+	refs := make([]ModelRef, 0, 1+len(rev.Spec.Fallbacks))
+	refs = append(refs, ModelRef{Provider: rev.Spec.Provider, Model: rev.Spec.Model})
+	refs = append(refs, rev.Spec.Fallbacks...)
+	members := make([]saigetypes.Provider, 0, len(refs))
+	for i, ref := range refs {
+		newProvider, ok := c.providers[ref.Provider]
+		if !ok || newProvider == nil {
+			if i == 0 {
+				return nil, nil, fmt.Errorf("%w: agent %q revision %d names provider %q; this deployment has %v",
+					ErrInvalid, rev.Spec.Name, rev.Rev, ref.Provider, providerNames(c.providers))
+			}
+			return nil, nil, fmt.Errorf("%w: agent %q revision %d fallback %d names provider %q; this deployment has %v",
+				ErrInvalid, rev.Spec.Name, rev.Rev, i, ref.Provider, providerNames(c.providers))
+		}
+		spec := rev.Spec
+		spec.Provider, spec.Model, spec.Fallbacks, spec.FallbackOn = ref.Provider, ref.Model, nil, nil
+		p, err := newProvider(spec)
+		if err != nil {
+			if i == 0 {
+				return nil, nil, err
+			}
+			return nil, nil, fmt.Errorf("agentrt: agent %q revision %d fallback %d (%s %q): %w",
+				rev.Spec.Name, rev.Rev, i, ref.Provider, ref.Model, err)
+		}
+		if p == nil {
+			return nil, nil, fmt.Errorf("%w: agent %q revision %d: provider %q built no model", ErrInvalid, rev.Spec.Name, rev.Rev, ref.Provider)
+		}
+		members = append(members, p)
+	}
+	if len(members) == 1 {
+		return members[0], members, nil
+	}
+	chain, err := fallback.New(fallback.Config{Providers: members}, fallback.WithFallbackOn(rule))
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentrt: agent %q revision %d: fallback: %w", rev.Spec.Name, rev.Rev, err)
+	}
+	return chain, members, nil
 }
 
 // withRetry wraps a model adapter in saige's retry decorator. saige's adapters

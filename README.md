@@ -169,6 +169,33 @@ export OPENAI_API_KEY="your-api-key"                # optional for a local serve
 
 Models saige's catalog does not know report their token usage and no cost.
 
+An agent can name fallback models, tried in order when a call to its primary
+model fails with an error another model could fix (an outage, a rate limit, a
+refused credential):
+
+```json
+"fallbacks": [
+  {"provider": "openai", "model": "gpt-5"},
+  {"provider": "ollama", "model": "llama4"}
+]
+```
+
+Each fallback names a provider the deployment knows and a model, none repeats
+the primary or another fallback, and there are at most four. By default any
+error another model could fix falls through. `"fallback_on"` narrows that to
+named classes: `unavailable` (an outage), `rate_limit`, `transient` (a timeout
+or reset connection, and also a rate limit or outage), `auth`,
+`context_length` and `content_filter`, or `any` alone, which is the default.
+For example `"fallback_on": ["rate_limit", "unavailable"]`. It is a set, and
+naming it without fallbacks is refused. Whatever it names, an invalid
+request, a stopped run or an exhausted budget does not fall through, and a
+stream that already produced output is not replayed on another model. Every
+fallback is built with the agent, so one whose provider is not configured
+(say, `OPENAI_API_KEY` is unset) fails the build like the primary would. Each
+call is priced on the rate card of the model that answered it. Order is part
+of the revision: reordering fallbacks is an edit. A spec without fallbacks
+hashes exactly as it did before they existed.
+
 An agent can be granted an MCP provider's tools as one name:
 `"tools": ["mcp:urmzd"]` grants every tool an admin accepted on the provider
 `urmzd`. The model is shown each member tool (`urmzd__create_issue`), never
@@ -294,7 +321,7 @@ connecting from a host CLI. Connector setup is covered in the
 - Stopping a run is the HTTP route `POST /v1/runs/{id}/stop`, not an RPC; `GetRun` reports the result as `RUN_STATUS_STOPPED`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
 - Compacting a running turn on request is the HTTP route `POST /v1/runs/{id}/compact`, not an RPC. The request is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
-- A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
+- A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
 - Cost is reported only for models saige's price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to routes that select `usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
 
 ## Reproduce the Screenshot

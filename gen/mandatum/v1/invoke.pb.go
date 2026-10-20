@@ -936,7 +936,15 @@ type Question struct {
 	// answered.
 	DefaultAnswer *Answer `protobuf:"bytes,9,opt,name=default_answer,json=defaultAnswer,proto3" json:"default_answer,omitempty"`
 	// AskedAt is when the run asked.
-	AskedAt       *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=asked_at,json=askedAt,proto3" json:"asked_at,omitempty"`
+	AskedAt *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=asked_at,json=askedAt,proto3" json:"asked_at,omitempty"`
+	// Approvers, when set on an approval, are the only people who may answer
+	// it, in place of the agent's approvers: principals, or "role:<name>".
+	// The tool that asked set them for this call. Empty leaves the agent's
+	// rule.
+	Approvers []string `protobuf:"bytes,11,rep,name=approvers,proto3" json:"approvers,omitempty"`
+	// SelfApproval, with approvers, lets the person whose request raised the
+	// run approve this call. Without approvers the agent's rule governs.
+	SelfApproval  bool `protobuf:"varint,12,opt,name=self_approval,json=selfApproval,proto3" json:"self_approval,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1039,6 +1047,20 @@ func (x *Question) GetAskedAt() *timestamppb.Timestamp {
 		return x.AskedAt
 	}
 	return nil
+}
+
+func (x *Question) GetApprovers() []string {
+	if x != nil {
+		return x.Approvers
+	}
+	return nil
+}
+
+func (x *Question) GetSelfApproval() bool {
+	if x != nil {
+		return x.SelfApproval
+	}
+	return false
 }
 
 // QuestionTool is the tool call an approval asks about.
@@ -1811,7 +1833,7 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"\n" +
 	"stopped_by\x18\x0f \x01(\tR\tstoppedBy\x12+\n" +
 	"\x05usage\x18\x10 \x01(\v2\x15.mandatum.v1.RunUsageR\x05usage\x12@\n" +
-	"\x10pending_question\x18\x11 \x01(\v2\x15.mandatum.v1.QuestionR\x0fpendingQuestionJ\x04\b\x12\x10 \"\xf4\x02\n" +
+	"\x10pending_question\x18\x11 \x01(\v2\x15.mandatum.v1.QuestionR\x0fpendingQuestionJ\x04\b\x12\x10 \"\xb7\x03\n" +
 	"\bQuestion\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x14\n" +
@@ -1824,7 +1846,9 @@ const file_mandatum_v1_invoke_proto_rawDesc = "" +
 	"expires_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12:\n" +
 	"\x0edefault_answer\x18\t \x01(\v2\x13.mandatum.v1.AnswerR\rdefaultAnswer\x125\n" +
 	"\basked_at\x18\n" +
-	" \x01(\v2\x1a.google.protobuf.TimestampR\aaskedAtJ\x04\b\v\x10\x14\"\x89\x01\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\aaskedAt\x12\x1c\n" +
+	"\tapprovers\x18\v \x03(\tR\tapprovers\x12#\n" +
+	"\rself_approval\x18\f \x01(\bR\fselfApprovalJ\x04\b\r\x10\x14\"\x89\x01\n" +
 	"\fQuestionTool\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x17\n" +
 	"\acall_id\x18\x02 \x01(\tR\x06callId\x12%\n" +

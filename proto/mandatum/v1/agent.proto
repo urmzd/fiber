@@ -104,8 +104,36 @@ message AgentSpec {
   // tenant answer.
   repeated string answerers = 12;
 
+  // Fallbacks are the models tried, in order, when a call to the primary
+  // (provider and model) fails with an error another model could fix: an
+  // outage, a rate limit, a refused credential. A request the provider
+  // rejected as invalid, a cancelled run, or an exhausted budget does not
+  // fall through. Each names a provider this deployment knows and a model,
+  // none repeats the primary or another fallback, and there are at most
+  // four. Order is content: reordering them is a new revision. Empty means
+  // the primary alone.
+  repeated ModelRef fallbacks = 13;
+
+  // FallbackOn is when a call moves on to the next fallback: the error
+  // classes that fall through, from "unavailable", "rate_limit",
+  // "transient", "auth", "context_length", "content_filter", or "any" alone.
+  // Empty means "any". Whatever is named, a cancelled run, an invalid
+  // request or an exhausted budget never falls through. It is a set, and
+  // naming it without fallbacks is invalid.
+  repeated string fallback_on = 14;
+
   // Reserved for growth. Carve new fields from the front of this range.
-  reserved 13 to 24;
+  reserved 15 to 24;
+}
+
+// ModelRef names one model behind one provider. The fields mean exactly what
+// AgentSpec.provider and AgentSpec.model mean.
+message ModelRef {
+  // Provider selects the LLM backend, as AgentSpec.provider does.
+  string provider = 1;
+
+  // Model is the provider-specific model identifier.
+  string model = 2;
 }
 
 // Source names one corpus an agent retrieves from.
