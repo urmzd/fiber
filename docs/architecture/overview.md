@@ -690,6 +690,67 @@ it resumes, they show how it was answered ("answered: approved by ana", or
 "nobody answered in time"). Answering happens on the host; a chat surface
 shows the question and does not take the answer.
 
+## Whose credential a tool uses
+
+An MCP tool provider (`pkg/toolprovider`) records how to reach a server and
+whose credential it is reached with, its `CredentialScope`:
+
+| Scope | Credential | When there is none |
+|---|---|---|
+| `shared` (the default, and what every older record reads as) | the provider's own `CredentialRef`, the same for every run | the provider is unreachable for everyone |
+| `person` | the credential of the person the run acts for, found by the host's `mcptools.PersonResolver` | that person's run gets no tools from it |
+
+A person-scoped provider has no `CredentialRef` at all, and a record that names
+one is refused: a shared credential is never a fallback for a person who has
+none, and keeping one unused on the record would leave it one edit away from
+being one.
+
+### Who a run acts for
+
+A run acts for the actor on the tag it was accepted with, as recorded in the
+ledger: the same actor approvals are decided on, which the program composing
+fiber sets from the caller's credential (a surface marked `ActAs` names the
+person it authenticated). The runtime puts that actor on every turn's context
+(`envelope.WithActor`, read with `envelope.ActorFrom`) from the run's record
+and from nothing else, so no tool argument, no trigger metadata and no text a
+model wrote can name someone else. The sandbox carries it in process to the
+playscape task, which sets it whatever the node's own context held; a
+delegated sub-task acts for its parent's actor, a child run keeps its parent's
+actor on its own tag, and a run raised for nobody (a schedule) acts for
+nobody. `runtime.ToolGroupSource` keeps its signature: a source reads the
+actor from the context it is given.
+
+### One session per person
+
+`mcptools.Grants` expands a person-scoped grant for that actor. On every
+expansion it asks the `PersonResolver` for the person's credential, a
+reference resolved like a shared one or the secret itself, and expands on a
+session of the person's own, kept per provider record version and person and
+opened with exactly that credential (and checked, after the dial, to have
+been). A credential the resolver answers differently gets a new session; one
+that is gone gets no tools on the next turn. Every session's redactor holds
+its own person's secret, so it is scrubbed from what that session returns,
+its errors and its logs. Sessions of an older record version are closed on
+the next expansion, so a provider moved to per-person credentials leaves no
+shared session open. At most `mcptools.DefaultPersonSessions` (128) person
+sessions are kept, closing the one expanded longest ago.
+
+When the person has no credential, the run acts for nobody, or no resolver is
+configured, the grant expands to nothing with `mcptools.ErrNoPersonCredential`.
+The runtime drops the group as unavailable, the operator log names the
+provider and the actor, and the model is told why through
+`agentrt.ModelNote`: a sentence written for the model ("they have not
+connected one for issues") that follows the group's name in its prompt, where
+every other reason stays the operator's. Nothing is dialled for that person,
+and no other credential is tried.
+
+An admin reviews a person-scoped provider with a credential of their own
+(`mcptools.WithPersonCredential` on `Connect`, then `Session.Diff`).
+`fiber.WithToolProvider` cannot dial one at startup, so each tool it declares
+carries the description and input schema the server offers and is accepted in
+that form when its schema hash matches; every person's session then compares
+what the server offers them with it, as every session does.
+
 ## Package DAG
 
 Dependencies run one way. Leaves are stdlib-only and know nothing about
@@ -699,7 +760,7 @@ transports, storage, or agents.
 leaves (stdlib only)
   pkg/topic        agent:name[:run], prefix containment, the control namespace
   pkg/address      github://urmzd/fiber/issues/42, slack://T01/C02?thread=...
-  pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription
+  pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription, the actor a context acts for
   pkg/signature    HMAC verification for inbound webhooks
   pkg/agentspec    immutable specs, content-addressed revisions
 
@@ -886,6 +947,21 @@ Verified against the code, and honest.
 - **A stop cannot be made for a run before it is accepted.** Nothing is
   recorded or published for a run the ledger does not hold yet; ask again once
   `Accept` has returned the run id.
+- **Per-person tools move the cached prefix between people.** A person-scoped
+  group is expanded per person, so two people in one thread can be offered
+  different tools and a different note, and the prompt cache of that thread
+  misses when the person changes. For one person it is stable.
+- **Only MCP tool providers are per person.** The connectors' own actions (the
+  `Actor` face of Slack, GitHub and Jira) and their sinks still act with the
+  credential the deployment configured for the connector, not the person's.
+- **A person's credential is looked up on every expansion.** The resolver is
+  the host's and is called once per person-scoped group per turn; a rotated
+  value behind an unchanged reference is not noticed until the reference, the
+  secret the resolver returns, or the provider record changes.
+- **Person sessions are bounded, and a closed one fails its turn's next
+  call.** Past the limit (`mcptools.WithPersonSessions`), the session expanded
+  longest ago is closed, and a turn still holding its tools sees a tool error.
+  A stdio provider runs one server process per open person session.
 
 ## Host-constructed invocation input
 

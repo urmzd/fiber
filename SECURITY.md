@@ -79,6 +79,25 @@ Connectors that receive webhooks stamp the deployment's tenant
 (`fiber.WithTenant`) on the tags they raise, because a webhook carries no
 credential to derive one from.
 
+## Tool credentials
+
+An MCP tool provider is reached with one shared credential or, when it is
+person-scoped, with the credential of the person a run acts for. That person
+is the actor on the run's accepted tag, which the runtime reads from the run
+ledger and puts on every turn's context; nothing a model produces can change
+it. A person-scoped provider names no shared credential (the store refuses a
+record that does), `mcptools.Connect` refuses to open one without a person's
+own credential, each person's session is opened with exactly theirs and kept
+apart from everyone else's, and a person with none gets no tools. A shared
+credential is never a fallback. Every resolved credential, shared or a
+person's, is redacted from tool results, errors and logs.
+
+The host decides which credential belongs to which actor
+(`mcptools.PersonResolver`), so a host that keys credentials on an actor field
+it does not set from a trusted credential is where this can fail; key them
+on `Actor.User`, the host's own account id, set only from a credential trusted
+to act for others.
+
 ## Supported Versions
 
 fiber is pre-1.0. Security fixes land on the latest minor release.
