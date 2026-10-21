@@ -168,6 +168,7 @@ jobs:
             ["runtime", "TestDelegatingParentsParkSoTheirChildrenRunAtAnyConcurrency"],
             ["runtime", "TestStoppingAParentWaitingOnAChildStopsBoth"],
             ["runtime", "TestRepeatedParksStoreTheTranscriptOnce"],
+            ["runtime", "TestAToolGroupIsExpandedForTheActorOnTheRunsRecordAcrossAPark"],
             ["durable", "TestRecordsWithPrefixReadsOnlyTheRecordsAsked"]
           ] | all(. as $required | any($events[];
             .Action == "pass"
