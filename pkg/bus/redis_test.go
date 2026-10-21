@@ -75,3 +75,19 @@ func drop(t *testing.T, client *redis.Client, prefix string) {
 		cursor = next
 	}
 }
+
+// Every run a process executes holds its control subscriptions for its whole
+// turn, each a pooled connection on Redis, so the pool reserves that many per
+// concurrent run on top of go-redis's default.
+func TestTheRedisPoolReservesEveryHeldSubscriptionOfEveryConcurrentRun(t *testing.T) {
+	base := bus.RedisPoolSize(1, 1) - 1
+	for _, tc := range []struct{ runs, streams, want int }{
+		{0, 0, base + 1},
+		{8, 1, base + 8},
+		{8, 2, base + 16},
+	} {
+		if got := bus.RedisPoolSize(tc.runs, tc.streams); got != tc.want {
+			t.Errorf("RedisPoolSize(%d, %d) = %d, want %d", tc.runs, tc.streams, got, tc.want)
+		}
+	}
+}

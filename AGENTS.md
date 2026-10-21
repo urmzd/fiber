@@ -2,9 +2,10 @@
 
 Agent library and low-latency pub/sub bus. Tag an agent from anywhere, stream
 its events to anyone, deliver them anywhere. Go module
-`github.com/urmzd/fiber`. It is a library: there is no binary and no service.
-`fiberapp` is the composition root a program embeds; warp is the platform
-built on it, and imports only `pkg/`.
+`github.com/urmzd/fiber`. It is a library you compose in Go: no binary, no
+service, no configuration files, no environment variables. The root package
+`fiber` is the composition root (`fiber.New(ctx, ...Option)`); warp is the
+platform built on it, owns all configuration, and imports only `pkg/`.
 
 **Status: v0 alpha, pre-1.0, not recommended for production.** Interfaces are
 still moving and may change between minor versions. The in-memory composition
@@ -44,7 +45,7 @@ sandboxing and access control.
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model (`WithStrictTools` refuses instead). `payload/` holds typed event bodies. |
 | `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
-| `fiberapp` | The composition root, as a library. `New(ctx, Config, ...Option)` builds an `App` (`app.go`); `Config` chooses every backend by URL (`config.go`, `ConfigFromEnv`); options add model providers, tool sources, connectors, MCP tool providers and providers files, or replace the bus, registry, executor, runtime or worker options (`fiberapp.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing. It sits at the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
+| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
 
 Discover layout with `tree` or ripgrep; do not trust stale listings.
 
@@ -163,23 +164,22 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   rendering and HTTP plumbing rather than reimplementing them.
 - **New bus backend**: implement `bus.Bus` and run it through
   `pkg/bus/bustest.Run`, which holds every backend to the identical contract.
-  Teach `bus.Open` its URL scheme.
 - **New store backend**: implement the package's `Store` and run it through
   its suite (`registrytest`, `knowledgetest`, `threadtest`,
   `toolprovidertest`, `blobtest`), as `Memory` and `Postgres` do. Wire it in
-  `fiberapp/app.go` behind a `Config` field, or offer it as an option.
-- **New agent provider**: an OpenAI-compatible endpoint needs no code (a
-  `models` entry in a providers file). Anything else outside this repo
-  is a `fiberapp.WithModelProvider` in the embedding program; see
+  `app.go` behind an option, or let callers pass it to the existing one.
+- **New agent provider**: an OpenAI-compatible endpoint is
+  `fiber.WithOpenAICompatible`. Anything else outside this repo is a
+  `fiber.WithModelProvider` in the composing program; see
   `examples/downstream`. A built-in belongs in `pkg/agentrt`'s provider
   construction. Keep `agenttest.ScriptedProvider` working, since it is what
   makes the example and the tests run with no API key.
 - **Downstream extensions**: tool sources, connectors and MCP tool providers
-  are `fiberapp` options too. Each option fills a field of `fiberapp`'s
-  `extensions`, so a new extension point is a field there, its wiring in
-  `New`, and an option.
+  are `fiber` options too. Each option fills a field of `options`
+  (`extensions.go`), so a new extension point is a field there, its wiring in
+  `New`, and an option. No option reads a file or the environment.
 - **New event kind**: add it to `pkg/envelope`, give it a typed body in
   `pkg/agentrt/payload`, and teach the connector renderers about it. Kinds are
   fields, never topics. A kind that ends a run must also be taught to
   everything that waits for a run to end: `render.Status.Terminal`, and the
-  ledger status mapping in `fiberapp/status.go` (`Status.Terminal`).
+  ledger status mapping in `status.go` (`Status.Terminal`).

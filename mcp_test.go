@@ -1,4 +1,4 @@
-package fiberapp
+package fiber
 
 import (
 	"context"
@@ -6,12 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/urmzd/fiber/pkg/address"
@@ -27,18 +27,15 @@ import (
 // model's call reaches the MCP server with the credential the provider's
 // reference resolves to, and the answer comes back to the model.
 //
-// With $FIBER_POSTGRES_TEST_URL set it runs again on Postgres, where the store
-// is migrated at startup alongside the registry and the ledger.
+// With $FIBER_POSTGRES_TEST_URL set it runs again on a Postgres pool, where
+// the store is migrated by New alongside the registry and the ledger.
 func TestTheCoreExpandsAnMCPGrantAgainstItsToolProviderStore(t *testing.T) {
-	t.Run("memory", func(t *testing.T) { coreExpandsAnMCPGrant(t, "", "acme") })
-	if url := os.Getenv("FIBER_POSTGRES_TEST_URL"); url != "" {
-		t.Run("postgres", func(t *testing.T) {
-			coreExpandsAnMCPGrant(t, url, fmt.Sprintf("acme-%d", time.Now().UnixNano()))
-		})
-	}
+	t.Run("memory", func(t *testing.T) { coreExpandsAnMCPGrant(t, nil) })
+	t.Run("postgres", func(t *testing.T) { coreExpandsAnMCPGrant(t, testPool(t)) })
 }
 
-func coreExpandsAnMCPGrant(t *testing.T, postgres, tenant string) {
+func coreExpandsAnMCPGrant(t *testing.T, pool *pgxpool.Pool) {
+	const tenant = "acme"
 	const secret = "mcp-credential-value"
 	var mu sync.Mutex
 	var mcpAuth []string
@@ -76,7 +73,11 @@ func coreExpandsAnMCPGrant(t *testing.T, postgres, tenant string) {
 	t.Setenv("ISSUES_TOKEN", secret)
 
 	box := &inbox{}
-	c := newApp(t, Config{Tenant: tenant, Postgres: postgres}, WithConnector(box))
+	opts := []Option{WithTenant(tenant), WithConnector(box)}
+	if pool != nil {
+		opts = append(opts, WithPostgres(pool))
+	}
+	c := newApp(t, opts...)
 	ctx := context.Background()
 
 	// An admin registers the provider and accepts its tool.

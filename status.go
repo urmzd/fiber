@@ -1,4 +1,4 @@
-package fiberapp
+package fiber
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 // ErrNotFound reports a run that does not exist or belongs to another
 // tenant. The two are one error on purpose: telling them apart would confirm
 // existence across a tenant boundary.
-var ErrNotFound = errors.New("fiberapp: not found")
+var ErrNotFound = errors.New("fiber: not found")
 
 // Status is where a run is in its lifecycle. It mirrors the lifecycle.*
 // event kinds: status answers "where is it now", the events answer "how did
@@ -76,11 +76,11 @@ func (a *App) Status(ctx context.Context, tenant, runID string) (Run, error) {
 		if errors.Is(err, drun.ErrNotFound) {
 			return Run{}, fmt.Errorf("%w: run %q", ErrNotFound, runID)
 		}
-		return Run{}, fmt.Errorf("fiberapp: read run %q: %w", runID, err)
+		return Run{}, fmt.Errorf("fiber: read run %q: %w", runID, err)
 	}
 	var in runtime.Input
 	if err := json.Unmarshal(rec.Input, &in); err != nil {
-		return Run{}, fmt.Errorf("fiberapp: decode run %q input: %w", runID, err)
+		return Run{}, fmt.Errorf("fiber: decode run %q input: %w", runID, err)
 	}
 	if in.Tag.Tenant != tenant {
 		return Run{}, fmt.Errorf("%w: run %q", ErrNotFound, runID)

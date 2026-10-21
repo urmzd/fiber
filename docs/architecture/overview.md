@@ -338,12 +338,13 @@ keys); a deployment that needs Redis bounded sets an eviction policy.
 ## Compacting a run on request
 
 A host can ask a running turn to summarize the older part of its history now,
-instead of waiting for the deployment's budget (`FIBER_COMPACT_TOKENS`). The
+instead of waiting for the deployment's budget (`Compaction.MaxInputTokens`). The
 deployment has to take requests (`agentrt.Compaction.OnRequest` on its agents
 and `runtime.WithCompactRequests` on the runtime, both set by
-`FIBER_COMPACT_ON_REQUEST`). A turn of a runtime that takes them holds a
+`fiber.WithCompaction` with `OnRequest`). A turn of a runtime that takes them holds a
 second control subscription, beside the stop one, for as long as it runs;
-`fiberapp` sizes its Redis pool for both.
+`bus.RedisPoolSize(runs, fiber.ControlStreams(true))` sizes a Redis pool
+for both.
 
 ```
 App.Compact / runtime.Compact
@@ -712,20 +713,24 @@ composition
   pkg/runtime      the durable anchor turn, playscape sandbox, stop, usage, parking
   pkg/router       delivery fan-out to sinks
   pkg/connectors   slack, github, jira, cron, webhook
-  fiberapp         the composition root, as a library
+  fiber (root)     the composition root, composed in Go
 ```
 
-`fiberapp/app.go` (`New`) is the composition root and the fastest way to
+`app.go` at the module root (`fiber.New`) is the composition root and the fastest way to
 understand how the system fits together: it assembles the bus, registry,
 router, runtime, sandbox and connectors in the order data flows through them.
-Every backend is selected by `fiberapp.Config` (a bus URL, one Postgres URL
-for every store family) or replaced by an option, and each backend family has
+Every backend is a constructed value passed by an option (`WithPostgres(pool)`
+for every store family, `WithBus`, or one store at a time), and anything not
+given is memory. The composition reads no configuration file and no
+`FIBER_*` variable (model providers still read their vendor's key, such as
+`ANTHROPIC_API_KEY`, when an agent is built); the program composing it owns
+configuration, and each backend family has
 a conformance suite (`bustest`, `registrytest`, `knowledgetest`,
 `threadtest`, `toolprovidertest`, `blobtest`) every implementation passes.
 
 ## No transport
 
-fiber serves nothing. A program embedding `fiberapp` calls `App.Invoke`,
+fiber serves nothing. A program composing fiber calls `App.Invoke`,
 `Status`, `Stop`, `Compact` and `Answer` in process, subscribes with
 `App.Bus().Subscribe`, and mounts `App.WebhookHandler()` (or the handlers in
 `App.Webhooks()`) wherever it serves HTTP; each webhook connector verifies its
@@ -775,7 +780,7 @@ Verified against the code, and honest.
   behind the `Bus` interface rather than growing a broker here.
 - **Agent specs are JSON**, not YAML, so fiber carries no parser dependency.
 - **A stop is reliable only with the ledger.** `runtime.WithStopLedger` must
-  be given the ledger the runs execute from, as `fiberapp` does. A host without it
+  be given the ledger the runs execute from, as `fiber.New` does. A host without it
   falls back to the bus alone, with the bounds in "How long the bus keeps a
   request". With an in-memory ledger, only the process that accepted a run can
   stop it, which is also the only process that can read it with `App.Status`.
@@ -786,7 +791,7 @@ Verified against the code, and honest.
   holds only the marker, while the surface already showed what the first
   attempt streamed.
 - **A turn holds one bus subscription while it runs.** On Redis each one holds
-  a pooled connection for most of its poll cycle. `fiberapp` sizes the pool at
+  a pooled connection for most of its poll cycle. `bus.RedisPoolSize` sizes the pool at
   go-redis's default plus one connection per run a process executes at once;
   a host building its own client should do the same. One shared subscription
   per process would remove this cost; it needs a way to subscribe to a prefix
@@ -851,7 +856,7 @@ Verified against the code, and honest.
 - **Polls read records, not transcripts, only on Postgres.** The stop poll
   (every two seconds while a turn runs), `Answer`, `PendingQuestion` and the
   child-question watch read the run's row and the records they need through
-  `runtime.WithRecordReader` (`durable.Records`, which `fiberapp` passes on
+  `runtime.WithRecordReader` (`durable.Records`, which `fiber.New` passes on
   Postgres). Without it each of those reads loads every record of the run,
   transcripts included.
 - **Expiry waits for a poll.** Nothing wakes a run at its question's

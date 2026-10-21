@@ -1,21 +1,28 @@
-package fiberapp
+package fiber
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/urmzd/anchor/pkg/ledger"
+
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/registry"
@@ -61,19 +68,51 @@ func (i *inbox) completed(target string) bool {
 	return false
 }
 
-// newApp builds an App in a temporary workspace and closes it when the test
-// ends.
-func newApp(t *testing.T, cfg Config, opts ...Option) *App {
+// newApp builds an App and closes it when the test ends.
+func newApp(t *testing.T, opts ...Option) *App {
 	t.Helper()
-	if cfg.Workspace == "" {
-		cfg.Workspace = t.TempDir()
-	}
-	app, err := New(context.Background(), cfg, opts...)
+	app, err := New(context.Background(), opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = app.Close() })
 	return app
+}
+
+var schemas atomic.Uint64
+
+// testPool returns a pool on $FIBER_POSTGRES_TEST_URL whose search_path is a
+// schema of its own, dropped when the test ends, or skips the test when the
+// variable is unset. The variable only finds the test database; the App is
+// handed the pool.
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	url := os.Getenv(postgresEnv)
+	if url == "" {
+		t.Skipf("set %s to run against Postgres", postgresEnv)
+	}
+	ctx := context.Background()
+	schema := fmt.Sprintf("fibertest_app_%d_%d", time.Now().UnixNano(), schemas.Add(1))
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 8
+	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public" // pgvector lives in public
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ident := pgx.Identifier{schema}.Sanitize()
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA "+ident); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DROP SCHEMA "+ident+" CASCADE")
+		pool.Close()
+	})
+	return pool
 }
 
 // start runs fn(ctx) until the test ends, and fails the test if it returns an
@@ -111,7 +150,7 @@ var offline = agentspec.AgentSpec{Name: "docs-bot", Model: "m", Provider: agents
 // where that run's events go.
 func TestATenantReusingAnotherTenantsTagIDCannotJoinOrRerouteItsRun(t *testing.T) {
 	box := &inbox{}
-	app := newApp(t, Config{Tenant: "acme"}, WithConnector(box))
+	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.Run)
 	ctx := context.Background()
 
@@ -163,7 +202,7 @@ func TestATenantReusingAnotherTenantsTagIDCannotJoinOrRerouteItsRun(t *testing.T
 // run changes nothing.
 func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 	box := &inbox{}
-	app := newApp(t, Config{Tenant: "acme"}, WithConnector(box))
+	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.RunDelivery)
 	ctx := context.Background()
 	if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
@@ -225,7 +264,7 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 // the usage.call events.
 func TestStatusReadsTheUsageTheRunRecorded(t *testing.T) {
 	box := &inbox{}
-	app := newApp(t, Config{Tenant: "acme"}, WithConnector(box))
+	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.Run)
 	ctx := context.Background()
 	if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
@@ -266,40 +305,39 @@ func TestStatusReadsTheUsageTheRunRecorded(t *testing.T) {
 	}
 }
 
-// One Postgres URL selects Postgres for every store family, and a bus URL
-// picks the bus by scheme; empty keeps each in memory.
-func TestConfigSelectsEveryBackend(t *testing.T) {
+// Every backend not given is the in-memory one, and WithPostgres puts every
+// store family on the pool it is handed, migrated by New.
+func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T) {
 	t.Run("memory", func(t *testing.T) {
-		app := newApp(t, Config{Tenant: "acme"})
-		want := map[string]bool{
+		app := newApp(t, WithTenant("acme"))
+		for name, ok := range map[string]bool{
 			"bus":           isType[*bus.Memory](app.Bus()),
 			"registry":      isType[*registry.Memory](app.Registry()),
 			"knowledge":     isType[*knowledge.Memory](app.Knowledge()),
 			"threads":       isType[*thread.Memory](app.Threads()),
 			"tool provider": isType[*toolprovider.Memory](app.ToolProviders()),
-		}
-		for name, ok := range want {
+			"blobs":         isType[*blob.Memory](app.Blobs()),
+		} {
 			if !ok {
 				t.Errorf("%s is not the memory backend", name)
 			}
 		}
 	})
-	url := os.Getenv(postgresEnv)
-	if url == "" {
-		return
-	}
 	t.Run("postgres", func(t *testing.T) {
-		tenant := "acme-" + time.Now().Format("150405.000000")
+		pool := testPool(t)
+		pg := bus.NewPostgres(pool)
+		if err := pg.Migrate(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 		box := &inbox{}
-		app := newApp(t, Config{Tenant: tenant, Postgres: url, Bus: url}, WithConnector(box))
-		want := map[string]bool{
+		app := newApp(t, WithTenant("acme"), WithPostgres(pool), WithBus(pg), WithConnector(box))
+		for name, ok := range map[string]bool{
 			"bus":           isType[*bus.Postgres](app.Bus()),
 			"registry":      isType[*registry.Postgres](app.Registry()),
 			"knowledge":     isType[*knowledge.Postgres](app.Knowledge()),
 			"threads":       isType[*thread.Postgres](app.Threads()),
 			"tool provider": isType[*toolprovider.Postgres](app.ToolProviders()),
-		}
-		for name, ok := range want {
+		} {
 			if !ok {
 				t.Errorf("%s is not the postgres backend", name)
 			}
@@ -307,17 +345,17 @@ func TestConfigSelectsEveryBackend(t *testing.T) {
 		// And a run goes end to end on it.
 		start(t, app.Run)
 		ctx := context.Background()
-		if _, err := app.Registry().Create(ctx, tenant, offline, "test"); err != nil {
+		if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
 			t.Fatal(err)
 		}
 		target := address.MustParse("inbox://acme/pg")
-		acc, err := app.Invoke(ctx, envelope.Tag{ID: "Ev-pg", Tenant: tenant, Agent: "docs-bot", Origin: "test",
+		acc, err := app.Invoke(ctx, envelope.Tag{ID: "Ev-pg", Tenant: "acme", Agent: "docs-bot", Origin: "test",
 			Text: "explain", Deliver: []envelope.Route{{Target: target}}, At: time.Now()})
 		if err != nil {
 			t.Fatal(err)
 		}
 		awaitDelivered(t, box, target.String())
-		if run, err := app.Status(ctx, tenant, acc.RunID); err != nil || run.Status != StatusCompleted {
+		if run, err := app.Status(ctx, "acme", acc.RunID); err != nil || run.Status != StatusCompleted {
 			t.Fatalf("Status = %+v, %v", run.Status, err)
 		}
 	})
@@ -328,19 +366,21 @@ func isType[T any](v any) bool {
 	return ok
 }
 
-// A configuration that cannot be right fails New with ErrConfig, before
-// anything is opened.
-func TestAnImpossibleConfigIsErrConfig(t *testing.T) {
-	for name, cfg := range map[string]Config{
-		"slack with a token and no secret":  {Slack: Slack{Token: "xoxb"}},
-		"github with a secret and no token": {GitHub: GitHub{WebhookSecret: "s"}},
-		"jira with no secret":               {Jira: Jira{Sites: map[string]string{"a": "https://a"}, Email: "e", Token: "t"}},
-		"a bus nothing implements":          {Bus: "kafka://broker"},
-		"a providers file that is missing":  {ProvidersFile: "/does/not/exist.json"},
+// A composition that cannot be right fails New with ErrConfig, before
+// anything runs.
+func TestAnImpossibleCompositionIsErrConfig(t *testing.T) {
+	issues := toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP, Endpoint: "https://mcp.example.com"}
+	for name, opts := range map[string][]Option{
+		"slack with a token and no secret":  {WithSlack(Slack{Token: "xoxb"})},
+		"github with a secret and no token": {WithGitHub(GitHub{WebhookSecret: "s"})},
+		"jira with no secret":               {WithJira(Jira{Sites: map[string]string{"a": "https://a"}, Email: "e", Token: "t"})},
+		"a webhook with no secret":          {WithWebhooks(map[string]webhook.Endpoint{"acme": {BaseURL: "https://hooks"}})},
+		"a ledger with no queue":            {WithDurable(ledger.NewMemory(), nil)},
+		"a tool provider declared twice":    {WithTenant("acme"), WithToolProvider(issues), WithToolProvider(issues)},
+		"a tool pinned with no hash":        {WithTenant("acme"), WithToolProvider(issues, toolprovider.Tool{Name: "search"})},
 	} {
 		t.Run(name, func(t *testing.T) {
-			cfg.Workspace = t.TempDir()
-			app, err := New(context.Background(), cfg)
+			app, err := New(context.Background(), opts...)
 			if err == nil {
 				_ = app.Close()
 			}
@@ -354,7 +394,7 @@ func TestAnImpossibleConfigIsErrConfig(t *testing.T) {
 // Webhook connectors are handlers the embedding program mounts; the App
 // serves nothing itself.
 func TestWebhookConnectorsAreMountableHandlers(t *testing.T) {
-	app := newApp(t, Config{Tenant: "acme", GitHub: GitHub{Token: "ghs_test", WebhookSecret: "secret"}})
+	app := newApp(t, WithTenant("acme"), WithGitHub(GitHub{Token: "ghs_test", WebhookSecret: "secret"}))
 	if _, ok := app.Webhooks()["github"]; !ok {
 		t.Fatalf("webhooks = %v, want github", app.Webhooks())
 	}
@@ -373,7 +413,7 @@ func TestWebhookConnectorsAreMountableHandlers(t *testing.T) {
 
 // Index writes files into the knowledge store an agent's sources read.
 func TestIndexGroundsAgentsInFiles(t *testing.T) {
-	app := newApp(t, Config{Tenant: "acme"})
+	app := newApp(t, WithTenant("acme"))
 	dir := t.TempDir()
 	if err := os.WriteFile(dir+"/release.md", []byte("# Release\n\nMerging to main runs the release workflow."), 0o600); err != nil {
 		t.Fatal(err)
@@ -396,25 +436,5 @@ func TestIndexGroundsAgentsInFiles(t *testing.T) {
 	hits, err := app.Knowledge().Search(ctx, "acme", knowledge.Query{Text: "release workflow", Sources: []string{"handbook"}})
 	if err != nil || len(hits) == 0 {
 		t.Fatalf("Search = %v, %v", hits, err)
-	}
-}
-
-// Every run this process executes holds its control subscriptions for its
-// whole turn, each a pooled connection on Redis: one for stop requests, and
-// one for requests to compact when the deployment takes them.
-func TestTheBusPoolReservesEveryControlStreamOfEveryConcurrentRun(t *testing.T) {
-	base := poolSize(0, 0) - 1
-	for _, tc := range []struct {
-		concurrency int
-		cfg         Config
-		want        int
-	}{
-		{0, Config{}, base + 1},
-		{8, Config{}, base + 8},
-		{8, Config{Compaction: agentrt.Compaction{OnRequest: true}}, base + 16},
-	} {
-		if got := poolSize(tc.concurrency, controlStreams(tc.cfg)); got != tc.want {
-			t.Errorf("pool size for %d runs = %d, want %d", tc.concurrency, got, tc.want)
-		}
 	}
 }

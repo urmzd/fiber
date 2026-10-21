@@ -15,7 +15,7 @@
 //	                deltas and the translation to events are all the real ones
 //	connectors      two fakes in fakes.go, implementing connector.Sink exactly
 //
-// fiberapp.New assembles them, in process; the options it is given say
+// fiber.New assembles them, in process; the options it is given say
 // which pieces this file replaces. None of those are stubs standing in for
 // the design. They are the design,
 // with the storage swapped. The seven sections below are the seven claims
@@ -44,7 +44,7 @@ import (
 	"github.com/urmzd/anchor/pkg/worker"
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/fiber/fiberapp"
+	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/bus"
@@ -151,28 +151,25 @@ func run() error {
 		"To roll back, re-run the previous tag's workflow rather than reverting by hand [2].",
 	))
 
-	// fiberapp is the composition root: it wires the router (another bus
+	// fiber.New is the composition root: it wires the router (another bus
 	// subscriber, which is why origin and destination stay independent),
 	// the durable runtime on anchor's in-memory ledger and queue, and the
 	// worker that pulls runs off the queue. Every piece this example
-	// replaces is an option; the rest is Config, all of it in memory here.
-	workspace, err := os.MkdirTemp("", "fiber-local-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(workspace) }()
-	app, err := fiberapp.New(ctx, fiberapp.Config{Tenant: tenant, Workspace: workspace, Log: quiet},
-		fiberapp.WithRegistry(store),
-		fiberapp.WithBus(published),
-		fiberapp.WithExecutor(exec),
-		fiberapp.WithConnector(slack),
-		fiberapp.WithConnector(hook),
-		fiberapp.WithRuntimeOptions(
+	// replaces is an option; everything else is the in-memory default.
+	app, err := fiber.New(ctx,
+		fiber.WithTenant(tenant),
+		fiber.WithLogger(quiet),
+		fiber.WithRegistry(store),
+		fiber.WithBus(published),
+		fiber.WithExecutor(exec),
+		fiber.WithConnector(slack),
+		fiber.WithConnector(hook),
+		fiber.WithRuntimeOptions(
 			runtime.WithStride(demoStride),
 			runtime.WithClock(fixedClock),
 			runtime.WithLogger(quiet),
 		),
-		fiberapp.WithWorkerOptions(
+		fiber.WithWorkerOptions(
 			worker.WithJanitorEvery(0),
 			worker.WithLeaseTTL(2*time.Second),
 			worker.WithHeartbeatEvery(200*time.Millisecond),
@@ -499,10 +496,9 @@ func run() error {
 	fmt.Printf("  surfaces delivered  slack %d, webhook %d\n", slackCount, hook.delivered(meshRun))
 	fmt.Printf("  model calls         %d\n", after)
 	fmt.Println()
-	fmt.Println("  drop the WithRegistry, WithBus and WithExecutor options and set")
-	fmt.Println("  Config.Postgres and Config.Bus, swap the two fakes for")
-	fmt.Println("  Config.Slack and Config.Webhooks, and this file does not otherwise")
-	fmt.Println("  change.")
+	fmt.Println("  pass WithPostgres(pool) and WithBus(bus.NewRedis(client)) instead of")
+	fmt.Println("  the in-memory registry, bus and executor, swap the two fakes for")
+	fmt.Println("  WithSlack and WithWebhooks, and this file does not otherwise change.")
 	fmt.Println()
 
 	cancel()

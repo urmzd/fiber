@@ -34,7 +34,7 @@
 >
 > What that means concretely today:
 >
-> - **Works and is tested.** The in-process composition (`fiberapp`) on the
+> - **Works and is tested.** The in-process composition (`fiber.New`) on the
 >   in-memory backends, the topic and delivery model, durable runs with
 >   replay, and the Slack, GitHub, Jira, cron and webhook connectors.
 > - **New and lightly exercised.** The Postgres backends for every store and
@@ -48,9 +48,10 @@
 fiber is a Go library for agents and a low-latency pub/sub bus. Define an agent
 with a spec, tag it from Slack, GitHub, Jira or a schedule, and its events
 stream to any subscriber while being delivered to any destination you name.
-It is not a service: there is no fiber binary and nothing listens. A program
-embeds `fiberapp`, which composes the packages under `pkg/`, and every backend
-is chosen by configuration or by passing an interface.
+It is a library you compose in Go: there is no binary, no service, no
+configuration file and no environment variable. `fiber.New` composes the
+packages under `pkg/`, every backend is a constructed value passed as an
+option, and anything not passed is the in-memory implementation.
 [warp](https://github.com/urmzd/warp) is the platform built on it.
 
 **Where a tag is raised and where its answer lands are independent.** A GitHub
@@ -63,7 +64,7 @@ event. Each run pins an agent revision, so retries use the same definition.
 - **Subscribe once.** `agent:docs-bot` receives current and future runs of that agent through one topic.
 - **Route by event.** Send one run to multiple destinations; each chooses text, citations, lifecycle events, or all of them.
 - **Connectors act, not just talk.** The `Actor` face contributes native verbs (transition a Jira ticket, request a review) as agent tools, sandboxed by NGAC, each emitting an auditable `action.taken` event.
-- **Backends are configuration.** One Postgres URL puts the registry, run ledger and queue, knowledge, thread journals and tool providers on Postgres; a bus URL picks the in-memory, Redis Streams or Postgres bus. Empty means memory, which is a complete implementation, not a stub.
+- **Backends are values.** `fiber.WithPostgres(pool)` puts the registry, run ledger and queue, knowledge, thread journals and tool providers on one pool; `fiber.WithBus` takes the in-memory, Redis Streams or Postgres bus. Anything not given is memory, which is a complete implementation, not a stub.
 - **Revisions are pinned per run.** A run accepted under revision 6 executes as revision 6 forever, even after a revise, because replay demands it.
 - **Citations are first-class events**, carrying the exact quoted source and resolvable provenance.
 - **Every run reports what it spent.** Each model call is a `usage.call` event (tokens, cache share, model, context window, and cost where saige's price catalog has the model), and the run's total, delegations included and each call counted once, is on its terminal event and `App.Status`.
@@ -95,14 +96,19 @@ delivery routed to Slack and a webhook, shows a third party listening to the
 agent's topic, and demonstrates that a replayed run does not pay for the model
 twice.
 
-### Embed it
+### Compose it
 
 ```go
-app, err := fiberapp.New(ctx, fiberapp.Config{
-    Tenant:   "acme",
-    Postgres: os.Getenv("DATABASE_URL"), // every store family; empty is memory
-    Bus:      os.Getenv("BUS_URL"),      // memory:, redis://, postgres://
-})
+pool, err := pgxpool.New(ctx, dsn) // your pool, from your configuration
+pg := bus.NewPostgres(pool)        // or bus.NewRedis(client), or omit for memory
+if err := pg.Migrate(ctx); err != nil {
+    return err
+}
+app, err := fiber.New(ctx,
+    fiber.WithTenant("acme"),
+    fiber.WithPostgres(pool), // every store family, migrated by New
+    fiber.WithBus(pg),
+)
 if err != nil {
     return err
 }
@@ -124,8 +130,7 @@ acc, err := app.Invoke(ctx, envelope.Tag{
 `App.Bus().Subscribe` streams any topic (`agent:docs-bot` sees every run of
 that agent); `App.Status`, `Stop`, `Compact` and `Answer` act on a run;
 `App.WebhookHandler()` is an `http.Handler` for the connectors that receive
-webhooks, for your program to mount. `fiberapp.ConfigFromEnv` reads the
-`FIBER_*` variables below into a `Config`.
+webhooks, for your program to mount.
 [`examples/downstream`](examples/downstream/main.go) is a complete program.
 
 ### Use a model
@@ -178,8 +183,8 @@ checked again on every call. The model is shown each member tool
 `"approvals": ["urmzd__create_issue"]`. The group is expanded for the run's
 tenant each time a run builds the agent, so a newly accepted tool reaches the
 agent without a new revision; tools that are not accepted, or that changed
-since, are never offered. `fiberapp` expands groups against its tool
-provider store (Postgres when `Config.Postgres` is set) and resolves
+since, are never offered. An App expands groups against its tool
+provider store (Postgres with `fiber.WithPostgres`) and resolves
 `env:NAME` credential references from its environment. A host embedding
 `pkg/runtime` does the same with `runtime.WithToolGroupSource` and an
 `mcptools.Grants`; one embedding `pkg/agentrt` alone supplies groups with
@@ -189,8 +194,8 @@ provider store (Postgres when `Config.Postgres` is set) and resolves
 
 | Example | What it demonstrates |
 |---------|----------------------|
-| [`local`](examples/local/) | Offline agent revisions, selective delivery, citations, and replay, composed by `fiberapp` |
-| [`downstream`](examples/downstream/) | A program embedding `fiberapp` with its own model provider and tool |
+| [`local`](examples/local/) | Offline agent revisions, selective delivery, citations, and replay, composed by `fiber.New` |
+| [`downstream`](examples/downstream/) | A program composing fiber with its own model provider and tool |
 
 See [the example index](examples/README.md) for more.
 
@@ -222,80 +227,54 @@ See the [architecture guide](docs/architecture/overview.md) for delivery,
 authorization, and replay guarantees. [warp](https://github.com/urmzd/warp)
 adds product workflows and a web surface on top of the platform.
 
-## Configuration
+## Composition
 
-Everything is a field of `fiberapp.Config`. `fiberapp.ConfigFromEnv` reads
-these variables into one:
+Every choice is an option to `fiber.New`. Configuration from files or the
+environment belongs to the program composing fiber
+([warp](https://github.com/urmzd/warp) is one), which turns it into these.
 
-| Variable | Purpose |
-|----------|---------|
-| `FIBER_TENANT` | Authorization scope; defaults to `default` |
-| `FIBER_POSTGRES_URL` | Postgres for every store: registry, run ledger and queue, knowledge, threads, tool providers |
-| `FIBER_BUS_URL` | The bus by scheme: empty or `memory:`, `redis://`, `postgres://` |
-| `FIBER_REDIS_URL` | The bus when `FIBER_BUS_URL` is unset |
-| `FIBER_WORKSPACE` | Directory for agent artifacts and files |
-| `FIBER_SCHEDULES` | JSON file of cron schedules |
-| `FIBER_CONCURRENCY` | Runs the worker executes at once |
-| `ANTHROPIC_API_KEY` | Authenticate the Anthropic provider |
-| `OPENAI_API_KEY` | Authenticate the `openai` provider; optional with `OPENAI_BASE_URL` |
-| `OPENAI_BASE_URL` | Point the `openai` provider at an OpenAI-compatible server |
-| `FIBER_EMBEDDINGS_URL`, `_MODEL`, `_KEY`, `_DIMENSIONS` | Configure an OpenAI-compatible embeddings endpoint |
-| `FIBER_PROVIDERS` | A providers file: model endpoints and MCP tool providers |
-| `FIBER_AUTHOR_PROVIDER`, `FIBER_AUTHOR_MODEL` | Select the built-in author agent's model |
-| `FIBER_COMPACT_TOKENS` | Enable history compaction at a token threshold; off by default |
-| `FIBER_COMPACT_KEEP_TURNS` | Recent tool-calling turns a compaction keeps verbatim; defaults to saige's |
-| `FIBER_COMPACT_ON_REQUEST` | Let a host compact a running turn with `App.Compact`; off by default |
-| `FIBER_SLACK_*`, `FIBER_GITHUB_*`, `FIBER_JIRA_*`, `FIBER_WEBHOOK_ENDPOINTS` | Built-in connectors; see `fiberapp/config.go` |
+| Option | Chooses | Default |
+|--------|---------|---------|
+| `WithPostgres(pool)` | Registry, run ledger and queue, knowledge, threads, tool providers on one pool | memory |
+| `WithBus(b)` | `bus.NewMemory`, `bus.NewRedis(client)`, `bus.NewPostgres(pool)` | memory |
+| `WithRegistry`, `WithDurable(ledger, queue)`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders` | One store, built by the caller | memory, or the `WithPostgres` one |
+| `WithEmbedder(e)` | The embedder of the knowledge store New builds | offline hashing |
+| `WithExecutor`, `WithRuntimeOptions`, `WithWorkerOptions` | The sandbox, and options for the runtime and worker | playscape sandbox |
+| `WithWorkspace(dir)` | Where the sandbox writes agent artifacts | a temporary directory |
+| `WithTenant`, `WithConcurrency`, `WithCompaction`, `WithAuthor`, `WithLogger`, `WithMetrics` | Deployment | none, one, off, offline, discard, none |
+| `WithSlack`, `WithGitHub`, `WithJira`, `WithWebhooks`, `WithSchedules` | Built-in connectors, typed Go values | off |
+| `WithModelProvider`, `WithOpenAICompatible`, `WithTools`, `WithToolSource`, `WithConnector`, `WithToolProvider` | Extensions | none |
 
-Without an embeddings endpoint, indexing (`App.Index`) uses a local hashing
-embedder for offline development. Index and search with the same embedding
-settings. Connector setup is covered in the
-[GitHub](docs/architecture/github.md) and [Slack](docs/architecture/slack.md) guides.
+Model providers read their own credentials when an agent is built:
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`, `OLLAMA_HOST`,
+and the variable an `OpenAICompatible.KeyEnv` names. An MCP provider's
+`env:NAME` credential reference resolves the same way. Connector setup is
+covered in the [GitHub](docs/architecture/github.md) and
+[Slack](docs/architecture/slack.md) guides.
 
 ## Extending fiber
 
-Common cases need no Go. A providers file (`Config.ProvidersFile` or
-`fiberapp.WithProvidersFile`) declares
-OpenAI-compatible model endpoints, each selectable by name as a spec's
-`provider`, and MCP tool providers with the tools the deployment accepts from
-each, pinned by schema hash. Keys and credentials are named, never written:
-`api_key_env` is the variable that holds a model key, and `credential_ref` is
-`env:NAME`.
-
-```json
-{
-  "models": [
-    {"name": "fireworks", "base_url": "https://api.fireworks.ai/inference/v1", "api_key_env": "FIREWORKS_API_KEY"},
-    {"name": "vllm", "base_url": "http://vllm.internal:8000/v1", "api_key_env": "VLLM_API_KEY"}
-  ],
-  "tool_providers": [
-    {"name": "issues", "transport": "http", "endpoint": "https://mcp.example.com/mcp",
-     "credential_ref": "env:ISSUES_TOKEN",
-     "tools": [{"name": "search", "schema_hash": "4f1c…", "class": "read"},
-               {"name": "close_issue", "schema_hash": "9b07…", "class": "write"}]}
-  ]
-}
-```
-
-A declared tool is accepted only while the server's schema for it matches
-`schema_hash`, and its description may not change once accepted. Anything the
-server adds or changes stays pending, so a restart never accepts what the file
-does not declare. At startup `fiberapp.New` logs every pending tool with its
-`schema_hash`; review it, then copy the hash into the file to accept it. A
-server that cannot be reached at startup is logged and its tools are
-unavailable to runs.
-
-Anything else is an option. `fiberapp.WithModelProvider`, `WithTools`,
-`WithToolSource`, `WithConnector` and `WithToolProvider` add to the
-composition; `WithBus`, `WithRegistry`, `WithExecutor`, `WithRuntimeOptions`
-and `WithWorkerOptions` replace a piece of it:
+`WithModelProvider`, `WithOpenAICompatible`, `WithTools`, `WithToolSource`,
+`WithConnector` and `WithToolProvider` add to the composition:
 
 ```go
-app, err := fiberapp.New(ctx, cfg,
-    fiberapp.WithModelProvider("house", houseProvider),
-    fiberapp.WithTools(runbookTool{}),
+app, err := fiber.New(ctx,
+    fiber.WithModelProvider("house", houseProvider),
+    fiber.WithOpenAICompatible(agentrt.OpenAICompatible{
+        Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1", KeyEnv: "FIREWORKS_API_KEY"}),
+    fiber.WithTools(runbookTool{}),
+    fiber.WithToolProvider(toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP,
+        Endpoint: "https://mcp.example.com/mcp", CredentialRef: "env:ISSUES_TOKEN"},
+        toolprovider.Tool{Name: "search", SchemaHash: "4f1c…", Class: toolprovider.ClassRead}),
 )
 ```
+
+A declared MCP tool is accepted only while the server's schema for it
+matches its `SchemaHash`, and its description may not change once accepted.
+Anything the server adds or changes stays pending, so a restart never accepts
+what the program does not declare. `fiber.New` logs every pending tool with
+its schema hash; review it, then pin it. A server that cannot be reached at
+startup is logged and its tools are unavailable to runs.
 
 A new backend implements the package's interface and passes its conformance
 suite: `bustest`, `registrytest`, `knowledgetest`, `threadtest`,
@@ -304,19 +283,22 @@ suite: `bustest`, `registrytest`, `knowledgetest`, `threadtest`,
 ## Upgrading
 
 **fiber is a library from this release.** The `fiber` binary, its commands,
-the HTTP and Connect API and its protobuf contract, `serve --providers` and
-`registry.ServerStore` are gone. Embed `fiberapp.New` instead; the providers
-file and the `FIBER_*` variables (through `fiberapp.ConfigFromEnv`) carry
-over unchanged. `GetRun` is `App.Status`, the stop and compact routes are
-`App.Stop` and `App.Compact`, `InvokeService.Answer` is `App.Answer`, and
-`fiber index` is `App.Index`.
+the HTTP and Connect API and its protobuf contract, `registry.ServerStore`,
+the providers file and every `FIBER_*` variable are gone. Compose
+`fiber.New` with options instead: `FIBER_POSTGRES_URL` is
+`WithPostgres(pool)`, `FIBER_REDIS_URL` is `WithBus(bus.NewRedis(client))`
+(size the client with `bus.RedisPoolSize`), a providers file's entries are
+`WithOpenAICompatible` and `WithToolProvider`, and the connector variables are
+`WithSlack`, `WithGitHub`, `WithJira` and `WithWebhooks`. `GetRun` is
+`App.Status`, the stop and compact routes are `App.Stop` and `App.Compact`,
+`InvokeService.Answer` is `App.Answer`, and `fiber index` is `App.Index`.
 
 ## Limitations
 
-- The bus is chosen independently of the stores: setting `Config.Postgres` does not move the bus, `Config.Bus` does.
+- The bus is chosen independently of the stores: `WithPostgres` does not move the bus, `WithBus` does.
 - The Postgres bus serializes publishes on one advisory lock per schema, so its throughput is one short transaction per event; Redis is the better bus for a chatty deployment.
-- Every store is in memory unless `Config.Postgres` is set. On Postgres they survive a restart, but the run queue fiber builds has no `DeltaLog`, so anchor's per-run delta journal is not written; the bus still carries every event.
-- Files (`blob`) are on disk under the workspace; there is no Postgres blob store.
+- Every store is in memory unless `WithPostgres` or its own option is given. On Postgres they survive a restart, but the run queue fiber builds has no `DeltaLog`, so anchor's per-run delta journal is not written; the bus still carries every event.
+- Files (`blob`) are in memory unless `WithBlobs(blob.NewFS(dir))` puts them on disk; there is no Postgres blob store.
 - fiber authenticates nothing. An embedding program that accepts tags or stop and answer requests from callers sets the tenant and actor from the caller's credential.
 - playscape's queue is at-most-once in beta, so durability comes from anchor rather than from playscape.
 - Citations are derived from RAG context blocks. saige's `CitationDelta`, which reports what a model or tool cited, is not translated into events yet.
@@ -324,7 +306,7 @@ over unchanged. `GetRun` is `App.Status`, the stop and compact routes are
 - Agent specs load from JSON, not YAML.
 - `App.Status` reports a stopped run as `stopped`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
 - A request to compact a running turn (`App.Compact`) is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
-- A deployment declares MCP tool providers in a providers file (or `fiberapp.WithToolProvider`), or writes them to the tool provider store (`App.ToolProviders`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) is dropped like a single unavailable tool: the run continues without it, the model is told it is unavailable, the operator is logged why, and `Runner.Unavailable` lists it. `agentrt.WithStrictTools` fails the build with `agentrt.ErrNoSuchToolGroup` instead.
+- A program declares MCP tool providers with `fiber.WithToolProvider`, or writes them to the tool provider store (`App.ToolProviders`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) is dropped like a single unavailable tool: the run continues without it, the model is told it is unavailable, the operator is logged why, and `Runner.Unavailable` lists it. `agentrt.WithStrictTools` fails the build with `agentrt.ErrNoSuchToolGroup` instead.
 - A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
 - A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).

@@ -1,7 +1,7 @@
 # The backends fiber's shared stores and buses run on, for local development
 # and the conformance suites. fiber itself is a library, so there is no fiber
-# service here: a program embedding fiberapp points Config.Postgres and
-# Config.Bus at these.
+# service here: a program composing fiber connects to these and passes the
+# pool and client to fiber.WithPostgres and fiber.WithBus.
 #
 #   make up
 #   make integration

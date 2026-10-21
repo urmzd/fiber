@@ -99,10 +99,10 @@ jobs:
         shell: bash
         run: |
           # Every store family's conformance suite runs on Postgres, the bus
-          # suite on Redis and Postgres, and fiberapp builds every backend from
-          # one Postgres URL. pkg/runtime runs its stop, usage and park tests on
+          # suite on Redis and Postgres, and fiber.New puts every store family
+          # on one Postgres pool. pkg/runtime runs its stop, usage and park tests on
           # the Postgres ledger, queue and journal and the Redis bus.
-          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/toolprovider ./pkg/bus ./pkg/runtime ./fiberapp | tee integration-results.jsonl
+          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/toolprovider ./pkg/bus ./pkg/runtime . | tee integration-results.jsonl
       - name: Reject skipped integration tests
         run: |
           # The Postgres queue does not implement the optional DeltaLog face.
@@ -120,7 +120,7 @@ jobs:
             ["toolprovider", "TestPostgresConformance"],
             ["bus", "TestPostgresConformance"],
             ["bus", "TestPostgresIsSharedAcrossBusesOnOneDatabase"],
-            ["../fiberapp", "TestConfigSelectsEveryBackend/postgres"],
+            ["..", "TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore/postgres"],
             ["registry", "TestPostgresMigrateIsIdempotentAndConcurrent"],
             ["durable", "TestLedgerConformanceOnFiberSchema"],
             ["durable", "TestQueueConformanceOnFiberSchema"],
@@ -167,5 +167,5 @@ jobs:
             ["durable", "TestRecordsWithPrefixReadsOnlyTheRecordsAsked"]
           ] | all(. as $required | any($events[];
             .Action == "pass"
-            and .Package == ("github.com/urmzd/fiber/pkg/" + $required[0] | sub("pkg/\\.\\./"; ""))
+            and .Package == ("github.com/urmzd/fiber/pkg/" + $required[0] | sub("/pkg/\\.\\.$"; ""))
             and .Test == $required[1]))' integration-results.jsonl

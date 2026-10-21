@@ -1,4 +1,4 @@
-package fiberapp
+package fiber
 
 import (
 	"reflect"
@@ -13,20 +13,12 @@ import (
 // surface: every configured connector that can list a thread is registered
 // under its own scheme, and one that cannot (Jira, the webhook sink) is not.
 func TestEveryConnectorThatCanListAThreadIsWiredAsAReconciler(t *testing.T) {
-	t.Setenv(EnvSlackToken, "xoxb-test")
-	t.Setenv(EnvSlackSecret, "secret")
-	t.Setenv(EnvGitHubToken, "ghs_test")
-	t.Setenv(EnvGitHubSecret, "secret")
-	t.Setenv(EnvJiraSites, "acme=https://acme.atlassian.net")
-	t.Setenv(EnvJiraEmail, "ops@acme.example")
-	t.Setenv(EnvJiraToken, "token")
-	t.Setenv(EnvJiraSecret, "secret")
-	cfg, err := ConfigFromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Tenant = "acme"
-	reg, err := buildConnectors(cfg, extensions{}, registry.NewMemory(), blob.NewMemory())
+	reg, err := buildConnectors(apply([]Option{
+		WithTenant("acme"),
+		WithSlack(Slack{Token: "xoxb-test", SigningSecret: "secret"}),
+		WithGitHub(GitHub{Token: "ghs_test", WebhookSecret: "secret"}),
+		WithJira(Jira{Sites: map[string]string{"acme": "https://acme.atlassian.net"}, Email: "ops@acme.example", Token: "token", WebhookSecret: "secret"}),
+	}), registry.NewMemory(), blob.NewMemory())
 	if err != nil {
 		t.Fatal(err)
 	}

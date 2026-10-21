@@ -1,4 +1,4 @@
-package fiberapp
+package fiber
 
 import (
 	"context"
@@ -43,7 +43,7 @@ func listers(reg *connector.Registry) thread.Listers {
 // sink, one that implements Ingest is a trigger, and the registry works that
 // out from the types. So this function only has to construct; nothing here says
 // what any connector is for.
-func buildConnectors(cfg Config, ext extensions, store registry.Store, blobs blob.Store) (*connector.Registry, error) {
+func buildConnectors(cfg options, store registry.Store, blobs blob.Store) (*connector.Registry, error) {
 	reg := connector.NewRegistry()
 	// Agent names come from the control plane, which is the only place that
 	// knows them. Without a name set, "@urmzd" and "@docs-bot" are the same
@@ -57,7 +57,7 @@ func buildConnectors(cfg Config, ext extensions, store registry.Store, blobs blo
 		files = connectors.Files{Store: blobs, Log: cfg.Log}
 	}
 
-	for _, build := range []func(Config, mention.Set, connectors.Files) (connector.Connector, error){
+	for _, build := range []func(options, mention.Set, connectors.Files) (connector.Connector, error){
 		newSlack, newGitHub, newJira, newWebhook, newCron,
 	} {
 		c, err := build(cfg, agents, files)
@@ -68,20 +68,20 @@ func buildConnectors(cfg Config, ext extensions, store registry.Store, blobs blo
 			continue // Not configured, which is a valid deployment.
 		}
 		if err := reg.Register(c); err != nil {
-			return nil, fmt.Errorf("fiberapp: register %s: %w", c.Name(), err)
+			return nil, fmt.Errorf("fiber: register %s: %w", c.Name(), err)
 		}
 	}
 	// Connectors a binary built on fiber added, after the built-in ones: a
 	// name both claim is refused by the registry rather than shadowed.
-	for _, c := range ext.Connectors {
+	for _, c := range cfg.Connectors {
 		if err := reg.Register(c); err != nil {
-			return nil, fmt.Errorf("fiberapp: register %s: %w", c.Name(), err)
+			return nil, fmt.Errorf("fiber: register %s: %w", c.Name(), err)
 		}
 	}
 	return reg, nil
 }
 
-func newSlack(cfg Config, agents mention.Set, files connectors.Files) (connector.Connector, error) {
+func newSlack(cfg options, agents mention.Set, files connectors.Files) (connector.Connector, error) {
 	sc := cfg.Slack
 	token, secret := sc.Token, sc.SigningSecret
 	if token == "" && secret == "" {
@@ -103,12 +103,12 @@ func newSlack(cfg Config, agents mention.Set, files connectors.Files) (connector
 		AppID:        sc.AppID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: slack: %w", err)
+		return nil, fmt.Errorf("fiber: slack: %w", err)
 	}
 	return c, nil
 }
 
-func newGitHub(cfg Config, agents mention.Set, files connectors.Files) (connector.Connector, error) {
+func newGitHub(cfg options, agents mention.Set, files connectors.Files) (connector.Connector, error) {
 	gc := cfg.GitHub
 	token, secret := gc.Token, gc.WebhookSecret
 	if token == "" && secret == "" {
@@ -129,12 +129,12 @@ func newGitHub(cfg Config, agents mention.Set, files connectors.Files) (connecto
 		Files:            files,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: github: %w", err)
+		return nil, fmt.Errorf("fiber: github: %w", err)
 	}
 	return c, nil
 }
 
-func newJira(cfg Config, agents mention.Set, files connectors.Files) (connector.Connector, error) {
+func newJira(cfg options, agents mention.Set, files connectors.Files) (connector.Connector, error) {
 	jc := cfg.Jira
 	if len(jc.Sites) == 0 {
 		return nil, nil
@@ -153,7 +153,7 @@ func newJira(cfg Config, agents mention.Set, files connectors.Files) (connector.
 	}
 	api, err := jira.NewHTTPAPI(sites, http.DefaultClient)
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: jira: %w", err)
+		return nil, fmt.Errorf("fiber: jira: %w", err)
 	}
 	c, err := jira.New(jira.Config{
 		API:      api,
@@ -165,14 +165,14 @@ func newJira(cfg Config, agents mention.Set, files connectors.Files) (connector.
 		Files:    files,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: jira: %w", err)
+		return nil, fmt.Errorf("fiber: jira: %w", err)
 	}
 	return c, nil
 }
 
 // newWebhook builds the outbound webhook sink. It raises no tags, so it has
 // no files to bring in.
-func newWebhook(cfg Config, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
+func newWebhook(cfg options, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
 	if len(cfg.Webhooks) == 0 {
 		return nil, nil
 	}
@@ -186,22 +186,22 @@ func newWebhook(cfg Config, _ mention.Set, _ connectors.Files) (connector.Connec
 	}
 	c, err := webhook.New(webhook.Config{Endpoints: endpoints})
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: webhook: %w", err)
+		return nil, fmt.Errorf("fiber: webhook: %w", err)
 	}
 	return c, nil
 }
 
-func newCron(cfg Config, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
+func newCron(cfg options, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
 	if len(cfg.Schedules) == 0 {
 		return nil, nil
 	}
 	store, err := cron.NewMemory(cfg.Schedules...)
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: cron: %w", err)
+		return nil, fmt.Errorf("fiber: cron: %w", err)
 	}
 	c, err := cron.New(cron.Config{Store: store, Log: cfg.Log})
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: cron: %w", err)
+		return nil, fmt.Errorf("fiber: cron: %w", err)
 	}
 	return c, nil
 }

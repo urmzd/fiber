@@ -15,9 +15,7 @@ grants, agent specs and deployment configuration now live in
 Evidence-backed Markdown presentation lives in warp's `go/github` package.
 
 For the product setup use `WARP_GITHUB_*` with `warp serve`.
-fiberapp (`Config.GitHub`, or `ConfigFromEnv`) retains only transport configuration:
-`FIBER_GITHUB_TOKEN`, `FIBER_GITHUB_WEBHOOK_SECRET`,
-`FIBER_GITHUB_OWNERS`, `FIBER_GITHUB_BOTS`,
-`FIBER_GITHUB_READ_REPOSITORIES`, and `FIBER_GITHUB_CHECKS`.
-`FIBER_GITHUB_AUTO_LABELS`, `FIBER_GITHUB_GUIDES` and
-`FIBER_GITHUB_MUTATIONS` are no longer supported here.
+`fiber.WithGitHub` takes only transport configuration, as a `fiber.GitHub`
+value: the token, the webhook secret, owners, bot mappings, read
+repositories and whether to publish checks. Auto labels, guides and
+mutation grants are warp's.

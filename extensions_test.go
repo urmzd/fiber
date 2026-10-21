@@ -1,21 +1,18 @@
-package fiberapp
+package fiber
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
@@ -30,7 +27,7 @@ import (
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
 
-// A binary built on fiber registers a model provider, a tool source and a
+// A program built on fiber registers a model provider, a tool source and a
 // connector, and each reaches the layer it belongs to: the registry stores an
 // agent naming the provider, the turn runs on it, the tool resolves, and the
 // connector receives the run's events.
@@ -43,7 +40,7 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 		}}, nil
 	}
 	box := &inbox{}
-	c := newApp(t, Config{Tenant: "acme"},
+	c := newApp(t, WithTenant("acme"),
 		WithModelProvider("house", house),
 		WithToolSource(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
 			return agentrt.StaticTools(lookup), nil
@@ -105,7 +102,7 @@ func fakeMCP(t *testing.T) (*mcp.Server, string) {
 	return srv, ts.URL
 }
 
-// objectHash is the schema hash of the fake's tools, the pin a providers file
+// objectHash is the schema hash of the fake's tools, the pin a declaration
 // carries for them.
 func objectHash(t *testing.T) string {
 	t.Helper()
@@ -116,48 +113,37 @@ func objectHash(t *testing.T) string {
 	return tool.SchemaHash
 }
 
-// issuesFile is a providers file pinning the fake's two tools.
-func issuesFile(t *testing.T, url string) string {
-	t.Helper()
+// issues declares the fake's provider and pins its two tools.
+func issues(t *testing.T, url string) Option {
 	h := objectHash(t)
-	return writeFile(t, `{
-  "models": [{"name": "fireworks", "base_url": "https://api.fireworks.ai/inference/v1", "api_key_env": "FIREWORKS_API_KEY"}],
-  "tool_providers": [{"name": "issues", "transport": "http", "endpoint": "`+url+`",
-    "tools": [{"name": "search", "schema_hash": "`+h+`", "class": "read"}, {"name": "close_issue", "schema_hash": "`+h+`"}]}]
-}`)
+	return WithToolProvider(
+		toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP, Endpoint: url},
+		toolprovider.Tool{Name: "search", SchemaHash: h, Class: toolprovider.ClassRead},
+		toolprovider.Tool{Name: "close_issue", SchemaHash: h},
+	)
 }
 
-func writeFile(t *testing.T, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "providers.json")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
+// Declared model endpoints can be named by specs, and declared MCP tool
+// providers are recorded with the tools they pin. Starting again with the
+// same declaration mints no new versions. With $FIBER_POSTGRES_TEST_URL set it
+// runs again on a Postgres pool, where the records are the durable ones.
+func TestDeclaredModelsAndToolProvidersReachTheStores(t *testing.T) {
+	t.Run("memory", func(t *testing.T) { declaredReachTheStores(t, nil) })
+	t.Run("postgres", func(t *testing.T) { declaredReachTheStores(t, testPool(t)) })
 }
 
-// The providers file is the no-Go path: it declares model endpoints, which
-// specs can then name, and MCP tool providers, which are recorded with the
-// tools it accepts. Starting again with the same file mints no new versions.
-// With $FIBER_POSTGRES_TEST_URL set it runs again on Postgres, where the
-// registry's provider table and the seeded records are the durable ones.
-func TestAProvidersFileDeclaresModelsAndToolProviders(t *testing.T) {
-	t.Run("memory", func(t *testing.T) { providersFileDeclares(t, "", "acme") })
-	if url := os.Getenv("FIBER_POSTGRES_TEST_URL"); url != "" {
-		t.Run("postgres", func(t *testing.T) {
-			providersFileDeclares(t, url, fmt.Sprintf("acme-%d", time.Now().UnixNano()))
-		})
-	}
-}
-
-func providersFileDeclares(t *testing.T, postgres, tenant string) {
+func declaredReachTheStores(t *testing.T, pool *pgxpool.Pool) {
+	const tenant = "acme"
 	_, url := fakeMCP(t)
-	file := issuesFile(t, url)
-	ext, err := loadProvidersFile(file, tenant)
-	if err != nil {
-		t.Fatalf("loadProvidersFile: %v", err)
+	opts := []Option{
+		WithTenant(tenant),
+		WithOpenAICompatible(agentrt.OpenAICompatible{Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1", KeyEnv: "FIREWORKS_API_KEY"}),
+		issues(t, url),
 	}
-	c := newApp(t, Config{Tenant: tenant, Postgres: postgres, ProvidersFile: file})
+	if pool != nil {
+		opts = append(opts, WithPostgres(pool))
+	}
+	c := newApp(t, opts...)
 	ctx := context.Background()
 
 	if _, err := c.Registry().Create(ctx, tenant, agentspec.AgentSpec{Name: "a", Model: "m", Provider: "fireworks", SystemPrompt: "x"}, "test"); err != nil {
@@ -175,8 +161,8 @@ func providersFileDeclares(t *testing.T, postgres, tenant string) {
 		t.Fatalf("snapshot %d with %v, want version 1 with search read and close_issue write", snap.Version, classes)
 	}
 
-	// What the file accepted is what "mcp:issues" grants: the read tool
-	// alone, and with ":write" the write tool as well.
+	// What was accepted is what "mcp:issues" grants: the read tool alone,
+	// and with ":write" the write tool as well.
 	grants := mcptools.NewGrants(c.ToolProviders(), mcptools.Dialer())
 	t.Cleanup(func() { _ = grants.Close() })
 	for grant, want := range map[string]string{"mcp:issues": "issues__search", "mcp:issues:write": "issues__close_issue,issues__search"} {
@@ -195,7 +181,7 @@ func providersFileDeclares(t *testing.T, postgres, tenant string) {
 
 	// A second start with the same declaration changes nothing.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := seedToolProviders(ctx, c.ToolProviders(), tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
+	if err := seedToolProviders(ctx, c.ToolProviders(), tenant, apply([]Option{issues(t, url)}).ToolProviders, mcptools.Dialer(), log); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := c.ToolProviders().GetProvider(ctx, tenant, "issues")
@@ -205,74 +191,31 @@ func providersFileDeclares(t *testing.T, postgres, tenant string) {
 	}
 }
 
-// A file that cannot be what its author meant fails at startup.
-func TestAProvidersFileThatCannotBeRightIsAUsageError(t *testing.T) {
-	for name, body := range map[string]string{
-		"a key where its variable's name belongs": `{"models": [{"name": "fw", "api_key": "sk-123"}]}`,
-		"a model with no name":                    `{"models": [{"base_url": "https://x"}]}`,
-		"a model declared twice":                  `{"models": [{"name": "fw", "base_url": "http://a"}, {"name": "fw", "base_url": "http://b"}]}`,
-		"a key in the base URL":                   `{"models": [{"name": "fw", "base_url": "https://u:sk-123@x/v1"}]}`,
-		"OpenAI itself with no key variable":      `{"models": [{"name": "fw"}]}`,
-		"a tool provider with a bad transport":    `{"tool_providers": [{"name": "x", "transport": "smtp", "endpoint": "x"}]}`,
-		"a tool with no schema_hash pin":          `{"tool_providers": [{"name": "x", "transport": "http", "endpoint": "https://x", "tools": [{"name": "search"}]}]}`,
-		"not JSON":                                `models: []`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := loadProvidersFile(writeFile(t, body), "acme"); !errors.Is(err, ErrConfig) {
-				t.Fatalf("loadProvidersFile = %v, want a usage error", err)
-			}
-		})
-	}
-	if _, err := loadProvidersFile(filepath.Join(t.TempDir(), "missing.json"), "acme"); !errors.Is(err, ErrConfig) {
-		t.Errorf("a missing file: %v, want a usage error", err)
-	}
-}
-
-// Go options and the file combine, and a name both declare is refused rather
-// than one silently winning.
-func TestExtensionsFromGoAndTheFileMustNotCollide(t *testing.T) {
-	fn := func(agentrt.Spec) (saigetypes.Provider, error) { return nil, nil }
-	goExt := extensions{Providers: map[string]agentrt.ProviderFunc{"fw": fn}}
-	if _, err := goExt.merge(extensions{Providers: map[string]agentrt.ProviderFunc{"other": fn}}); err != nil {
-		t.Fatalf("distinct names: %v", err)
-	}
-	if _, err := goExt.merge(extensions{Providers: map[string]agentrt.ProviderFunc{"fw": fn}}); !errors.Is(err, ErrConfig) {
-		t.Fatalf("a name declared twice: %v, want a usage error", err)
-	}
-	seed := toolProviderSeed{Provider: toolprovider.Provider{Tenant: "acme", Name: "issues"}}
-	if _, err := (extensions{ToolProviders: []toolProviderSeed{seed}}).merge(extensions{ToolProviders: []toolProviderSeed{seed}}); !errors.Is(err, ErrConfig) {
-		t.Fatalf("a tool provider declared twice: %v, want a usage error", err)
-	}
-}
-
 // A declared tool is accepted only as pinned, so a server cannot widen what
 // agents may do by changing under a restart. Here the server adds a write
 // tool and changes the schema of a declared one; after a restart neither is
 // accepted, both are logged as held back, and the untouched tool still works.
-// With $FIBER_POSTGRES_TEST_URL set the restart is a new process's core on
-// the same database.
-func TestARestartNeverAcceptsWhatTheProvidersFileDoesNotDeclare(t *testing.T) {
-	t.Run("memory", func(t *testing.T) { restartHoldsBackDrift(t, "", "acme") })
-	if url := os.Getenv("FIBER_POSTGRES_TEST_URL"); url != "" {
-		t.Run("postgres", func(t *testing.T) {
-			restartHoldsBackDrift(t, url, fmt.Sprintf("acme-%d", time.Now().UnixNano()))
-		})
-	}
+// With $FIBER_POSTGRES_TEST_URL set the restart is a new App on the same
+// database.
+func TestARestartNeverAcceptsWhatTheDeclarationDoesNot(t *testing.T) {
+	t.Run("memory", func(t *testing.T) { restartHoldsBackDrift(t, nil) })
+	t.Run("postgres", func(t *testing.T) { restartHoldsBackDrift(t, testPool(t)) })
 }
 
-func restartHoldsBackDrift(t *testing.T, postgres, tenant string) {
+func restartHoldsBackDrift(t *testing.T, pool *pgxpool.Pool) {
+	const tenant = "acme"
 	ctx := context.Background()
 	srv, url := fakeMCP(t)
-	file := issuesFile(t, url)
-	ext, err := loadProvidersFile(file, tenant)
-	if err != nil {
-		t.Fatal(err)
+	opts := []Option{WithTenant(tenant), issues(t, url)}
+	if pool != nil {
+		opts = append(opts, WithPostgres(pool))
 	}
-	first, err := New(ctx, Config{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres, ProvidersFile: file})
+	first, err := New(ctx, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = first.Close() })
+	seeds := apply(opts).ToolProviders
 
 	// The server drifts: a new write tool, and search takes a new argument.
 	srv.AddTool(&mcp.Tool{Name: "drop_db", Description: "drop_db", InputSchema: map[string]any{"type": "object"}}, okTool)
@@ -284,11 +227,11 @@ func restartHoldsBackDrift(t *testing.T, postgres, tenant string) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	store := first.ToolProviders()
-	if postgres != "" {
+	if pool != nil {
 		_ = first.Close()
-		again := newApp(t, Config{Tenant: tenant, Postgres: postgres, ProvidersFile: file, Log: log})
+		again := newApp(t, append(opts, WithLogger(log))...)
 		store = again.ToolProviders()
-	} else if err := seedToolProviders(ctx, store, tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
+	} else if err := seedToolProviders(ctx, store, tenant, seeds, mcptools.Dialer(), log); err != nil {
 		t.Fatal(err)
 	}
 
@@ -330,7 +273,7 @@ func restartHoldsBackDrift(t *testing.T, postgres, tenant string) {
 	// told the tool does, under the same schema.
 	srv.AddTool(&mcp.Tool{Name: "close_issue", Description: "close and delete the issue", InputSchema: map[string]any{"type": "object"}}, okTool)
 	logs.Reset()
-	if err := seedToolProviders(ctx, store, tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
+	if err := seedToolProviders(ctx, store, tenant, seeds, mcptools.Dialer(), log); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := store.Snapshot(ctx, tenant, "issues", 0); got.Version != 1 {

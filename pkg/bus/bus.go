@@ -82,15 +82,15 @@
 // # Backends
 //
 // Memory serves one process. Redis (Streams) and Postgres (two tables and
-// LISTEN/NOTIFY) are shared by every process on them. Open picks one from a
-// URL, so the choice is configuration; bustest holds all three to one
-// contract.
+// LISTEN/NOTIFY) are shared by every process on them. A program picks one by
+// constructing it; bustest holds all three to one contract.
 package bus
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	goruntime "runtime"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/envelope"
@@ -170,7 +170,6 @@ type options struct {
 	prefix    string
 	poll      time.Duration
 	indexTTL  time.Duration
-	poolSize  int
 }
 
 func defaults() options {
@@ -266,15 +265,14 @@ func WithIndexTTL(d time.Duration) Option {
 	}
 }
 
-// WithPoolSize sizes the connection pool Open creates for Redis or Postgres,
-// when the URL does not set one. Zero keeps the driver's default. The
-// backends themselves ignore it: they borrow a client or pool.
-func WithPoolSize(n int) Option {
-	return func(o *options) {
-		if n > 0 {
-			o.poolSize = n
-		}
-	}
+// RedisPoolSize is the connection pool a Redis client needs for a process
+// that executes concurrentRuns runs at once, each holding streamsPerRun
+// subscriptions for its whole turn: go-redis's default of ten per CPU, plus
+// one connection per held subscription. A pool smaller than that makes
+// publishes wait behind subscriptions, and a publish that times out fails
+// the turn.
+func RedisPoolSize(concurrentRuns, streamsPerRun int) int {
+	return 10*goruntime.GOMAXPROCS(0) + max(concurrentRuns, 1)*max(streamsPerRun, 1)
 }
 
 // normalize validates e and fills in what the topic already says, so that a

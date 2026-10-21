@@ -1,5 +1,5 @@
 // Command downstream is what a team building on fiber ships instead of a fork:
-// its own program, embedding fiberapp, plus what it registers.
+// its own program, composing fiber in Go, plus what it registers.
 //
 // It adds three things in Go:
 //
@@ -28,7 +28,7 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/fiberapp"
+	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
@@ -48,28 +48,18 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	// Everything fiber reads from FIBER_* (bus, Postgres, connectors, a
-	// providers file) still applies; unset, it all runs in memory.
-	cfg, err := fiberapp.ConfigFromEnv()
-	if err != nil {
-		return err
-	}
-	if cfg.Workspace == "" {
-		dir, err := os.MkdirTemp("", "fiber-downstream-")
-		if err != nil {
-			return err
-		}
-		defer func() { _ = os.RemoveAll(dir) }()
-		cfg.Workspace = dir
-	}
-	app, err := fiberapp.New(ctx, cfg,
-		fiberapp.WithModelProvider("house", houseProvider),
-		fiberapp.WithOpenAICompatible(agentrt.OpenAICompatible{
+	// Everything is in memory unless an option says otherwise: a program
+	// on Postgres adds fiber.WithPostgres(pool) and fiber.WithBus(...).
+	const tenant = "acme"
+	app, err := fiber.New(ctx,
+		fiber.WithTenant(tenant),
+		fiber.WithModelProvider("house", houseProvider),
+		fiber.WithOpenAICompatible(agentrt.OpenAICompatible{
 			Name:    "fireworks",
 			BaseURL: "https://api.fireworks.ai/inference/v1",
 			KeyEnv:  "FIREWORKS_API_KEY",
 		}),
-		fiberapp.WithTools(runbookTool{}),
+		fiber.WithTools(runbookTool{}),
 	)
 	if err != nil {
 		return err
@@ -80,7 +70,7 @@ func run() error {
 	done := make(chan error, 1)
 	go func() { done <- app.Run(ctx) }()
 
-	if _, err := app.Registry().Create(ctx, cfg.Tenant, agentspec.AgentSpec{
+	if _, err := app.Registry().Create(ctx, tenant, agentspec.AgentSpec{
 		Name: "oncall", Provider: "house", Model: "house-1",
 		SystemPrompt: "Help the on-call engineer.", Tools: []string{"lookup_runbook"},
 	}, "downstream"); err != nil && !errors.Is(err, registry.ErrExists) {
@@ -94,7 +84,7 @@ func run() error {
 	}
 	defer func() { _ = stream.Close() }()
 	acc, err := app.Invoke(ctx, envelope.Tag{
-		ID: fmt.Sprintf("downstream-%d", time.Now().UnixNano()), Tenant: cfg.Tenant,
+		ID: fmt.Sprintf("downstream-%d", time.Now().UnixNano()), Tenant: tenant,
 		Agent: "oncall", Origin: "downstream", Text: "api is down", At: time.Now(),
 	})
 	if err != nil {

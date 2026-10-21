@@ -1,4 +1,4 @@
-package fiberapp
+package fiber
 
 import (
 	"context"
@@ -9,10 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
-	"path/filepath"
-	goruntime "runtime"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -55,14 +52,13 @@ import (
 //
 // Nothing here is a stub standing in for a deployment. The in-memory
 // registry, bus, ledger and queue are complete implementations of the same
-// interfaces the shared backends implement; which one runs is a field of
-// Config or an Option, never a change to anything below it.
+// interfaces the shared backends implement; which one runs is an Option that
+// passes a constructed value, never a change to anything below it.
 //
 // An App listens on nothing. Connectors that receive webhooks are exposed as
 // http.Handlers (Webhooks, WebhookHandler) for the embedding program to mount.
 type App struct {
-	cfg Config
-	ext extensions
+	opt options
 	log *slog.Logger
 
 	store   registry.Store
@@ -74,7 +70,7 @@ type App struct {
 	sinks   *connector.Registry
 	deliver *router.Router
 	rt      *runtime.Runtime
-	ledger  runLedger
+	ledger  Ledger
 	queue   dqueue.Queue
 
 	webhooks map[string]http.Handler
@@ -83,120 +79,93 @@ type App struct {
 	closers   []func() error
 }
 
-// runLedger is the ledger plus the point read Status polls with.
-type runLedger interface {
+// Ledger is the run ledger an App executes from: anchor's ledger plus the
+// point read Status polls with. ledger.NewMemory and durable.Open's ledger
+// both satisfy it.
+type Ledger interface {
 	ledger.Ledger
 	ledger.RunGetter
 }
 
-// postgresStartTimeout bounds how long New waits for Postgres when ctx has no
-// deadline of its own. A database that cannot be reached is a deployment
-// that cannot resolve an agent or accept a run, so failing early, with the
-// reason, beats accepting work that fails later.
-const postgresStartTimeout = 30 * time.Second
-
-// New assembles the system from cfg and opts. It opens and migrates every
-// backend Config names, registers connectors, seeds the author agent and the
-// declared tool providers, and returns before anything runs: call Run to
-// start delivery and execution, and Close to release what New opened.
+// New assembles the system from opts and returns before anything runs: call
+// Run to start delivery and execution, and Close to release what New made.
+// Every backend not passed by an option is the in-memory implementation;
+// WithPostgres puts every store family on one pool, migrated here. New opens
+// no connection of its own and reads no environment or file.
 //
 // It is deliberately linear: read it top to bottom and you have read how
 // fiber fits together.
-func New(ctx context.Context, cfg Config, opts ...Option) (*App, error) {
-	ext := apply(opts)
-	log := cfg.Log
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
+func New(ctx context.Context, opts ...Option) (*App, error) {
+	o := apply(opts)
+	if o.Log == nil {
+		o.Log = slog.New(slog.DiscardHandler)
 	}
-	cfg.Log = log
-	rec := cfg.Metrics
-	if rec == nil {
-		rec = metrics.Nop()
+	if o.Metrics == nil {
+		o.Metrics = metrics.Nop()
 	}
-	a := &App{cfg: cfg, log: log, webhooks: map[string]http.Handler{}}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, postgresStartTimeout)
-		defer cancel()
-	}
+	a := &App{opt: o, log: o.Log, webhooks: map[string]http.Handler{}}
 	fail := func(err error) (*App, error) {
 		_ = a.Close()
 		return nil, err
 	}
-
-	// Declared providers join the Go options; a name both declare is an
-	// error rather than an override.
-	files := slices.Clone(ext.ProvidersFiles)
-	if cfg.ProvidersFile != "" {
-		files = append(files, cfg.ProvidersFile)
-	}
-	for _, path := range files {
-		declared, err := loadProvidersFile(path, cfg.Tenant)
-		if err != nil {
-			return nil, err
-		}
-		if ext, err = ext.merge(declared); err != nil {
-			return nil, err
-		}
-	}
-	a.ext = ext
-
-	// Postgres, when configured, holds everything that has to outlive the
-	// process. One pool serves all of it.
-	pool, err := openPostgres(ctx, cfg.Postgres)
-	if err != nil {
+	if err := checkSeeds(o.Tenant, o.ToolProviders); err != nil {
 		return nil, err
 	}
-	if pool != nil {
-		a.closers = append(a.closers, func() error { pool.Close(); return nil })
+	if o.Workspace == "" {
+		dir, err := os.MkdirTemp("", "fiber-")
+		if err != nil {
+			return nil, fmt.Errorf("fiber: workspace: %w", err)
+		}
+		a.opt.Workspace = dir
+		a.closers = append(a.closers, func() error { return os.RemoveAll(dir) })
 	}
+	pool := o.Postgres
+	var err error
 
 	// The broker. Runs publish here; the router and every subscriber read
 	// from here. Nothing else connects them.
-	if a.broker, err = a.openBus(ctx, pool); err != nil {
-		return fail(err)
+	a.broker = o.Bus
+	if a.broker == nil {
+		a.broker = bus.NewMemory()
 	}
 
 	// The control plane: append-only agent definitions, scoped by tenant.
-	// Its provider table includes the extensions', so an agent naming one
-	// can be stored as well as run.
-	if a.store, err = newRegistry(ctx, pool, ext); err != nil {
+	// Its provider table includes the options', so an agent naming one can
+	// be stored as well as run.
+	if a.store, err = newRegistry(ctx, pool, o); err != nil {
 		return fail(err)
 	}
 	// What agents know: the corpus a revision's sources are retrieved from.
-	if a.docs, err = newKnowledge(ctx, pool, cfg.Embeddings); err != nil {
+	if a.docs, err = newKnowledge(ctx, pool, o); err != nil {
 		return fail(err)
 	}
-	// Files. Content-addressed and tenant-scoped, under the workspace so one
-	// volume holds everything this process writes to disk.
-	fsBlobs, err := blob.NewFS(filepath.Join(workspaceDir(cfg), "blobs"))
-	if err != nil {
-		return fail(fmt.Errorf("fiberapp: blob store: %w", err))
+	// Files. Content-addressed and tenant-scoped.
+	a.blobs = o.Blobs
+	if a.blobs == nil {
+		a.blobs = blob.NewMemory()
 	}
-	a.blobs = fsBlobs
-	a.closers = append(a.closers, fsBlobs.Close)
 	// What a thread remembers: the conversation a run continues.
-	if a.threads, err = newThreads(ctx, pool); err != nil {
+	if a.threads, err = newThreads(ctx, pool, o); err != nil {
 		return fail(err)
 	}
 	// External tools: the MCP servers a tenant may reach and the tools an
 	// admin accepted from each.
-	if a.tools, err = newToolProviders(ctx, pool); err != nil {
+	if a.tools, err = newToolProviders(ctx, pool, o); err != nil {
 		return fail(err)
 	}
 	// Sessions are opened on first use and kept per provider record version.
 	// A credential reference resolves from this process's environment
 	// ("env:NAME") and never reaches a log or an error.
-	dial := mcptools.Dialer(mcptools.WithResolver(mcptools.EnvResolver()), mcptools.WithLogger(log))
+	dial := mcptools.Dialer(mcptools.WithResolver(mcptools.EnvResolver()), mcptools.WithLogger(a.log))
 	grants := mcptools.NewGrants(a.tools, dial)
 	a.closers = append(a.closers, grants.Close)
-	if err := seedToolProviders(ctx, a.tools, cfg.Tenant, ext.ToolProviders, dial, log); err != nil {
+	if err := seedToolProviders(ctx, a.tools, o.Tenant, o.ToolProviders, dial, a.log); err != nil {
 		return fail(err)
 	}
 
 	// The mesh. Roles are derived from the interfaces each connector
 	// implements, never declared, so registering is the whole wiring.
-	if a.sinks, err = buildConnectors(cfg, ext, a.store, a.blobs); err != nil {
+	if a.sinks, err = buildConnectors(o, a.store, a.blobs); err != nil {
 		return fail(err)
 	}
 	// The author: the control plane offered to an agent as tools, and the
@@ -212,23 +181,23 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*App, error) {
 
 	// The router is just another bus subscriber. That indirection is why
 	// origin and destination stay independent.
-	a.deliver = router.New(a.broker, a.sinks, router.WithLogger(log))
+	a.deliver = router.New(a.broker, a.sinks, router.WithLogger(a.log))
 
 	// The agent side. A turn runs as a playscape task under the NGAC policy
 	// compiled from the pinned revision's Access grant.
-	exec := ext.Executor
+	exec := o.Executor
 	if exec == nil {
-		if exec, err = a.newExecutor(grants, rec); err != nil {
+		if exec, err = a.newExecutor(grants); err != nil {
 			return fail(err)
 		}
 	}
 
 	// Durable execution: the ledger is truth, the queue is disposable flow.
-	if a.ledger, a.queue, err = newDurable(ctx, pool); err != nil {
+	if a.ledger, a.queue, err = newDurable(ctx, pool, o); err != nil {
 		return fail(err)
 	}
 	rtOpts := []runtime.Option{
-		runtime.WithLogger(log),
+		runtime.WithLogger(a.log),
 		runtime.WithThreads(a.threads),
 		// Before a run's history is pinned, its thread catches up with what
 		// people said on the surface without tagging the agent.
@@ -240,22 +209,22 @@ func New(ctx context.Context, cfg Config, opts ...Option) (*App, error) {
 		// An answered or stopped question wakes its run at once.
 		runtime.WithWaker(a.queue),
 	}
-	if pool != nil {
+	if pool != nil && o.Ledger == nil {
 		rtOpts = append(rtOpts, runtime.WithRecordReader(durable.NewRecords(pool)))
 	}
-	if cfg.Compaction.OnRequest {
+	if o.Compaction.OnRequest {
 		rtOpts = append(rtOpts, runtime.WithCompactRequests())
 	}
-	rtOpts = append(rtOpts, ext.RuntimeOptions...)
+	rtOpts = append(rtOpts, o.RuntimeOpts...)
 	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), registry.NewSpecs(a.store), a.broker, exec, rtOpts...); err != nil {
-		return fail(fmt.Errorf("fiberapp: runtime: %w", err))
+		return fail(fmt.Errorf("fiber: runtime: %w", err))
 	}
 	return a, nil
 }
 
-// Close releases what New opened: pools, clients, MCP sessions, the blob
-// store. A bus, registry or executor passed by option is the caller's and is
-// left alone. It is idempotent. Stop Run first.
+// Close releases what New made: MCP sessions and a workspace New created.
+// Every backend passed by an option, the Postgres pool included, is the
+// caller's and is left alone. It is idempotent. Stop Run first.
 func (a *App) Close() error {
 	var err error
 	a.closeOnce.Do(func() {
@@ -266,131 +235,109 @@ func (a *App) Close() error {
 	return err
 }
 
-// openPostgres opens the pool the durable backends share. An empty URL
-// returns nil, which every constructor below reads as "stay in memory".
-func openPostgres(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	if strings.TrimSpace(url) == "" {
-		return nil, nil
-	}
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		return nil, configf("postgres URL: %v", err)
-	}
-	return pool, nil
-}
-
-// openBus selects the broker. On Redis every live subscription holds a
-// pooled connection for most of its poll cycle, and a running turn holds one
-// per control stream for as long as it runs, so unless the URL sets
-// pool_size the pool is go-redis's default plus that much per run this
-// process executes at once. A Bus URL equal to the Postgres one shares its
-// pool.
-func (a *App) openBus(ctx context.Context, pool *pgxpool.Pool) (bus.Bus, error) {
-	if a.ext.Bus != nil {
-		return a.ext.Bus, nil
-	}
-	url := strings.TrimSpace(a.cfg.Bus)
-	if pool != nil && url == strings.TrimSpace(a.cfg.Postgres) {
-		b := bus.NewPostgres(pool)
-		if err := b.Migrate(ctx); err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
-		}
-		return b, nil
-	}
-	b, closeFn, err := bus.Open(ctx, url, bus.WithPoolSize(poolSize(a.cfg.Concurrency, controlStreams(a.cfg))))
-	switch {
-	case errors.Is(err, bus.ErrInvalid):
-		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
-	case err != nil:
-		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
-	}
-	a.closers = append(a.closers, closeFn)
-	return b, nil
-}
-
-// poolSize is go-redis's default of ten per CPU plus perRun for each run this
-// process may execute at once.
-func poolSize(concurrency, perRun int) int {
-	return 10*goruntime.GOMAXPROCS(0) + max(concurrency, 1)*max(perRun, 1)
-}
-
-// controlStreams is how many control subscriptions a running turn holds for
-// the whole turn: one for stop requests, and one for requests to compact when
-// the deployment takes them.
-func controlStreams(cfg Config) int {
-	if cfg.Compaction.OnRequest {
+// ControlStreams is how many control subscriptions a running turn holds for
+// its whole turn: one for stop requests, and one more for requests to
+// compact when compactOnRequest. On Redis each is a pooled connection, so a
+// program sizing a Redis client for an App wants
+// bus.RedisPoolSize(concurrency, ControlStreams(compactOnRequest)).
+func ControlStreams(compactOnRequest bool) int {
+	if compactOnRequest {
 		return 2
 	}
 	return 1
 }
 
-// newRegistry selects the control plane's store. The schema is migrated here
-// because a deployment against an unmigrated database has nothing useful to
-// do but report that.
-func newRegistry(ctx context.Context, pool *pgxpool.Pool, ext extensions) (registry.Store, error) {
-	if ext.Registry != nil {
-		return ext.Registry, nil
+func migrateErr(what string, err error) error {
+	return fmt.Errorf("%w: %s: %w", ErrUnavailable, what, err)
+}
+
+// newRegistry picks the control plane's store: the one passed, Postgres on
+// the pool, or memory. The Postgres schema is migrated here because a
+// deployment against an unmigrated database has nothing useful to do but
+// report that.
+func newRegistry(ctx context.Context, pool *pgxpool.Pool, o options) (registry.Store, error) {
+	if o.Registry != nil {
+		return o.Registry, nil
 	}
-	providers := registry.WithProviders(ext.providerNames()...)
+	providers := registry.WithProviders(o.providerNames()...)
 	if pool == nil {
 		return registry.NewMemory(providers), nil
 	}
 	store := registry.NewPostgres(pool, providers)
 	if err := store.Migrate(ctx); err != nil {
-		return nil, fmt.Errorf("%w: registry: %w", ErrUnavailable, err)
+		return nil, migrateErr("registry", err)
 	}
 	return store, nil
 }
 
-// newThreads selects the conversation journal.
-func newThreads(ctx context.Context, pool *pgxpool.Pool) (thread.Store, error) {
+// newKnowledge picks the knowledge store; the embedder applies to the one New
+// builds.
+func newKnowledge(ctx context.Context, pool *pgxpool.Pool, o options) (knowledge.Store, error) {
+	if o.Knowledge != nil {
+		return o.Knowledge, nil
+	}
+	emb := o.Embedder
+	if emb == nil {
+		emb = knowledge.NewHashing(0)
+	}
+	if pool == nil {
+		return knowledge.NewMemory(emb), nil
+	}
+	store := knowledge.NewPostgres(pool, emb)
+	if err := store.Migrate(ctx); err != nil {
+		return nil, migrateErr("knowledge", err)
+	}
+	return store, nil
+}
+
+// newThreads picks the conversation journal.
+func newThreads(ctx context.Context, pool *pgxpool.Pool, o options) (thread.Store, error) {
+	if o.Threads != nil {
+		return o.Threads, nil
+	}
 	if pool == nil {
 		return thread.NewMemory(), nil
 	}
 	store := thread.NewPostgres(pool)
 	if err := store.Migrate(ctx); err != nil {
-		return nil, fmt.Errorf("%w: threads: %w", ErrUnavailable, err)
+		return nil, migrateErr("threads", err)
 	}
 	return store, nil
 }
 
-// newToolProviders selects the MCP tool provider store.
-func newToolProviders(ctx context.Context, pool *pgxpool.Pool) (toolprovider.Store, error) {
+// newToolProviders picks the MCP tool provider store.
+func newToolProviders(ctx context.Context, pool *pgxpool.Pool, o options) (toolprovider.Store, error) {
+	if o.Tools != nil {
+		return o.Tools, nil
+	}
 	if pool == nil {
 		return toolprovider.NewMemory(), nil
 	}
 	store := toolprovider.NewPostgres(pool)
 	if err := store.Migrate(ctx); err != nil {
-		return nil, fmt.Errorf("%w: tool providers: %w", ErrUnavailable, err)
+		return nil, migrateErr("tool providers", err)
 	}
 	return store, nil
 }
 
-// newDurable selects the run ledger and queue. On Postgres a run accepted
+// newDurable picks the run ledger and queue. On Postgres a run accepted
 // before a restart is still there after it, and its lease expires and is
 // reclaimed by whichever worker comes up next.
-func newDurable(ctx context.Context, pool *pgxpool.Pool) (runLedger, dqueue.Queue, error) {
+func newDurable(ctx context.Context, pool *pgxpool.Pool, o options) (Ledger, dqueue.Queue, error) {
+	if o.Ledger != nil {
+		if o.Queue == nil {
+			return nil, nil, configf("WithDurable needs both a ledger and a queue")
+		}
+		return o.Ledger, o.Queue, nil
+	}
 	if pool == nil {
 		return ledger.NewMemory(), dqueue.NewMemory(), nil
 	}
 	lgr, q, err := durable.Open(ctx, pool)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: run ledger: %w", ErrUnavailable, err)
+		return nil, nil, migrateErr("run ledger", err)
 	}
 	return lgr, q, nil
-}
-
-// workspaceDir is the directory everything this process writes to disk lives
-// under.
-func workspaceDir(cfg Config) string {
-	if dir := strings.TrimSpace(cfg.Workspace); dir != "" {
-		return dir
-	}
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "fiber")
 }
 
 // surfaceMessageID names the surface message that raised a tag, from the
@@ -413,36 +360,36 @@ func surfaceMessageID(tag envelope.Tag) string {
 // node that executes it. The policy that scopes what that tool can see comes
 // from the pinned revision, one deployment per (agent, revision), which is
 // what stops a revised Access grant from widening a run already in flight.
-func (a *App) newExecutor(groups runtime.ToolGroupSource, rec metrics.Recorder) (runtime.Executor, error) {
-	dir := filepath.Join(workspaceDir(a.cfg), "workspace")
+func (a *App) newExecutor(groups runtime.ToolGroupSource) (runtime.Executor, error) {
+	dir := a.opt.Workspace
 	ws, err := workspace.NewLocal(dir)
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: workspace %q: %w", dir, err)
+		return nil, fmt.Errorf("fiber: workspace %q: %w", dir, err)
 	}
 	tools := tool.NewRegistry()
-	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), rec)
+	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), a.opt.Metrics)
 
 	agentOpts := []agentrt.Option{agentrt.WithAttachments(resolve.New(a.blobs))}
 	// Extension providers come after the built-ins, so one named like a
 	// built-in replaces it.
-	for _, name := range slices.Sorted(maps.Keys(a.ext.Providers)) {
-		agentOpts = append(agentOpts, agentrt.WithProvider(name, a.ext.Providers[name]))
+	for _, name := range slices.Sorted(maps.Keys(a.opt.Providers)) {
+		agentOpts = append(agentOpts, agentrt.WithProvider(name, a.opt.Providers[name]))
 	}
-	if c := a.cfg.Compaction; c.MaxInputTokens > 0 || c.OnRequest {
+	if c := a.opt.Compaction; c.MaxInputTokens > 0 || c.OnRequest {
 		agentOpts = append(agentOpts, agentrt.WithCompaction(c))
 	}
 	exec, err := runtime.NewSandbox(plane, tools, registry.NewSpecs(a.store),
 		runtime.WithAgentOptions(agentOpts...),
 		// A spec's tool names resolve against the actions every registered
 		// connector advertises, then against the tool sources options added.
-		runtime.WithCatalog(catalog(runtime.Connectors(a.sinks), a.ext.Catalogs)),
+		runtime.WithCatalog(catalog(runtime.Connectors(a.sinks), a.opt.Catalogs)),
 		// "mcp:<provider>" grants expand to that provider's accepted tools.
 		runtime.WithToolGroupSource(groups),
 		runtime.WithKnowledge(retrieverFor(a.docs)),
 		runtime.WithSandboxLogger(a.log),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("fiberapp: sandbox: %w", err)
+		return nil, fmt.Errorf("fiber: sandbox: %w", err)
 	}
 	return exec, nil
 }
@@ -454,7 +401,7 @@ func (a *App) newExecutor(groups runtime.ToolGroupSource, rec metrics.Recorder) 
 func (a *App) addAuthor(ctx context.Context) error {
 	au, err := author.New(author.Config{
 		Store:      a.store,
-		Providers:  a.ext.providerNames(),
+		Providers:  a.opt.providerNames(),
 		Principals: author.PrincipalFunc(a.principal),
 		Catalog: func() []string {
 			var names []string
@@ -465,23 +412,23 @@ func (a *App) addAuthor(ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("fiberapp: author: %w", err)
+		return fmt.Errorf("fiber: author: %w", err)
 	}
 	if err := a.sinks.Register(au); err != nil {
-		return fmt.Errorf("fiberapp: register %s: %w", au.Name(), err)
+		return fmt.Errorf("fiber: register %s: %w", au.Name(), err)
 	}
-	if a.cfg.Tenant == "" {
+	if a.opt.Tenant == "" {
 		return nil
 	}
-	provider, model := a.cfg.AuthorProvider, a.cfg.AuthorModel
+	provider, model := a.opt.AuthorProvider, a.opt.AuthorModel
 	if provider == "" {
 		provider = agentspec.ProviderOffline
 	}
 	if model == "" {
 		model = "claude-sonnet-5-5"
 	}
-	if _, err := author.Seed(ctx, a.store, a.cfg.Tenant, author.Spec(model, provider)); err != nil {
-		return fmt.Errorf("fiberapp: seed author: %w", err)
+	if _, err := author.Seed(ctx, a.store, a.opt.Tenant, author.Spec(model, provider)); err != nil {
+		return fmt.Errorf("fiber: seed author: %w", err)
 	}
 	return nil
 }
@@ -492,15 +439,15 @@ func (a *App) addAuthor(ctx context.Context) error {
 // identity a model cannot rewrite.
 func (a *App) principal(ctx context.Context, runID string) (author.Principal, error) {
 	if a.ledger == nil {
-		return author.Principal{}, errors.New("fiberapp: run ledger not ready")
+		return author.Principal{}, errors.New("fiber: run ledger not ready")
 	}
 	rec, err := a.ledger.GetRun(ctx, runID)
 	if err != nil {
-		return author.Principal{}, fmt.Errorf("fiberapp: read run %q: %w", runID, err)
+		return author.Principal{}, fmt.Errorf("fiber: read run %q: %w", runID, err)
 	}
 	var in runtime.Input
 	if err := json.Unmarshal(rec.Input, &in); err != nil {
-		return author.Principal{}, fmt.Errorf("fiberapp: decode run %q input: %w", runID, err)
+		return author.Principal{}, fmt.Errorf("fiber: decode run %q input: %w", runID, err)
 	}
 	p := author.Principal{Tenant: in.Tag.Tenant}
 	if in.Tag.Actor.ID != "" {
@@ -522,7 +469,7 @@ func (a *App) principal(ctx context.Context, runID string) (author.Principal, er
 // never from a request body.
 func (a *App) Invoke(ctx context.Context, tag envelope.Tag) (runtime.Acceptance, error) {
 	if err := a.deliver.Register(runtime.RunID(tag.Tenant, tag.ID), tag.Routes()); err != nil {
-		return runtime.Acceptance{}, fmt.Errorf("fiberapp: register routes: %w", err)
+		return runtime.Acceptance{}, fmt.Errorf("fiber: register routes: %w", err)
 	}
 	return a.rt.Accept(ctx, tag)
 }
@@ -590,10 +537,10 @@ func (a *App) run(ctx context.Context, delivery, execution bool) error {
 func (a *App) startExecution(ctx context.Context, g *group) {
 	wopts := []worker.Option{
 		worker.WithRegistry(a.rt.Registry()),
-		worker.WithConcurrency(max(a.cfg.Concurrency, 1)),
+		worker.WithConcurrency(max(a.opt.Concurrency, 1)),
 		worker.WithLogger(a.log),
 	}
-	wopts = append(wopts, a.ext.WorkerOptions...)
+	wopts = append(wopts, a.opt.WorkerOpts...)
 	g.run("worker", func() error { return worker.New(a.ledger, a.queue, wopts...).Run(ctx) })
 
 	triggers := a.sinks.Triggers()
@@ -604,7 +551,7 @@ func (a *App) startExecution(ctx context.Context, g *group) {
 	for _, t := range triggers {
 		g.run("trigger "+t.Name(), func() error {
 			if err := t.Ingest(ctx, tags); err != nil && !errors.Is(err, context.Canceled) {
-				return fmt.Errorf("fiberapp: trigger %s: %w", t.Name(), err)
+				return fmt.Errorf("fiber: trigger %s: %w", t.Name(), err)
 			}
 			return nil
 		})
@@ -617,14 +564,14 @@ func (a *App) startExecution(ctx context.Context, g *group) {
 			case tag := <-tags:
 				// The deployment's scope: a trigger has no credential.
 				if tag.Tenant == "" {
-					tag.Tenant = a.cfg.Tenant
+					tag.Tenant = a.opt.Tenant
 				}
 				acc, err := a.Invoke(ctx, tag)
 				if err != nil {
-					a.log.Error("fiberapp: accept tag", "tag", tag.ID, "agent", tag.Agent, "error", err)
+					a.log.Error("fiber: accept tag", "tag", tag.ID, "agent", tag.Agent, "error", err)
 					continue
 				}
-				a.log.Info("fiberapp: accepted", "run", acc.RunID, "agent", tag.Agent, "origin", tag.Origin, "rev", acc.Rev)
+				a.log.Info("fiber: accepted", "run", acc.RunID, "agent", tag.Agent, "origin", tag.Origin, "rev", acc.Rev)
 			}
 		}
 	})
@@ -679,7 +626,7 @@ func (a *App) Blobs() blob.Store { return a.blobs }
 
 // Providers is the model provider names specs may select: the built-ins and
 // every extension's.
-func (a *App) Providers() []string { return a.ext.providerNames() }
+func (a *App) Providers() []string { return a.opt.providerNames() }
 
 // group runs long-lived loops and collects the first failure, cancelling the
 // rest when one fails. A cancelled context is not a failure.
@@ -716,7 +663,7 @@ func (g *group) wait(grace time.Duration) error {
 	select {
 	case <-done:
 	case <-time.After(grace):
-		return errors.New("fiberapp: timed out waiting for background loops to stop")
+		return errors.New("fiber: timed out waiting for background loops to stop")
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -1,4 +1,4 @@
-package fiberapp
+package fiber
 
 import (
 	"testing"

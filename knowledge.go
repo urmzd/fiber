@@ -1,4 +1,4 @@
-package fiberapp
+package fiber
 
 import (
 	"context"
@@ -9,44 +9,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/knowledge"
 )
-
-func newEmbedder(cfg Embeddings) (knowledge.Embedder, error) {
-	if cfg.URL == "" {
-		return knowledge.NewHashing(0), nil
-	}
-	e, err := knowledge.NewHTTP(knowledge.HTTPConfig{
-		BaseURL:    cfg.URL,
-		Model:      cfg.Model,
-		APIKey:     cfg.Key,
-		Dimensions: cfg.Dimensions,
-	})
-	if err != nil {
-		return nil, configf("embeddings: %v", err)
-	}
-	return e, nil
-}
-
-// newKnowledge selects the knowledge store: Postgres when there is a pool, so
-// an indexed corpus outlives the process, and memory otherwise.
-func newKnowledge(ctx context.Context, pool *pgxpool.Pool, cfg Embeddings) (knowledge.Store, error) {
-	emb, err := newEmbedder(cfg)
-	if err != nil {
-		return nil, err
-	}
-	if pool == nil {
-		return knowledge.NewMemory(emb), nil
-	}
-	store := knowledge.NewPostgres(pool, emb)
-	if err := store.Migrate(ctx); err != nil {
-		return nil, fmt.Errorf("%w: knowledge: %w", ErrUnavailable, err)
-	}
-	return store, nil
-}
 
 // retrieverFor binds the store to one run's tenant and to the sources its
 // pinned revision declares. An agent with no sources gets no retriever at all,
@@ -94,7 +59,7 @@ func (a *App) Index(ctx context.Context, tenant, source string, paths ...string)
 	for _, path := range files {
 		body, err := os.ReadFile(path)
 		if err != nil {
-			return res, fmt.Errorf("fiberapp: read %s: %w", path, err)
+			return res, fmt.Errorf("fiber: read %s: %w", path, err)
 		}
 		res.Files++
 		if !utf8.Valid(body) {
@@ -108,7 +73,7 @@ func (a *App) Index(ctx context.Context, tenant, source string, paths ...string)
 			Content: string(body),
 		})
 		if err != nil {
-			return res, fmt.Errorf("fiberapp: index %s: %w", path, err)
+			return res, fmt.Errorf("fiber: index %s: %w", path, err)
 		}
 		if rec.Changed {
 			res.Changed++
@@ -146,7 +111,7 @@ func collectIndexable(paths []string) ([]string, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("fiberapp: walk %s: %w", p, err)
+			return nil, fmt.Errorf("fiber: walk %s: %w", p, err)
 		}
 	}
 	return out, nil
