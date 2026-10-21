@@ -3,7 +3,6 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -117,9 +116,17 @@ type callable struct {
 }
 
 func newCallable(s *Session, t toolprovider.Tool, grant toolprovider.Grant) (*callable, error) {
-	params, err := parameterSchema(t.InputSchema)
+	params, stats, err := parameterSchema(t.InputSchema)
+	log := s.logger.With("tool", t.Name, "schema_hash", t.SchemaHash)
 	if err != nil {
+		// The schema itself goes to debug only: it can be large, and the
+		// error already names the location and the reason.
+		log.Warn("mcptools: input schema refused", "err", err)
+		log.Debug("mcptools: refused input schema", "schema", string(t.InputSchema))
 		return nil, fmt.Errorf("mcptools: tool %q of %q: %w", t.Name, s.provider.Name, err)
+	}
+	if stats.Inlined > 0 {
+		log.Debug("mcptools: inlined $defs", "defs", stats.Defs, "refs", stats.Inlined)
 	}
 	capability := saigetypes.ToolCapabilityWrite
 	if t.Class.Effective() == toolprovider.ClassRead {
@@ -225,136 +232,4 @@ func marshalSchema(schema any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("input schema: %w", err)
 	}
 	return b, nil
-}
-
-// parameterSchema decodes an accepted JSON schema into saige's form, with the
-// same rules pkg/agentrt applies to connector actions: an object, or nothing,
-// and no $defs, whose references saige cannot resolve. A nullable property,
-// written as anyOf/oneOf of one type and {"type":"null"} or as a type array of
-// one type and "null", becomes that type with Nullable set. Any other anyOf,
-// oneOf, allOf, $ref or multi-type array is refused rather than dropped, so a
-// tool is never offered to a model with a schema that means something else.
-func parameterSchema(raw json.RawMessage) (saigetypes.ParameterSchema, error) {
-	if len(raw) == 0 {
-		return saigetypes.ParameterSchema{Type: saigetypes.SchemaObject}, nil
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return saigetypes.ParameterSchema{}, fmt.Errorf("schema is not JSON Schema: %w", err)
-	}
-	if defs, ok := doc["$defs"].(map[string]any); ok && len(defs) > 0 {
-		return saigetypes.ParameterSchema{}, errors.New("schema uses $defs/$ref, which is not supported")
-	}
-	if err := normalizeNode(doc, "$", 0); err != nil {
-		return saigetypes.ParameterSchema{}, err
-	}
-	b, err := json.Marshal(doc)
-	if err != nil {
-		return saigetypes.ParameterSchema{}, fmt.Errorf("schema is not JSON Schema: %w", err)
-	}
-	var s saigetypes.ParameterSchema
-	if err := json.Unmarshal(b, &s); err != nil {
-		return saigetypes.ParameterSchema{}, fmt.Errorf("schema is not JSON Schema: %w", err)
-	}
-	if s.Type == "" {
-		s.Type = saigetypes.SchemaObject
-	}
-	if s.Type != saigetypes.SchemaObject {
-		return saigetypes.ParameterSchema{}, fmt.Errorf("schema type %q, want object", s.Type)
-	}
-	return s, nil
-}
-
-// maxSchemaDepth bounds recursion through nested properties and items.
-const maxSchemaDepth = 32
-
-// normalizeProperties rewrites node's properties and items in place, see
-// parameterSchema. The root goes through normalizeNode too, so a root
-// allOf, $ref or union is refused rather than read as an empty object.
-func normalizeProperties(node map[string]any, path string, depth int) error {
-	if depth > maxSchemaDepth {
-		return fmt.Errorf("schema nests deeper than %d levels", maxSchemaDepth)
-	}
-	if props, ok := node["properties"].(map[string]any); ok {
-		for name, v := range props {
-			p, ok := v.(map[string]any)
-			if !ok {
-				return fmt.Errorf("schema at %s is not an object", path+"."+name)
-			}
-			if err := normalizeNode(p, path+"."+name, depth+1); err != nil {
-				return err
-			}
-		}
-	}
-	if items, ok := node["items"].(map[string]any); ok {
-		if err := normalizeNode(items, path+"[]", depth+1); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func normalizeNode(p map[string]any, path string, depth int) error {
-	if _, ok := p["$ref"]; ok {
-		return fmt.Errorf("schema at %s uses $ref, which is not supported", path)
-	}
-	if _, ok := p["allOf"]; ok {
-		return fmt.Errorf("schema at %s uses allOf, which is not supported", path)
-	}
-	for _, key := range []string{"anyOf", "oneOf"} {
-		alts, ok := p[key]
-		if !ok {
-			continue
-		}
-		list, _ := alts.([]any)
-		var only map[string]any
-		nulls := 0
-		for _, a := range list {
-			m, ok := a.(map[string]any)
-			if !ok {
-				return fmt.Errorf("schema at %s: %s entry is not an object", path, key)
-			}
-			if t, _ := m["type"].(string); t == "null" && len(m) == 1 {
-				nulls++
-				continue
-			}
-			if only != nil {
-				return fmt.Errorf("schema at %s uses %s of several types, which is not supported", path, key)
-			}
-			only = m
-		}
-		if only == nil || nulls != 1 {
-			return fmt.Errorf("schema at %s uses %s other than one type or null, which is not supported", path, key)
-		}
-		delete(p, key)
-		for k, v := range only {
-			if _, set := p[k]; !set {
-				p[k] = v
-			}
-		}
-		p["nullable"] = true
-	}
-	if types, ok := p["type"].([]any); ok {
-		var only string
-		nulls := 0
-		for _, t := range types {
-			s, _ := t.(string)
-			switch {
-			case s == "null":
-				nulls++
-			case s != "" && only == "":
-				only = s
-			default:
-				return fmt.Errorf("schema at %s has several types, which is not supported", path)
-			}
-		}
-		if only == "" || nulls > 1 {
-			return fmt.Errorf("schema at %s has no single type", path)
-		}
-		p["type"] = only
-		if nulls == 1 {
-			p["nullable"] = true
-		}
-	}
-	return normalizeProperties(p, path, depth)
 }
