@@ -153,11 +153,12 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 	if a.tools, err = newToolProviders(ctx, pool, o); err != nil {
 		return fail(err)
 	}
-	// Sessions are opened on first use and kept per provider record version.
-	// A credential reference resolves from this process's environment
-	// ("env:NAME") and never reaches a log or an error.
+	// Sessions are opened on first use and kept per provider record version,
+	// and for a person-scoped provider per person, with that person's own
+	// credential. A credential reference resolves from this process's
+	// environment ("env:NAME") and never reaches a log or an error.
 	dial := mcptools.Dialer(mcptools.WithResolver(mcptools.EnvResolver()), mcptools.WithLogger(a.log))
-	grants := mcptools.NewGrants(a.tools, dial)
+	grants := mcptools.NewGrants(a.tools, dial, mcptools.WithPersonResolver(o.Persons))
 	a.closers = append(a.closers, grants.Close)
 	if err := seedToolProviders(ctx, a.tools, o.Tenant, o.ToolProviders, dial, a.log); err != nil {
 		return fail(err)

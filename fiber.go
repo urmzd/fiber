@@ -51,6 +51,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/cron"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
@@ -229,10 +230,30 @@ func WithConnector(c connector.Connector) Option {
 // with its hash. A tool with no SchemaHash, or a provider declared twice, is
 // ErrConfig. An empty p.Tenant is the deployment's tenant. Agents reach the
 // provider with an "mcp:<name>" or "mcp:<name>:write" grant.
+//
+// A person-scoped provider is not dialled at startup, since it has no
+// credential of its own: each tool in accept must then carry the Description
+// and InputSchema the server offers, and is accepted in that form when its
+// SchemaHash matches the schema. Its runs reach it with each person's own
+// credential (WithPersonCredentials).
 func WithToolProvider(p toolprovider.Provider, accept ...toolprovider.Tool) Option {
 	return func(o *options) {
 		o.ToolProviders = append(o.ToolProviders, toolProviderSeed{Provider: p, Accept: accept})
 	}
+}
+
+// WithPersonCredentials sets how a person-scoped MCP tool provider
+// (toolprovider.ScopePerson) finds the credential of the person a run acts
+// for. That person is the actor on the run's tag as it was accepted, which
+// the program composing fiber sets from the caller's credential (a surface
+// marked ActAs names the person it authenticated) and which no model output
+// can change. A reference the resolver returns is resolved like a provider's
+// own ("env:NAME"); a resolver that holds the secrets returns them. A person
+// it has nothing for gets no tools from such a provider, the model is told
+// they have not connected a credential, and the shared credential is never
+// used instead. Without this option every person-scoped grant is unavailable.
+func WithPersonCredentials(r mcptools.PersonResolver) Option {
+	return func(o *options) { o.Persons = r }
 }
 
 // Built-in connectors. Each is registered only when given, and takes the

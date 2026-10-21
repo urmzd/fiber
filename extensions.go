@@ -46,6 +46,9 @@ type options struct {
 	// ToolProviders are MCP tool providers recorded in the tool provider
 	// store at startup, with the tools accepted from each.
 	ToolProviders []toolProviderSeed
+	// Persons finds the credential of the person a run acts for, for the
+	// person-scoped providers among them. Nil finds none.
+	Persons mcptools.PersonResolver
 
 	// Backends. Nil is memory, except where Postgres fills them.
 	Bus         bus.Bus
@@ -220,7 +223,11 @@ func seedToolProviders(ctx context.Context, store toolprovider.Store, tenant str
 		if len(seed.Accept) == 0 {
 			continue
 		}
-		held, err := acceptDeclared(ctx, store, rec, seed.Accept, dial)
+		accept := func() ([]heldBack, error) { return acceptDeclared(ctx, store, rec, seed.Accept, dial) }
+		if rec.Scope() == toolprovider.ScopePerson {
+			accept = func() ([]heldBack, error) { return acceptDeclaredInFull(ctx, store, rec, seed.Accept) }
+		}
+		held, err := accept()
 		if err != nil {
 			log.Warn("fiber: tool provider not seeded; its tools are unavailable until it is reachable",
 				"provider", p.Name, "tenant", p.Tenant, "error", err)
@@ -246,7 +253,7 @@ func putProvider(ctx context.Context, store toolprovider.Store, p toolprovider.P
 		return toolprovider.Provider{}, err
 	}
 	if cur.Transport == p.Transport && cur.Endpoint == p.Endpoint && slices.Equal(cur.Args, p.Args) &&
-		cur.CredentialRef == p.CredentialRef && cur.CredentialEnv == p.CredentialEnv {
+		cur.Scope() == p.Scope() && cur.CredentialRef == p.CredentialRef && cur.CredentialEnv == p.CredentialEnv {
 		return cur, nil
 	}
 	p.Version, p.UpdatedBy = cur.Version, "config"
@@ -328,6 +335,47 @@ func acceptDeclared(ctx context.Context, store toolprovider.Store, p toolprovide
 		if !slices.ContainsFunc(declared, func(d toolprovider.Tool) bool { return d.Name == o.Name }) {
 			held = append(held, heldBack{tool: o, reason: "offered but not declared"})
 		}
+	}
+	if !sameTools(cur.Tools, accept) {
+		if _, err := store.Accept(ctx, p.Tenant, p.Name, cur.Version, accept, "config"); err != nil {
+			return nil, err
+		}
+	}
+	return held, nil
+}
+
+// acceptDeclaredInFull accepts the declared tools of a person-scoped
+// provider, which is not dialled at startup: it has no credential of its
+// own, and dialling it with nobody's is what its scope rules out. Each
+// declared tool must therefore carry its whole form, the description and
+// input schema the server offers, and its schema hash must match that
+// schema; such a declaration is the admin's acceptance of exactly that form.
+// A tool declared without it is left pending and logged. Each person's
+// session compares what the server offers them with what was accepted, and
+// holds back anything that differs, as every session does.
+func acceptDeclaredInFull(ctx context.Context, store toolprovider.Store, p toolprovider.Provider, declared []toolprovider.Tool) ([]heldBack, error) {
+	cur, err := store.Snapshot(ctx, p.Tenant, p.Name, 0)
+	if err != nil {
+		return nil, err
+	}
+	var accept []toolprovider.Tool
+	var held []heldBack
+	for _, d := range declared {
+		full, err := toolprovider.NewTool(d.Name, d.Description, d.InputSchema)
+		switch {
+		case err != nil:
+			held = append(held, heldBack{tool: d, reason: err.Error()})
+			continue
+		case full.SchemaHash != d.SchemaHash:
+			held = append(held, heldBack{tool: d, reason: "a person-scoped provider is not dialled at startup, " +
+				"so a declared tool carries its description and input schema, and this schema does not match its schema_hash"})
+			continue
+		}
+		full.Class = d.Class
+		if full.Class == "" {
+			full.Class = toolprovider.ClassWrite
+		}
+		accept = append(accept, full)
 	}
 	if !sameTools(cur.Tools, accept) {
 		if _, err := store.Accept(ctx, p.Tenant, p.Name, cur.Version, accept, "config"); err != nil {

@@ -123,6 +123,7 @@ jobs:
             ["bus", "TestPostgresConformance"],
             ["bus", "TestPostgresIsSharedAcrossBusesOnOneDatabase"],
             ["..", "TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore/postgres"],
+            ["..", "TestEachPersonsRunReachesAPersonScopedProviderWithTheirOwnCredential/postgres"],
             ["registry", "TestPostgresMigrateIsIdempotentAndConcurrent"],
             ["durable", "TestLedgerConformanceOnFiberSchema"],
             ["durable", "TestQueueConformanceOnFiberSchema"],
