@@ -720,6 +720,35 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	return json.Marshal(out)
 }
 
+// ToolsFor reports what a turn of req would be granted, without running it:
+// the tools its model would be shown and the grants it would drop, each with
+// its reason. The tools are assembled exactly as Execute assembles them (the
+// catalog, the tool groups for req's tenant and for the actor ctx carries, a
+// delegation tool per agent in Access.Spawn) and resolved as the turn's
+// runner resolves them, and none is called. No model client is built, so it
+// needs no model credential. A group source may reach the server behind a
+// group to expand it, as a turn does.
+//
+// ctx carries the actor as it does for Execute: whoever asks puts the actor
+// the turn would act for on it (envelope.WithActor), and a context with none
+// is a turn for nobody.
+func (s *Sandbox) ToolsFor(ctx context.Context, req Request) (agentrt.Granted, error) {
+	rev := req.Revision
+	if err := rev.Validate(); err != nil {
+		return agentrt.Granted{}, err
+	}
+	req.Accounting = accountingOf(req)
+	// Nothing runs, so there is no node runtime to hand the delegation tools
+	// and nothing they report has anywhere to go.
+	tools, granted, err := s.turnTools(ctx, nil, req, func(agentrt.Chunk) error { return nil })
+	if err != nil {
+		return agentrt.Granted{}, err
+	}
+	rev.Spec.Tools = granted
+	opts := append(append([]agentrt.Option{agentrt.WithLogger(s.logger)}, s.agentOpts...), agentrt.WithTools(tools))
+	return agentrt.ResolveTools(rev, opts...)
+}
+
 // turnTools assembles the tools one turn may call: the deployment's catalog for
 // the names the spec grants, plus one delegation tool per agent in Access.Spawn.
 //
