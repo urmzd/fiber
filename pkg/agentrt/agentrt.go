@@ -460,6 +460,76 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 	if err := rev.Validate(); err != nil {
 		return nil, err
 	}
+	cfg, err := newConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, models, err := cfg.modelChain(rev)
+	if err != nil {
+		return nil, err
+	}
+
+	tools, unavailable, err := cfg.toolset(rev)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Runner{
+		rev:         rev,
+		provider:    provider,
+		models:      models,
+		tools:       tools,
+		unavailable: unavailable,
+		retriever:   cfg.retriever,
+		files:       cfg.files,
+		maxIter:     cfg.maxIter,
+		logger:      cfg.logger,
+		compaction:  cfg.compaction,
+		toolArgs:    cfg.toolArgs,
+	}, nil
+}
+
+// Granted is what a revision's tool grants resolve to in one process: the
+// tools a turn would show the model, and the grants it would drop.
+type Granted struct {
+	// Tools are the definitions the model is shown, sorted by name: every
+	// granted tool that resolved, the members of every group that expanded,
+	// and the built-in tools the revision grants.
+	Tools []saigetypes.ToolDef `json:"tools"`
+	// Unavailable are the grants left out, in grant order, as
+	// Runner.Unavailable reports them.
+	Unavailable []UnavailableTool `json:"unavailable,omitempty"`
+}
+
+// ResolveTools resolves rev's grants with opts exactly as New does and
+// builds nothing else. No model client is made, so it needs no model
+// credential, and no tool is called, though a catalog that expands a group
+// may reach the server behind it, as it would for New. It is how a host
+// shows what an agent would be granted before running it. The errors are
+// New's: an approval naming a tool the revision is not granted, a malformed
+// group, and with WithStrictTools any grant that does not resolve.
+func ResolveTools(rev Revision, opts ...Option) (Granted, error) {
+	if err := rev.Validate(); err != nil {
+		return Granted{}, err
+	}
+	cfg, err := newConfig(opts)
+	if err != nil {
+		return Granted{}, err
+	}
+	tools, unavailable, err := cfg.toolset(rev)
+	if err != nil {
+		return Granted{}, err
+	}
+	return Granted{Tools: tools.Definitions(), Unavailable: unavailable}, nil
+}
+
+// newConfig builds the configuration opts describe. The offline and
+// Anthropic providers are resolved last because they need what an option
+// may have supplied: the script, the cache lifetime. An explicit
+// WithProvider for the same name wins: overriding a built-in is the
+// documented escape hatch.
+func newConfig(opts []Option) (config, error) {
 	cfg := config{
 		providers: defaultProviders(),
 		maxIter:   DefaultMaxIter,
@@ -473,24 +543,22 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		o(&cfg)
 	}
 	if err := validPromptCache(cfg.promptCache); err != nil {
-		return nil, err
+		return config{}, err
 	}
-	// The offline and Anthropic providers are resolved last because they
-	// need what an option may have supplied: the script, the cache lifetime.
-	// An explicit WithProvider for the same name wins: overriding a built-in
-	// is the documented escape hatch.
 	if cfg.providers[ProviderOffline] == nil {
 		cfg.providers[ProviderOffline] = offlineProvider(cfg.script)
 	}
 	if cfg.providers[ProviderAnthropic] == nil {
 		cfg.providers[ProviderAnthropic] = anthropicProvider(cfg.promptCache)
 	}
+	return cfg, nil
+}
 
-	provider, models, err := cfg.modelChain(rev)
-	if err != nil {
-		return nil, err
-	}
-
+// toolset resolves the tools rev grants: the registry the model is offered
+// and the grants dropped, in grant order. A grant that does not resolve is
+// dropped unless strictTools, and an approval naming a tool the revision is
+// not granted is refused.
+func (cfg *config) toolset(rev Revision) (*saigetypes.ToolRegistry, []UnavailableTool, error) {
 	// The registry hands tool definitions to the provider sorted by name, so
 	// the order a spec lists its tools in never reaches the request. That
 	// matters beyond tidiness: tool definitions are the first bytes of the
@@ -504,7 +572,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 			g, err := cfg.group(rev, name)
 			if err != nil {
 				if cfg.strictTools || errors.Is(err, errMalformedGroup) {
-					return nil, err
+					return nil, nil, err
 				}
 				// Like a single tool this process cannot honour, a group
 				// it cannot expand right now costs the agent those tools,
@@ -536,7 +604,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 		}
 		if err != nil {
 			if cfg.strictTools {
-				return nil, fmt.Errorf("agentrt: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
+				return nil, nil, fmt.Errorf("agentrt: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
 			}
 			// A grant this process cannot honour right now (a connector
 			// not configured here, an MCP tool held back or disabled) costs
@@ -562,7 +630,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 				// called and there is nothing to approve.
 				continue
 			}
-			return nil, fmt.Errorf("%w: agent %q revision %d requires approval for %q, which it is not granted",
+			return nil, nil, fmt.Errorf("%w: agent %q revision %d requires approval for %q, which it is not granted",
 				ErrInvalid, rev.Spec.Name, rev.Rev, name)
 		}
 		if _, marked := t.(*saigetypes.MarkedTool); marked {
@@ -573,20 +641,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 			Message: fmt.Sprintf("Allow %s to call %s?", rev.Spec.Name, name),
 		}))
 	}
-
-	return &Runner{
-		rev:         rev,
-		provider:    provider,
-		models:      models,
-		tools:       tools,
-		unavailable: unavailable,
-		retriever:   cfg.retriever,
-		files:       cfg.files,
-		maxIter:     cfg.maxIter,
-		logger:      cfg.logger,
-		compaction:  cfg.compaction,
-		toolArgs:    cfg.toolArgs,
-	}, nil
+	return tools, unavailable, nil
 }
 
 // Unavailable reports the granted tools this runner left out because they
