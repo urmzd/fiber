@@ -59,8 +59,8 @@
 // whether it can push back on its own storage: Memory fills the buffer from
 // inside the publisher's critical section and so cannot wait — it terminates
 // the subscriber, whose Recv drains what it already holds and then fails with
-// ErrSlowConsumer — while Redis is already holding the events and simply stops
-// reading until the consumer catches up.
+// ErrSlowConsumer — while Redis and Postgres are already holding the events
+// and simply stop reading until the consumer catches up.
 //
 // So a consumer must be ready for ErrSlowConsumer, and the recovery is always
 // the same: resubscribe from the last sequence it processed. Termination is
@@ -78,6 +78,13 @@
 // what it asked for. That is the deliberate consequence of the bus not being
 // the record: it is sized for reconnects, and anything wanting more reads the
 // ledger.
+//
+// # Backends
+//
+// Memory serves one process. Redis (Streams) and Postgres (two tables and
+// LISTEN/NOTIFY) are shared by every process on them. Open picks one from a
+// URL, so the choice is configuration; bustest holds all three to one
+// contract.
 package bus
 
 import (
@@ -102,7 +109,8 @@ var (
 )
 
 // Bus is the broker. Implementations must pass the conformance suite in
-// pkg/bus/bustest; both backends in this package are held to it.
+// pkg/bus/bustest; every backend in this package (Memory, Redis, Postgres)
+// is held to it.
 type Bus interface {
 	// Publish records e and fans it out to every matching subscriber. It
 	// assigns e.Seq when the caller left it 0, and treats a sequence the run
@@ -162,6 +170,7 @@ type options struct {
 	prefix    string
 	poll      time.Duration
 	indexTTL  time.Duration
+	poolSize  int
 }
 
 func defaults() options {
@@ -235,7 +244,8 @@ func WithKeyPrefix(p string) Option {
 // WithPollInterval sets how long a Redis subscriber blocks in one XREAD
 // (default 250ms). It bounds how quickly a prefix subscriber notices a run
 // that started after it subscribed, and how long Close waits for the reader to
-// come back. Memory ignores it.
+// come back. On Postgres it is the reader's fallback poll while no LISTEN
+// connection is up. Memory ignores it.
 func WithPollInterval(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
@@ -245,11 +255,24 @@ func WithPollInterval(d time.Duration) Option {
 }
 
 // WithIndexTTL sets how long a run stays discoverable to Redis prefix
-// subscribers after its last event (default 24h). Memory ignores it.
+// subscribers after its last event (default 24h). Postgres forgets a run's
+// events and high-water mark that long after its last event. Memory ignores
+// it.
 func WithIndexTTL(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
 			o.indexTTL = d
+		}
+	}
+}
+
+// WithPoolSize sizes the connection pool Open creates for Redis or Postgres,
+// when the URL does not set one. Zero keeps the driver's default. The
+// backends themselves ignore it: they borrow a client or pool.
+func WithPoolSize(n int) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.poolSize = n
 		}
 	}
 }
