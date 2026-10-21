@@ -322,8 +322,35 @@ type Runner struct {
 // UnavailableTool is a tool the revision grants that this process could not
 // resolve when the runner was built, and why.
 type UnavailableTool struct {
-	Name   string `json:"name"`
+	Name string `json:"name"`
+	// Reason is the operator's: the error, which may name infrastructure.
 	Reason string `json:"reason"`
+	// Note is what the model was told about why, when the error offered one
+	// (ModelNote). Empty for every other reason, which the model never sees.
+	Note string `json:"note,omitempty"`
+}
+
+// ModelNote is implemented by an error whose cause the model may be told. A
+// granted tool or group dropped for such an error is announced to the model
+// with the note beside its name, so the agent can tell the person it is
+// talking to what they can do about it (connect a credential of their own),
+// where any other reason is the operator's alone because it may name
+// infrastructure the model has no business describing. Whoever writes a note
+// writes it for the model: one sentence that names nothing the person does
+// not already know, and the same every turn for the same person, so it does
+// not move the cached prefix.
+type ModelNote interface {
+	ModelNote() string
+}
+
+// unavailableTool is a dropped grant, with the model's note when err has one.
+func unavailableTool(name string, err error) UnavailableTool {
+	u := UnavailableTool{Name: name, Reason: err.Error()}
+	var n ModelNote
+	if errors.As(err, &n) {
+		u.Note = strings.Join(strings.Fields(n.ModelNote()), " ")
+	}
+	return u
 }
 
 // Option configures a Runner.
@@ -482,7 +509,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 				// Like a single tool this process cannot honour, a group
 				// it cannot expand right now costs the agent those tools,
 				// not the run.
-				unavailable = append(unavailable, UnavailableTool{Name: name, Reason: err.Error()})
+				unavailable = append(unavailable, unavailableTool(name, err))
 				cfg.logger.Warn("fiber/agentrt: a granted tool group is unavailable; the run continues without it",
 					"agent", rev.Spec.Name, "rev", rev.Rev, "group", name, "error", err)
 				continue
@@ -515,7 +542,7 @@ func New(rev Revision, opts ...Option) (*Runner, error) {
 			// not configured here, an MCP tool held back or disabled) costs
 			// the agent that tool, not the run: the model is told it is
 			// missing and the operator is told why.
-			unavailable = append(unavailable, UnavailableTool{Name: name, Reason: err.Error()})
+			unavailable = append(unavailable, unavailableTool(name, err))
 			cfg.logger.Warn("fiber/agentrt: a granted tool is unavailable; the run continues without it",
 				"agent", rev.Spec.Name, "rev", rev.Rev, "tool", name, "error", err)
 			continue
@@ -1135,8 +1162,12 @@ func firstOf(values ...string) string {
 // the spec's own prompt, so an agent whose instructions say "use jira_create"
 // says it cannot rather than inventing the call. It names the tools and not
 // the reasons: a reason is for the operator, and may name infrastructure the
-// model has no business describing. The note follows the deployment, not the
-// turn, so two turns of a revision on one deployment send the same prompt.
+// model has no business describing. The exception is a reason that was
+// written for the model (ModelNote), such as "the person you act for has not
+// connected a credential for issues", which follows its tool's name on a line
+// of its own. The note follows the deployment, and the person a turn acts
+// for, not the turn, so two turns of a revision on one deployment for one
+// person send the same prompt.
 func unavailableNote(system string, unavailable []UnavailableTool) string {
 	if len(unavailable) == 0 {
 		return system
@@ -1145,8 +1176,14 @@ func unavailableNote(system string, unavailable []UnavailableTool) string {
 	for i, u := range unavailable {
 		names[i] = u.Name
 	}
-	return system + "\n\nThese tools you were granted are unavailable in this deployment, so do not try to call them: " +
+	out := system + "\n\nThese tools you were granted are unavailable in this deployment, so do not try to call them: " +
 		strings.Join(names, ", ") + "."
+	for _, u := range unavailable {
+		if u.Note != "" {
+			out += "\n" + u.Name + ": " + u.Note
+		}
+	}
+	return out
 }
 
 func invocationPrompt(system, instructions string) string {
