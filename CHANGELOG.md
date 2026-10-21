@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.21.0 (2026-10-21)
+
+### Breaking
+
+- fiber is a library composed in code; no binary, no server, no mandatum.v1 (#39) ([ea8ca50](https://github.com/urmzd/fiber/commit/ea8ca501f1d061cb36d00ac97c332a17c300ca12))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.20.1...v0.21.0)
+
+
 ## 0.20.1 (2026-10-21)
 
 ### Bug Fixes
