@@ -47,6 +47,14 @@
 // with credentials embedded in them (https://user:pass@host) are refused for
 // the same reason.
 //
+// Whose credential that is depends on the provider's CredentialScope. A
+// shared provider (the default) is reached with its one CredentialRef, for
+// every run. A person-scoped provider is reached with the credential of the
+// person a run acts for, which pkg/mcptools resolves for that person when it
+// opens their session. Such a provider has no CredentialRef at all: a shared
+// credential is never a fallback for a person who has none, and a record that
+// names one is refused rather than kept unused.
+//
 // # Tenancy
 //
 // The tenant is an explicit argument on every method, as in pkg/registry. Two
@@ -105,6 +113,18 @@ const (
 	TransportHTTP Transport = "http"
 )
 
+// CredentialScope is whose credential a provider is reached with.
+type CredentialScope string
+
+const (
+	// ScopeShared reaches the provider with its own CredentialRef, the same
+	// for every run. It is the default: the empty scope is shared.
+	ScopeShared CredentialScope = "shared"
+	// ScopePerson reaches the provider with the credential of the person a
+	// run acts for, and with nothing when that person has none.
+	ScopePerson CredentialScope = "person"
+)
+
 // Provider is how to reach one MCP server. It is versioned: PutProvider
 // takes the version the caller read and returns the next one.
 type Provider struct {
@@ -115,12 +135,18 @@ type Provider struct {
 	Endpoint string `json:"endpoint"`
 	// Args are the command's arguments, for TransportStdio only.
 	Args []string `json:"args,omitempty"`
-	// CredentialRef names the credential to resolve at connect time. It is
-	// a reference, never the secret, and may be empty.
+	// CredentialScope is whose credential the provider is reached with:
+	// ScopeShared (the default, and what empty means) or ScopePerson. A
+	// store records the empty scope as ScopeShared.
+	CredentialScope CredentialScope `json:"credential_scope,omitempty"`
+	// CredentialRef names the shared credential to resolve at connect time.
+	// It is a reference, never the secret, and may be empty. A
+	// person-scoped provider has none.
 	CredentialRef string `json:"credential_ref,omitempty"`
 	// CredentialEnv is the environment variable a stdio server receives the
-	// resolved credential in. Required for stdio when CredentialRef is set;
-	// HTTP providers receive it as a bearer token.
+	// resolved credential in. Required for stdio when CredentialRef is set,
+	// and for every person-scoped stdio provider; HTTP providers receive it
+	// as a bearer token.
 	CredentialEnv string    `json:"credential_env,omitempty"`
 	Version       uint64    `json:"version"`
 	UpdatedBy     string    `json:"updated_by,omitempty"`
@@ -142,6 +168,16 @@ const MaxQualifiedName = 64
 // unambiguous.
 func QualifiedName(provider, tool string) string { return provider + "__" + tool }
 
+// Scope returns the provider's effective credential scope: ScopeShared
+// unless it is ScopePerson. Validate refuses any other value, so an unknown
+// scope never reaches a connection.
+func (p Provider) Scope() CredentialScope {
+	if p.CredentialScope == ScopePerson {
+		return ScopePerson
+	}
+	return ScopeShared
+}
+
 // ValidName reports whether name is one a provider may have: lowercase
 // letters, digits and hyphens, starting with a letter, at most 32 characters.
 func ValidName(name string) bool { return providerName.MatchString(name) }
@@ -153,6 +189,19 @@ func (p Provider) Validate() error {
 	}
 	if !providerName.MatchString(p.Name) {
 		return fmt.Errorf("%w: provider name %q must match %s", ErrInvalid, p.Name, providerName)
+	}
+	switch p.CredentialScope {
+	case "", ScopeShared:
+	case ScopePerson:
+		if p.CredentialRef != "" {
+			// Kept unused, it would be one edit away from a fallback.
+			return fmt.Errorf("%w: provider %q is person-scoped and takes each person's own credential; it cannot name a shared CredentialRef", ErrInvalid, p.Name)
+		}
+		if p.Transport == TransportStdio && p.CredentialEnv == "" {
+			return fmt.Errorf("%w: provider %q: a person-scoped stdio provider needs CredentialEnv for each person's credential", ErrInvalid, p.Name)
+		}
+	default:
+		return fmt.Errorf("%w: provider %q: credential scope %q, want shared or person", ErrInvalid, p.Name, p.CredentialScope)
 	}
 	switch p.Transport {
 	case TransportHTTP:
@@ -181,6 +230,14 @@ func (p Provider) Validate() error {
 		return fmt.Errorf("%w: provider %q: credential env %q is not a variable name", ErrInvalid, p.Name, p.CredentialEnv)
 	}
 	return nil
+}
+
+// stored is p as a store records it: the scope spelled out, so a record
+// written without one reads back as the shared provider it is.
+func (p Provider) stored() Provider {
+	p = p.clone()
+	p.CredentialScope = p.Scope()
+	return p
 }
 
 func (p Provider) clone() Provider {

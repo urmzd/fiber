@@ -129,6 +129,7 @@ jobs:
             ["knowledge", "TestPostgresMigrateIsIdempotentAndConcurrent"],
             ["toolprovider", "TestPostgresMigrateIsIdempotentAndConcurrent"],
             ["toolprovider", "TestPostgresSnapshotsSurviveANewStoreByteForByte"],
+            ["toolprovider", "TestPostgresAProviderFromBeforeCredentialScopesIsShared"],
             ["bus", "TestRedisConformance"],
             ["runtime", "TestStopTestsRunOnPostgresAndRedis"],
             ["runtime", "TestARunFromBeforeTheRenameFailsWithAReasonEverySurfaceSees"],
