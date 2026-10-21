@@ -103,6 +103,13 @@ var (
 
 	// ErrToolFailed reports a tool that ran and reported failure.
 	ErrToolFailed = errors.New("mcptools: tool failed")
+
+	// ErrUnsupportedSchema reports an accepted tool whose input schema
+	// cannot be offered to a model as written: not an object, or using a
+	// construct saige cannot represent (a union of several types, allOf, a
+	// $ref that is not local, names no definition, or is recursive). The
+	// error names where in the schema and why.
+	ErrUnsupportedSchema = errors.New("mcptools: unsupported input schema")
 )
 
 // Option configures Connect.

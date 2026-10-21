@@ -18,17 +18,21 @@ func noop(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return textResult("ok"), nil
 }
 
-var defsSchema = map[string]any{
-	"type":       "object",
-	"$defs":      map[string]any{"thing": map[string]any{"type": "string"}},
-	"properties": map[string]any{"x": map[string]any{"$ref": "#/$defs/thing"}},
+// recursiveSchema is a schema saige cannot represent: a tree whose node
+// refers to itself has no finite inline form.
+var recursiveSchema = map[string]any{
+	"type": "object",
+	"$defs": map[string]any{"node": map[string]any{"type": "object", "properties": map[string]any{
+		"children": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/node"}},
+	}}},
+	"properties": map[string]any{"root": map[string]any{"$ref": "#/$defs/node"}},
 }
 
 func TestAToolTheGrantDeniesCannotStopTheGrantedToolsLoading(t *testing.T) {
 	ctx := context.Background()
 	store := toolprovider.NewMemory()
 	f := newFake()
-	f.srv.AddTool(&mcp.Tool{Name: "write_defs", Description: "Write with $defs", InputSchema: defsSchema}, noop)
+	f.srv.AddTool(&mcp.Tool{Name: "write_defs", Description: "Write with a recursive schema", InputSchema: recursiveSchema}, noop)
 	s := connectInMemory(t, f, provider(store, t))
 	snap := accept(t, store, s, 0, map[string]toolprovider.Class{"search": toolprovider.ClassRead, "write_defs": ""})
 
@@ -43,7 +47,7 @@ func TestAToolTheGrantDeniesCannotStopTheGrantedToolsLoading(t *testing.T) {
 		t.Errorf("Lookup of the denied write tool: %v, want ErrDenied", err)
 	}
 	if _, err := s.Toolset(ctx, snap, toolprovider.GrantWrite); err == nil {
-		t.Error("a write grant converted a $defs schema it cannot represent")
+		t.Error("a write grant converted a recursive schema it cannot represent")
 	}
 }
 
@@ -126,7 +130,7 @@ func TestServerSuppliedToolNamesAreRedactedInErrors(t *testing.T) {
 	ctx := context.Background()
 	f := newFake()
 	leaky := "leak_" + token
-	f.srv.AddTool(&mcp.Tool{Name: leaky, Description: "Name carries the credential", InputSchema: defsSchema}, noop)
+	f.srv.AddTool(&mcp.Tool{Name: leaky, Description: "Name carries the credential", InputSchema: recursiveSchema}, noop)
 	url, _ := httpFake(t, f)
 	s, err := mcptools.Connect(ctx, httpProvider(url+"/mcp"), mcptools.WithResolver(resolver(t)))
 	if err != nil {
@@ -150,7 +154,7 @@ func TestServerSuppliedToolNamesAreRedactedInErrors(t *testing.T) {
 	// The leaky tool's schema cannot be converted, so the error names it.
 	_, err = s.Toolset(ctx, snap, toolprovider.GrantRead)
 	if err == nil {
-		t.Fatal("Toolset accepted a $defs schema")
+		t.Fatal("Toolset accepted a recursive schema")
 	}
 	if strings.Contains(err.Error(), token) {
 		t.Fatalf("the credential came back in a schema error: %v", err)
