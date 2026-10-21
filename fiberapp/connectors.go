@@ -213,8 +213,8 @@ const HeaderJiraSecret = "X-Fiber-Secret"
 
 // jiraSecret authenticates a Jira webhook by a shared secret in a header.
 //
-// That is strictly weaker than a MAC — it does not bind the secret to the body,
-// so anyone who captures one request can replay a different one — and it is all
+// That is strictly weaker than a MAC: it does not bind the secret to the body,
+// so anyone who captures one request can replay a different one, and it is all
 // Jira offers. The mitigation is the same as everywhere else here: Tag.ID
 // idempotency downstream, plus TLS. The comparison is constant time because
 // this endpoint is public and can be probed as often as an attacker likes.

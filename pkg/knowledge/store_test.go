@@ -97,14 +97,6 @@ func mustSearch(t *testing.T, s knowledge.Store, tenant string, q knowledge.Quer
 	return hits
 }
 
-func uris(hits []knowledge.Hit) []string {
-	out := make([]string, len(hits))
-	for i, h := range hits {
-		out[i] = h.URI
-	}
-	return out
-}
-
 const handbook = `# Security handbook
 
 Everything an engineer needs to know about credentials.
@@ -140,30 +132,4 @@ func (s *synonyms) Embed(_ context.Context, texts []string) ([][]float32, error)
 		out[i] = v
 	}
 	return out, nil
-}
-
-type broken struct {
-	dims  int
-	embed func(n int) [][]float32
-}
-
-func (b broken) Dimensions() int { return b.dims }
-
-func (b broken) Model() string { return "broken" }
-
-func (b broken) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	return b.embed(len(texts)), nil
-}
-
-func repeat(n int, v []float32) [][]float32 {
-	out := make([][]float32, n)
-	for i := range out {
-		out[i] = v
-	}
-	return out
-}
-
-func nan() float64 {
-	var zero float64
-	return zero / zero
 }

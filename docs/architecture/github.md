@@ -15,7 +15,7 @@ grants, agent specs and deployment configuration now live in
 Evidence-backed Markdown presentation lives in warp's `go/github` package.
 
 For the product setup use `WARP_GITHUB_*` with `warp serve`.
-The standalone fiber CLI retains only transport configuration:
+fiberapp (`Config.GitHub`, or `ConfigFromEnv`) retains only transport configuration:
 `FIBER_GITHUB_TOKEN`, `FIBER_GITHUB_WEBHOOK_SECRET`,
 `FIBER_GITHUB_OWNERS`, `FIBER_GITHUB_BOTS`,
 `FIBER_GITHUB_READ_REPOSITORIES`, and `FIBER_GITHUB_CHECKS`.

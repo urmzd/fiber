@@ -6,7 +6,7 @@
 // puts them on somebody else's HTTP endpoint; nothing ever comes back that could
 // become a Tag. Inbound webhooks are the other direction entirely and belong to
 // whichever connector owns the payload shape (see pkg/connectors/slack and
-// pkg/connectors/github, and internal/server for the ingress that fronts them).
+// pkg/connectors/github, each an http.Handler a host mounts).
 // pkg/connector.RolesOf derives the single face from the type, so a tag claiming
 // origin "webhook" has nowhere to have come from.
 //

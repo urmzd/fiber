@@ -1,8 +1,0 @@
-{
-  "name": "docs-bot",
-  "description": "Answers from the indexed handbook, with citations.",
-  "model": "claude-haiku-5-5",
-  "provider": "offline",
-  "system_prompt": "You answer questions about the project from the handbook.",
-  "sources": [{ "name": "handbook", "uri": "knowledge://handbook" }]
-}

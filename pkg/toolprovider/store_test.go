@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/urmzd/fiber/pkg/toolprovider"
 	"github.com/urmzd/fiber/pkg/toolprovider/toolprovidertest"
@@ -34,25 +32,6 @@ const (
 	tenantA = "acme"
 	tenantB = "globex"
 )
-
-// newStore returns the store under test. Every property here is a property
-// of the Store contract, so the suite runs against Postgres when
-// $FIBER_POSTGRES_TEST_URL is set (see postgres_test.go) and Memory otherwise.
-func newStore(t *testing.T) toolprovider.Store {
-	t.Helper()
-	var mu sync.Mutex
-	at := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
-	clock := toolprovider.WithClock(func() time.Time {
-		mu.Lock()
-		defer mu.Unlock()
-		at = at.Add(time.Second)
-		return at
-	})
-	if url := os.Getenv(postgresEnv); url != "" {
-		return newPostgres(t, url, clock)
-	}
-	return toolprovider.NewMemory(clock)
-}
 
 func github(tenant string) toolprovider.Provider {
 	return toolprovider.Provider{

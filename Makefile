@@ -1,7 +1,4 @@
-.PHONY: all init build test lint fmt check run proto install up down e2e
-
-MOD := fiber
-CMD := cmd/$(MOD)
+.PHONY: all init build test race lint fmt check up down integration example
 
 all: check
 
@@ -10,10 +7,13 @@ init:
 	go mod download && go mod tidy
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/$(MOD) ./$(CMD)
+	go build ./...
 
 test:
 	go test ./...
+
+race:
+	go test ./... -race
 
 lint:
 	golangci-lint run
@@ -23,20 +23,18 @@ fmt:
 
 check: fmt lint test
 
-run: build
-	./bin/$(MOD) serve
-
-proto:
-	buf generate
-
-install:
-	CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" ./$(CMD)
-
+# Postgres (with pgvector) and Redis for the backend conformance suites.
 up:
-	docker compose up --build --wait
+	docker compose up --wait
 
 down:
 	docker compose down
 
-e2e:
-	sh examples/compose/e2e.sh
+integration:
+	FIBER_POSTGRES_TEST_URL=postgres://fiber:fiber@localhost:$${FIBER_POSTGRES_PORT:-5432}/fiber?sslmode=disable \
+	FIBER_REDIS_ADDR=localhost:$${FIBER_REDIS_PORT:-6379} \
+	go test -race -count=1 ./...
+
+example:
+	go run ./examples/local
+	go run ./examples/downstream

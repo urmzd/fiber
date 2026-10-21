@@ -71,10 +71,6 @@ func assistant(run, text string) thread.Entry {
 	return thread.Entry{Role: thread.RoleAssistant, Text: text, RunID: run, Actor: envelope.Actor{ID: "docs-bot", Bot: true}}
 }
 
-func posted(id, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleUser, Text: text, SurfaceID: id, Actor: envelope.Actor{ID: "U2", Display: "grace"}}
-}
-
 func mustAppend(t *testing.T, s thread.Store, key thread.Key, entries ...thread.Entry) []thread.Entry {
 	t.Helper()
 	out, err := s.Append(context.Background(), key, entries...)

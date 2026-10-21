@@ -7,7 +7,7 @@ for Postgres, Redis and a model provider, so `go run` is the only setup.
 
 | Example | Command | What it proves |
 | --- | --- | --- |
-| [`downstream`](downstream) | `go run ./examples/downstream serve` | A team's own binary on fiber with no fork: it registers a model provider, an OpenAI-compatible endpoint and a tool through `fiberapp`, then runs the same server and CLI. |
+| [`downstream`](downstream) | `go run ./examples/downstream` | A team's own program on fiber with no fork: it embeds `fiberapp` with a model provider, an OpenAI-compatible endpoint and a tool, raises one tag in process and prints the answer. |
 | [`local`](local) | `go run ./examples/local` | The whole architecture end to end: a declarative agent, immutable revisions, a tag raised in one connector answered in two others, N:M selectivity, an uninvolved third party reading the stream, first-class citations, and a replayed run that does not re-execute a recorded activity. |
 
 ## local
@@ -61,14 +61,14 @@ paths.
 
 | Concern | The example runs | A deployment runs |
 | --- | --- | --- |
-| Control plane | `pkg/registry.Memory` | a `registry.Store` over Postgres |
-| Bus | `pkg/bus.Memory` | `pkg/bus` Redis Streams |
-| Ledger and queue | anchor `ledger.Memory`, `queue.Memory` | anchor `pgledger` and `redisqueue` |
+| Control plane | `pkg/registry.Memory` (`fiberapp.WithRegistry`) | `registry.Postgres` (`Config.Postgres`) |
+| Bus | `pkg/bus.Memory` (`fiberapp.WithBus`) | Redis Streams or Postgres (`Config.Bus`) |
+| Ledger and queue | anchor `ledger.Memory`, `queue.Memory` | anchor's Postgres ledger and queue (`Config.Postgres`) |
 | Model | saige `agenttest.ScriptedProvider`, via the spec's `offline` provider | `anthropic`, `openai` (or any OpenAI-compatible server) or `ollama`, by changing two fields on the spec |
-| Execution | an in-process `runtime.Executor` | `runtime.NewSandbox`, a playscape node under NGAC |
-| Connectors | two fakes implementing `connector.Sink` | `pkg/connectors/slack`, `pkg/connectors/webhook` |
+| Execution | an in-process `runtime.Executor` (`fiberapp.WithExecutor`) | `runtime.NewSandbox`, a playscape node under NGAC, which `fiberapp` builds by default |
+| Connectors | two fakes implementing `connector.Sink` (`fiberapp.WithConnector`) | `pkg/connectors/slack`, `pkg/connectors/webhook` (`Config.Slack`, `Config.Webhooks`) |
 
-Every row is a constructor change. `main.go` does not otherwise change.
+Every row is an option or a `Config` field. `main.go` does not otherwise change.
 
 ### Reading the output
 

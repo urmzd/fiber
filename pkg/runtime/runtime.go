@@ -372,8 +372,8 @@ type Outcome struct {
 	Parked *agentrt.Parked `json:"parked,omitempty"`
 }
 
-// Acceptance is what a caller learns when a tag is accepted. It mirrors
-// mandatum.v1.InvokeResponse: the caller never builds a topic itself.
+// Acceptance is what a caller learns when a tag is accepted. It carries the
+// topic, so the caller never builds one itself.
 type Acceptance struct {
 	RunID string
 	// Rev is the revision this call resolved. For the delivery that created

@@ -22,7 +22,8 @@ make init
 make check   # fmt + lint + test (quality gate)
 make test    # go test ./...
 make fmt     # gofmt -w .
-make run     # build and run the server
+make example # run the offline examples
+make integration # every suite against `make up` Postgres and Redis
 ```
 
 The sandbox (`pkg/sandbox`) is a security boundary: changes touching it must include tests that prove confinement still holds.

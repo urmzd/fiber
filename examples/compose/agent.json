@@ -1,7 +1,0 @@
-{
-  "name": "docs-bot",
-  "description": "Answers questions. Runs on the offline provider, so no API key is needed.",
-  "model": "claude-haiku-5-5",
-  "provider": "offline",
-  "system_prompt": "You answer questions about the project."
-}

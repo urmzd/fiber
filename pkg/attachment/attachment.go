@@ -1,8 +1,8 @@
 // Package attachment is the typed reference to a file an agent was handed.
 //
 // A file reaches an agent from wherever its tag was raised: a Slack upload, an
-// image pasted into a GitHub issue, a recording on a Jira ticket, a path given
-// to the CLI. By the time the core sees it, none of that matters. The bytes are
+// image pasted into a GitHub issue, a recording on a Jira ticket, a file a host
+// program uploaded. By the time the core sees it, none of that matters. The bytes are
 // in pkg/blob under their SHA-256, and what travels with the tag is an
 // Attachment: the digest, what the bytes are, what they were called, how big
 // they are and where they were attached.
@@ -79,7 +79,7 @@ type Attachment struct {
 	// Size is the content length in bytes.
 	Size int64 `json:"size"`
 	// Origin is where the file was attached: the issue, thread or ticket.
-	// Zero when the surface has no address, as with the CLI.
+	// Zero when the surface has no address, as with a direct upload.
 	Origin address.Address `json:"origin,omitzero"`
 	// Alt is a description supplied with the file, such as Markdown image alt
 	// text or a Slack file title. It is the uploader's words and is presented
