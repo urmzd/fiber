@@ -1,10 +1,11 @@
-// Package threadtest is a surface for tests: a thread.Lister that holds
-// messages in memory and lets a test do to them what people do on a real
-// surface, which is post, edit and delete.
+// Package threadtest holds two things for tests of the thread journal: Run,
+// the conformance suite every thread.Store must pass, and Surface, a
+// thread.Lister that holds messages in memory and lets a test do to them what
+// people do on a real surface, which is post, edit and delete.
 //
-// It exists so that the reconciliation rules (append only, in surface order,
-// never rewriting what the journal already holds, files brought in once) are
-// provable without a real surface.
+// Surface exists so that the reconciliation rules (append only, in surface
+// order, never rewriting what the journal already holds, files brought in
+// once) are provable without a real surface.
 package threadtest
 
 import (
