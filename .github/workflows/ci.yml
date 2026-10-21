@@ -115,6 +115,7 @@ jobs:
         run: |
           jq -s -e '. as $events | [
             ["internal/pgrename", "TestADatabaseFromBeforeTheRenameKeepsItsData"],
+            ["internal/pgrename", "TestAnOldTableRecreatedAfterTheUpgradeFailsTheMigrationNamingBoth"],
             ["registry", "TestPostgresConformance"],
             ["knowledge", "TestPostgresConformance"],
             ["thread", "TestPostgresConformance"],
@@ -130,6 +131,7 @@ jobs:
             ["toolprovider", "TestPostgresSnapshotsSurviveANewStoreByteForByte"],
             ["bus", "TestRedisConformance"],
             ["runtime", "TestStopTestsRunOnPostgresAndRedis"],
+            ["runtime", "TestARunFromBeforeTheRenameFailsWithAReasonEverySurfaceSees"],
             ["runtime", "TestAStopReachesARunExecutingOnAnotherWorker"],
             ["runtime", "TestAStopBeforeTheTurnStartsIsNotLost"],
             ["runtime", "TestAnotherTenantsFloodCannotEvictAPendingStop"],

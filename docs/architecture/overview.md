@@ -60,7 +60,7 @@ token that came out went somewhere better:
 |---|---|---|
 | Event kind | A field, filtered | All events stream the same way. Splitting kinds across topics forces a consumer who wants the whole conversation to fan in from several topics and re-order them. |
 | Agent revision | A field, filtered | Canary observation is a filter on one topic, not a second topic that appears and disappears as agents are revised. |
-| Tenant | An authorization scope | A subscriber never names its own tenant. The server sets it from the caller's credential, so a subscriber cannot ask for another tenant's traffic by spelling it. |
+| Tenant | An authorization scope | A subscriber never names its own tenant in a topic. fiber authenticates nothing (see [No transport](#no-transport)): the program composing it sets the tenant from the caller's credential, so a subscriber cannot ask for another tenant's traffic by spelling it. |
 | Destination | A route on the run | The same agent answers into Slack for one tag and GitHub for the next. Neither destination should exist in the topic namespace. |
 
 The result is that a consumer only ever needs to know an agent's name to listen
@@ -705,7 +705,7 @@ leaves (stdlib only)
 
 seams
   pkg/connector    Trigger / Sink / Actor faces, registry
-  pkg/bus          Bus interface, Memory, Redis Streams and Postgres, Open, bustest
+  pkg/bus          Bus interface, Memory, Redis Streams and Postgres, bustest
   pkg/registry     agent store, Memory and Postgres, registrytest
 
 composition

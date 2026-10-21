@@ -304,15 +304,28 @@ the providers file and every `FIBER_*` variable are gone. Compose
 `App.Status`, the stop and compact routes are `App.Stop` and `App.Compact`,
 `InvokeService.Answer` is `App.Answer`, and `fiber index` is `App.Index`.
 
+**The binary's defaults are not the library's.** The binary served tenant
+`default` unless `FIBER_TENANT` said otherwise, so the agents, threads and
+runs it wrote live under that tenant: pass `WithTenant("default")` (or the
+`FIBER_TENANT` you had) to keep them. `WithSlack`, `WithGitHub` and `WithJira`
+are `ErrConfig` without a tenant. The binary also kept files on disk under
+its workspace; the library keeps them in memory unless you pass
+`WithBlobs(blob.NewFS(dir))`.
+
 **Persisted names moved to `fiber`.** Postgres objects, Redis keys, anchor
 activity and record names and the agent-spec hash domain no longer use the
-old name. Drain runs before upgrading; Postgres migrates itself and keeps its
-rows. See [docs/renaming.md](docs/renaming.md).
+old name. Drain runs before upgrading, including runs parked on a question,
+which wait until they are answered, stopped or expire: a run still pending
+from the old version is failed with a reason when the new one first claims
+it, and is not resumed. Stop every old process before the first new one
+starts. Postgres migrates itself and keeps its rows. See
+[docs/renaming.md](docs/renaming.md).
 
 ## Limitations
 
 - The bus is chosen independently of the stores: `WithPostgres` does not move the bus, `WithBus` does.
 - The Postgres bus serializes publishes on one advisory lock per schema, so its throughput is one short transaction per event; Redis is the better bus for a chatty deployment.
+- The Postgres bus stores every event it carries, body included, as a row in the `fiber_bus_events` table of the database it is given. A row stays until its run's retention trim drops it or a sweep finds it older than `bus.WithIndexTTL` (24 hours by default; the sweep runs from publishes, so with none nothing is removed). Those rows reach that database's WAL, replicas and backups like any other, and tool events carry their call's arguments. Where arguments can hold secrets, scrub them with `agentrt.WithToolArguments`, shorten the TTL, or use the Redis bus.
 - Every store is in memory unless `WithPostgres` or its own option is given. On Postgres they survive a restart, but the run queue fiber builds has no `DeltaLog`, so anchor's per-run delta journal is not written; the bus still carries every event.
 - Files (`blob`) are in memory unless `WithBlobs(blob.NewFS(dir))` puts them on disk; there is no Postgres blob store.
 - fiber authenticates nothing. An embedding program that accepts tags or stop and answer requests from callers sets the tenant and actor from the caller's credential.

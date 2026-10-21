@@ -33,7 +33,7 @@ sandboxing and access control.
 | `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
 | `pkg/registry` | Agent store and revision history. `Memory` and `Postgres`, `registrytest` conformance suite, and `Specs`, the resolver `pkg/runtime` reads pinned revisions through. |
 | `pkg/durable` | The Postgres schema for anchor's ledger and queue adapters, and `Open`, which builds both on it. |
-| `pkg/internal/pgrename` | The one migration step every Postgres store runs first: renames objects a database created before fiber's rename still carries, and the registry re-addresses revisions hashed under the old domain. The only code that knows the old names. |
+| `pkg/internal/pgrename` | The one migration step every Postgres store runs first: renames objects a database created before fiber's rename still carries, refuses (naming both) when an old table was created again beside its new one, and the registry re-addresses revisions hashed under the old domain. It also names the pre-rename turn, which `pkg/runtime` registers only to fail such a run with a reason. The only code that knows the old names. |
 | `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`; `threadtest.Run` is its conformance suite. |
 | `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem; `blobtest`. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
@@ -41,7 +41,7 @@ sandboxing and access control.
 | `pkg/mcptools` | MCP client (stdio, streamable HTTP) over `toolprovider`: lists and diffs a server's tools, exposes only accepted ones as saige tools, enforces the grant's class per call, and redacts the resolved credential everywhere. `Grants` expands a spec's `mcp:<provider>[:write]` group grant (read only by default) per tenant, on sessions kept per provider record version, for `runtime.WithToolGroupSource`. |
 | `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`, `knowledgetest`. |
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
-| `pkg/bus` | `Bus` interface; `Memory`, Redis Streams and Postgres backends; `Open`, which picks one by URL scheme; `bustest` conformance suite. |
+| `pkg/bus` | `Bus` interface; `Memory`, Redis Streams and Postgres backends; `bustest` conformance suite. The Postgres bus stores every event body in `fiber_bus_events` until it is trimmed or `WithIndexTTL` expires. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model (`WithStrictTools` refuses instead). `payload/` holds typed event bodies. |
 | `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. |

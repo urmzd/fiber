@@ -60,10 +60,24 @@ spawn gating, and prohibition override. Default is always deny.
 
 ## Tenant isolation
 
-Tenant is an authorization scope taken from the caller's credential. It is never
-read from a request body, and the server overwrites whatever a client sent. A
-client must not be able to reach another tenant's agents, runs, or events by
-spelling a tenant name, and there is a test asserting exactly that.
+Tenant is an authorization scope, and fiber authenticates nothing: it has no
+transport and no notion of a caller. `App.Invoke`, `Stop`, `Answer` and
+`Status` trust the tenant and actor they are handed. A program that accepts
+tags or requests from callers (warp is one) sets `Tag.Tenant`, `Tag.Actor`
+and `Actor.User` from its own credential and overwrites whatever a client
+sent; that check lives in that program, not here.
+
+What fiber does guarantee is that a tenant, once set, scopes everything
+after it. A run's id is derived from the tenant and the tag id together, so a
+second tenant reusing a first tenant's tag id gets a run of its own and
+cannot join the first run or replace where its events are delivered.
+`Status` reports another tenant's run as `ErrNotFound`, exactly like one
+that does not exist; `Answer` finds no question on it, and `Stop` records
+nothing on it. `TestATenantReusingAnotherTenantsTagIDCannotJoinOrRerouteItsRun`
+asserts the separate runs, the separate deliveries and the `ErrNotFound`.
+Connectors that receive webhooks stamp the deployment's tenant
+(`fiber.WithTenant`) on the tags they raise, because a webhook carries no
+credential to derive one from.
 
 ## Supported Versions
 
