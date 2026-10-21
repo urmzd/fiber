@@ -1,19 +1,16 @@
-# The whole system on one machine: fiber, the Postgres its agent registry
-# lives in, and the Redis its bus runs on.
+# The backends fiber's shared stores and buses run on, for local development
+# and the conformance suites. fiber itself is a library, so there is no fiber
+# service here: a program composing fiber connects to these and passes the
+# pool and client to fiber.WithPostgres and fiber.WithBus.
 #
-#   docker compose up --build --wait
-#   make e2e
-#
-# Everything that has to outlive the process does: agent definitions and the
-# run ledger and queue are in Postgres, and the bus is on Redis. A run in flight
-# when fiber stops is reclaimed when its lease expires.
+#   make up
+#   make integration
 
 name: fiber
 
 services:
   postgres:
-    # Postgres 17 with the pgvector extension available. The registry uses plain
-    # tables; the extension is there for retrieval work and costs nothing unused.
+    # Postgres 17 with pgvector, which the knowledge store needs.
     image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: fiber
@@ -42,37 +39,6 @@ services:
       timeout: 3s
       retries: 30
 
-  fiber:
-    build: .
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      FIBER_POSTGRES_URL: postgres://fiber:fiber@postgres:5432/fiber
-      FIBER_REDIS_URL: redis://redis:6379/0
-      # A fixed development credential so the CLI and the server agree. Set a
-      # real one in the environment for anything that is not a laptop.
-      FIBER_TOKEN: ${FIBER_TOKEN:-fiber-dev-token}
-      FIBER_TENANT: ${FIBER_TENANT:-default}
-      # Optional. Without it, agents on the "offline" provider still run.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Optional. The "openai" provider: OpenAI, or any compatible server
-      # when OPENAI_BASE_URL is set.
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-    ports:
-      - "127.0.0.1:${FIBER_PORT:-8383}:8383"
-    volumes:
-      - workspace:/data
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8383/healthz"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-
 volumes:
   postgres:
   redis:
-  workspace:

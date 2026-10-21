@@ -12,18 +12,19 @@ import (
 
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/internal/pgrename"
 )
 
 // schema is everything the Postgres store owns: one row per thread, one row
 // per entry.
 //
-// mandatum_threads holds the single fact about a thread that changes, its
+// fiber_threads holds the single fact about a thread that changes, its
 // head, and exists to be locked: an append takes the row FOR UPDATE, so two
 // appends to one thread serialize on it and two threads never wait for each
 // other. head is kept there rather than derived with max(seq) so that the
 // number an append assigns and the number a run pins come from one place.
 //
-// mandatum_thread_entries holds what does not change. This package never
+// fiber_thread_entries holds what does not change. This package never
 // issues an UPDATE or a DELETE against it.
 //
 // attachments was added after the table first shipped, so it arrives by an
@@ -38,7 +39,7 @@ import (
 // the indexes are never what stops a duplicate. They are there so that a
 // writer who bypassed the lock would fail instead of corrupting the journal.
 const schema = `
-CREATE TABLE IF NOT EXISTS mandatum_threads (
+CREATE TABLE IF NOT EXISTS fiber_threads (
 	tenant  text   NOT NULL,
 	agent   text   NOT NULL,
 	surface text   NOT NULL,
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS mandatum_threads (
 	PRIMARY KEY (tenant, agent, surface)
 );
 
-CREATE TABLE IF NOT EXISTS mandatum_thread_entries (
+CREATE TABLE IF NOT EXISTS fiber_thread_entries (
 	tenant        text        NOT NULL,
 	agent         text        NOT NULL,
 	surface       text        NOT NULL,
@@ -60,18 +61,18 @@ CREATE TABLE IF NOT EXISTS mandatum_thread_entries (
 	surface_id    text        NOT NULL,
 	at            timestamptz NOT NULL,
 	PRIMARY KEY (tenant, agent, surface, seq),
-	FOREIGN KEY (tenant, agent, surface) REFERENCES mandatum_threads (tenant, agent, surface)
+	FOREIGN KEY (tenant, agent, surface) REFERENCES fiber_threads (tenant, agent, surface)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS mandatum_thread_entries_run
-	ON mandatum_thread_entries (tenant, agent, surface, run_id, role)
+CREATE UNIQUE INDEX IF NOT EXISTS fiber_thread_entries_run
+	ON fiber_thread_entries (tenant, agent, surface, run_id, role)
 	WHERE run_id <> '';
 
-CREATE UNIQUE INDEX IF NOT EXISTS mandatum_thread_entries_surface
-	ON mandatum_thread_entries (tenant, agent, surface, surface_id)
+CREATE UNIQUE INDEX IF NOT EXISTS fiber_thread_entries_surface
+	ON fiber_thread_entries (tenant, agent, surface, surface_id)
 	WHERE surface_id <> '';
 
-ALTER TABLE mandatum_thread_entries
+ALTER TABLE fiber_thread_entries
 	ADD COLUMN IF NOT EXISTS attachments jsonb NOT NULL DEFAULT '[]'::jsonb;
 `
 
@@ -107,6 +108,10 @@ var _ Store = (*Postgres)(nil)
 func (p *Postgres) Migrate(ctx context.Context) error {
 	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(migrateLock)); err != nil {
+			return err
+		}
+		// A database created before the rename is moved forward first.
+		if _, err := tx.Exec(ctx, pgrename.SQL("threads", "thread_entries")); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, schema)
@@ -150,14 +155,14 @@ func (p *Postgres) Append(ctx context.Context, key Key, entries ...Entry) ([]Ent
 	out := make([]Entry, len(prepared))
 	err = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO mandatum_threads (tenant, agent, surface, head) VALUES ($1, $2, $3, 0)
+			`INSERT INTO fiber_threads (tenant, agent, surface, head) VALUES ($1, $2, $3, 0)
 			 ON CONFLICT (tenant, agent, surface) DO NOTHING`,
 			key.Tenant, key.Agent, key.Surface); err != nil {
 			return err
 		}
 		var head int64
 		if err := tx.QueryRow(ctx,
-			`SELECT head FROM mandatum_threads
+			`SELECT head FROM fiber_threads
 			  WHERE tenant = $1 AND agent = $2 AND surface = $3 FOR UPDATE`,
 			key.Tenant, key.Agent, key.Surface).Scan(&head); err != nil {
 			return err
@@ -167,7 +172,7 @@ func (p *Postgres) Append(ctx context.Context, key Key, entries ...Entry) ([]Ent
 		// thread: a reconciliation of a long thread names every message on
 		// the surface, and nearly all of them are already here.
 		rows, err := tx.Query(ctx,
-			`SELECT `+entryColumns+` FROM mandatum_thread_entries
+			`SELECT `+entryColumns+` FROM fiber_thread_entries
 			  WHERE tenant = $1 AND agent = $2 AND surface = $3
 			    AND ((run_id <> '' AND run_id = ANY($4)) OR (surface_id <> '' AND surface_id = ANY($5)))
 			  ORDER BY seq`,
@@ -200,7 +205,7 @@ func (p *Postgres) Append(ctx context.Context, key Key, entries ...Entry) ([]Ent
 				return err
 			}
 			batch.Queue(
-				`INSERT INTO mandatum_thread_entries
+				`INSERT INTO fiber_thread_entries
 				   (tenant, agent, surface, seq, role, body, actor_id, actor_display, actor_bot, run_id, surface_id, at, attachments)
 				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 				key.Tenant, key.Agent, key.Surface, head, string(e.Role), e.Text,
@@ -213,7 +218,7 @@ func (p *Postgres) Append(ctx context.Context, key Key, entries ...Entry) ([]Ent
 			return err
 		}
 		_, err = tx.Exec(ctx,
-			`UPDATE mandatum_threads SET head = $4 WHERE tenant = $1 AND agent = $2 AND surface = $3`,
+			`UPDATE fiber_threads SET head = $4 WHERE tenant = $1 AND agent = $2 AND surface = $3`,
 			key.Tenant, key.Agent, key.Surface, head)
 		return err
 	})
@@ -230,7 +235,7 @@ func (p *Postgres) Head(ctx context.Context, key Key) (uint64, error) {
 	}
 	var head int64
 	err := p.pool.QueryRow(ctx,
-		`SELECT head FROM mandatum_threads WHERE tenant = $1 AND agent = $2 AND surface = $3`,
+		`SELECT head FROM fiber_threads WHERE tenant = $1 AND agent = $2 AND surface = $3`,
 		key.Tenant, key.Agent, key.Surface).Scan(&head)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -256,7 +261,7 @@ func (p *Postgres) History(ctx context.Context, key Key, upTo uint64) ([]Entry, 
 		return nil, fmt.Errorf("%w: thread %s cannot hold %d entries", ErrGap, key, upTo)
 	}
 	rows, err := p.pool.Query(ctx,
-		`SELECT `+entryColumns+` FROM mandatum_thread_entries
+		`SELECT `+entryColumns+` FROM fiber_thread_entries
 		  WHERE tenant = $1 AND agent = $2 AND surface = $3 AND seq <= $4
 		  ORDER BY seq`,
 		key.Tenant, key.Agent, key.Surface, int64(upTo))

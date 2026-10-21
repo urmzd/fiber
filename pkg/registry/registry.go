@@ -60,7 +60,7 @@ import (
 )
 
 // Sentinels every implementation reports. They are matched with errors.Is, and
-// internal/server maps each to a status code (see ServerStore).
+// registrytest holds every implementation to them.
 var (
 	// ErrNotFound reports an agent, or a revision of one, that this tenant
 	// does not have. A tombstoned agent is not found by name, and an agent
@@ -122,10 +122,9 @@ func (p Page) size() int {
 
 // Store is the agent control plane.
 //
-// It mirrors internal/server.Store method for method, in this package's
-// vocabulary, so that adaptation at the edge is mechanical (see ServerStore)
-// while the definition, its validation and its content hash stay here rather
-// than leaking into a transport.
+// The definition, its validation and its content hash stay here rather than
+// leaking into whatever transport a host puts in front of it.
+// registrytest.Run is the contract every implementation passes.
 //
 // Every method takes the tenant explicitly. A store cannot then be accidentally
 // correct: a call with no tenant does not compile, and an implementation that

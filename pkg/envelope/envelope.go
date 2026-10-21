@@ -143,8 +143,9 @@ type Actor struct {
 	Bot bool `json:"bot,omitempty"`
 	// User is the host's own account for the actor (the user id of the
 	// product a person signed in to), when the surface knows it. It is an
-	// authorization fact like ID: the server keeps it only from a credential
-	// trusted to act for others.
+	// authorization fact like ID: fiber trusts it as given, so a program that
+	// accepts tags from callers keeps it only from a credential trusted to
+	// act for others.
 	User string `json:"user,omitempty"`
 }
 
@@ -210,8 +211,9 @@ type Tag struct {
 	// a second one.
 	ID string `json:"id"`
 
-	// Tenant scopes the tag. It is set by the server from the caller's
-	// credential and is not trusted from the wire.
+	// Tenant scopes the tag. fiber trusts it as given, so a program that
+	// accepts tags from callers sets it from the caller's credential and
+	// never from the wire.
 	Tenant string `json:"tenant"`
 
 	// Agent is the name that was tagged.

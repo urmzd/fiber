@@ -121,7 +121,7 @@ func TestPostgresRefusesARevisionThatNoLongerMatchesItsHash(t *testing.T) {
 	mustCreate(t, store, tenantA, "docs-bot", "v1")
 
 	if _, err := poolOf(t, store).Exec(context.Background(),
-		`UPDATE mandatum_agent_revisions SET spec = jsonb_set(spec, '{system_prompt}', '"tampered"')`); err != nil {
+		`UPDATE fiber_agent_revisions SET spec = jsonb_set(spec, '{system_prompt}', '"tampered"')`); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
 	if _, err := store.Get(context.Background(), tenantA, "docs-bot", 1); err == nil {

@@ -49,7 +49,7 @@ func (w *world) stopRecords(t *testing.T, runID string) []payload.StopRequest {
 	}
 	var out []payload.StopRequest
 	for _, rec := range records {
-		if !strings.HasPrefix(rec.Key, "event:mandatum.stop") {
+		if !strings.HasPrefix(rec.Key, "event:fiber.stop") {
 			continue
 		}
 		var body payload.StopRequest

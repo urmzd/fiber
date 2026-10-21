@@ -57,8 +57,8 @@
 // Building a running agent should depend on the definition of one and not on
 // how definitions are validated, hashed, stored or authorized; validating and
 // hashing a definition should not drag an LLM SDK into a linter or a control
-// plane. The two shapes mirror mandatum.v1.AgentSpec field for field, so the
-// conversion at the seam is assignment (see pkg/registry).
+// plane. The two shapes mirror each other field for field, so the conversion
+// at the seam is assignment (see pkg/registry).
 //
 // This package is a leaf: the standard library, plus pkg/topic for the one
 // thing it must not re-decide — whether a name can be addressed.
@@ -164,8 +164,8 @@ func KnownProviders() []string {
 
 // AgentSpec is what an agent IS.
 //
-// It mirrors mandatum.v1.AgentSpec, pkg/agentrt.Spec and internal/server.Spec
-// field for field, so adaptation between them is assignment.
+// It mirrors pkg/agentrt.Spec field for field, so adaptation between them is
+// assignment.
 type AgentSpec struct {
 	Name         string   `json:"name"`
 	Description  string   `json:"description,omitempty"`

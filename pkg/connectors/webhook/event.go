@@ -18,9 +18,8 @@ import (
 // find an object. Splitting the two encodings into two fields means a receiver
 // reads body.payload.text and never has to guess.
 //
-// The field names are deliberately identical to the SSE stream's data frames
-// (see internal/server). A receiver that has parsed one has parsed the other,
-// and there is exactly one JSON shape for an fiber event leaving the mesh.
+// There is exactly one JSON shape for a fiber event leaving the mesh, and a
+// host that streams events over its own transport can reuse it.
 type Body struct {
 	Seq    uint64 `json:"seq"`
 	Topic  string `json:"topic"`

@@ -247,7 +247,7 @@ func (e *engine) hash(doc Document) string {
 		h.Write(n[:])
 		h.Write([]byte(s))
 	}
-	write("mandatum.knowledge.v1")
+	write("fiber.knowledge.v1")
 	write(e.embedder.Model())
 	write(strconv.Itoa(e.embedder.Dimensions()))
 	write(strconv.Itoa(e.chunk.size))

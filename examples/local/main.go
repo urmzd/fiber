@@ -15,7 +15,9 @@
 //	                deltas and the translation to events are all the real ones
 //	connectors      two fakes in fakes.go, implementing connector.Sink exactly
 //
-// None of those are stubs standing in for the design. They are the design,
+// fiber.New assembles them, in process; the options it is given say
+// which pieces this file replaces. None of those are stubs standing in for
+// the design. They are the design,
 // with the storage swapped. The seven sections below are the seven claims
 // fiber makes, each one demonstrated rather than described.
 //
@@ -39,19 +41,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/anchor"
-	"github.com/urmzd/anchor/pkg/ledger"
-	dqueue "github.com/urmzd/anchor/pkg/queue"
 	"github.com/urmzd/anchor/pkg/worker"
 	ragtypes "github.com/urmzd/saige/rag/types"
 
+	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/registry"
-	"github.com/urmzd/fiber/pkg/router"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/topic"
 )
@@ -112,22 +110,9 @@ func run() error {
 	// The connectors. Roles are DERIVED from the interfaces a connector
 	// implements, never declared: both of these implement Deliver and neither
 	// implements Ingest, so the registry knows them as sinks only.
-	sinks := connector.NewRegistry()
 	surfaces := &transcript{}
 	slack := newSlackSink(surfaces)
 	hook := newWebhookSink(surfaces)
-	for _, c := range []connector.Connector{slack, hook} {
-		if err := sinks.Register(c); err != nil {
-			return fmt.Errorf("register %s: %w", c.Name(), err)
-		}
-	}
-
-	// The router: another bus subscriber, which is the reason origin and
-	// destination stay independent. Nothing on the path from trigger to sink
-	// ever holds both ends at once.
-	deliver := router.New(broker, sinks, router.WithLogger(quiet))
-	routerDone := make(chan error, 1)
-	go func() { routerDone <- deliver.Run(ctx) }()
 
 	// The agent side: a corpus to ground answers in, and an executor that
 	// builds the agent from a pinned revision and runs it.
@@ -166,42 +151,37 @@ func run() error {
 		"To roll back, re-run the previous tag's workflow rather than reverting by hand [2].",
 	))
 
-	// Durable execution: the ledger is truth, the queue is disposable flow.
-	lgr := ledger.NewMemory()
-	queue := dqueue.NewMemory()
-
-	// The durable turn, where a tag becomes a run. registry.NewSpecs adapts
-	// the control plane to what the runtime needs: Latest, called once at
-	// accept time, and At, called with the pinned number on every execution
-	// forever.
-	rt, err := runtime.New(
-		anchor.New(lgr, queue),
-		registry.NewSpecs(store),
-		published,
-		exec,
-		runtime.WithStride(demoStride),
-		runtime.WithClock(fixedClock),
-		runtime.WithLogger(quiet),
-	)
-	if err != nil {
-		return fmt.Errorf("runtime: %w", err)
-	}
-
-	// The worker is a pull loop on a goroutine, not a service to deploy. In
-	// production it is a separate process reading the same ledger.
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		_ = worker.New(lgr, queue,
-			worker.WithRegistry(rt.Registry()),
-			worker.WithConcurrency(1),
+	// fiber.New is the composition root: it wires the router (another bus
+	// subscriber, which is why origin and destination stay independent),
+	// the durable runtime on anchor's in-memory ledger and queue, and the
+	// worker that pulls runs off the queue. Every piece this example
+	// replaces is an option; everything else is the in-memory default.
+	app, err := fiber.New(ctx,
+		fiber.WithTenant(tenant),
+		fiber.WithLogger(quiet),
+		fiber.WithRegistry(store),
+		fiber.WithBus(published),
+		fiber.WithExecutor(exec),
+		fiber.WithConnector(slack),
+		fiber.WithConnector(hook),
+		fiber.WithRuntimeOptions(
+			runtime.WithStride(demoStride),
+			runtime.WithClock(fixedClock),
+			runtime.WithLogger(quiet),
+		),
+		fiber.WithWorkerOptions(
 			worker.WithJanitorEvery(0),
 			worker.WithLeaseTTL(2*time.Second),
 			worker.WithHeartbeatEvery(200*time.Millisecond),
 			worker.WithBackoff(func(int) time.Duration { return 10 * time.Millisecond }),
-			worker.WithLogger(quiet),
-		).Run(ctx)
-	}()
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("compose: %w", err)
+	}
+	defer func() { _ = app.Close() }()
+	appDone := make(chan error, 1)
+	go func() { appDone <- app.Run(ctx) }()
 
 	// ── 1 ───────────────────────────────────────────────────────────
 	section(1, "AN AGENT IS A DECLARATIVE SPEC")
@@ -335,26 +315,20 @@ func run() error {
 	fmt.Println("  webhook takes lifecycle.completed only and posts exactly once")
 	fmt.Println()
 
-	// The router learns a run's routes at accept time, before its first event
-	// is published: an event that arrives for a run it has no routes for has
-	// nowhere to go. RunID is a pure function of the tag id, so the routes can
-	// be registered before the run exists.
-	meshRun := runtime.RunID(tag.Tenant, tag.ID)
-	if err := deliver.Register(meshRun, tag.Routes()); err != nil {
-		return fmt.Errorf("register routes: %w", err)
-	}
-
-	// Accept pins the revision, publishes the accepted event, and submits the
-	// run durably. From here the process could be killed and restarted and the
+	// Invoke registers the run's routes with the router first (an event for
+	// a run it has no routes for has nowhere to go), then accepts: it pins
+	// the revision, publishes the accepted event, and submits the run
+	// durably. From here the process could be killed and restarted and the
 	// run would still finish.
-	acc, err := rt.Accept(ctx, tag)
+	meshRun := runtime.RunID(tag.Tenant, tag.ID)
+	acc, err := app.Invoke(ctx, tag)
 	if err != nil {
 		return fmt.Errorf("accept tag: %w", err)
 	}
 	fmt.Printf("  accepted run %s on topic %s, pinned to revision %d\n\n",
 		acc.RunID, acc.Topic, acc.Rev)
 
-	out, err := rt.Result(ctx, acc.RunID)
+	out, err := app.Runtime().Result(ctx, acc.RunID)
 	if err != nil {
 		return fmt.Errorf("run %s: %w", acc.RunID, err)
 	}
@@ -469,10 +443,10 @@ func run() error {
 	fmt.Println("  arming a broker outage on this run's lifecycle.completed event...")
 	fmt.Println()
 
-	if _, err := rt.Accept(ctx, nightly); err != nil {
+	if _, err := app.Invoke(ctx, nightly); err != nil {
 		return fmt.Errorf("accept nightly: %w", err)
 	}
-	nightlyOut, err := rt.Result(ctx, cronRun)
+	nightlyOut, err := app.Runtime().Result(ctx, cronRun)
 	if err != nil {
 		return fmt.Errorf("nightly run: %w", err)
 	}
@@ -522,17 +496,15 @@ func run() error {
 	fmt.Printf("  surfaces delivered  slack %d, webhook %d\n", slackCount, hook.delivered(meshRun))
 	fmt.Printf("  model calls         %d\n", after)
 	fmt.Println()
-	fmt.Println("  swap registry.Memory for Postgres, bus.Memory for Redis Streams,")
-	fmt.Println("  ledger.Memory for anchor's pgledger, the two fakes for")
-	fmt.Println("  pkg/connectors/slack and pkg/connectors/webhook, and the executor for")
-	fmt.Println("  runtime.NewSandbox — and this file does not otherwise change.")
+	fmt.Println("  pass WithPostgres(pool) and WithBus(bus.NewRedis(client)) instead of")
+	fmt.Println("  the in-memory registry, bus and executor, swap the two fakes for")
+	fmt.Println("  WithSlack and WithWebhooks, and this file does not otherwise change.")
 	fmt.Println()
 
 	cancel()
-	<-workerDone
 	<-watching
-	if err := <-routerDone; err != nil {
-		return fmt.Errorf("router: %w", err)
+	if err := <-appDone; err != nil {
+		return fmt.Errorf("app: %w", err)
 	}
 	return nil
 }

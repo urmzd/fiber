@@ -59,8 +59,8 @@
 // whether it can push back on its own storage: Memory fills the buffer from
 // inside the publisher's critical section and so cannot wait — it terminates
 // the subscriber, whose Recv drains what it already holds and then fails with
-// ErrSlowConsumer — while Redis is already holding the events and simply stops
-// reading until the consumer catches up.
+// ErrSlowConsumer — while Redis and Postgres are already holding the events
+// and simply stop reading until the consumer catches up.
 //
 // So a consumer must be ready for ErrSlowConsumer, and the recovery is always
 // the same: resubscribe from the last sequence it processed. Termination is
@@ -78,12 +78,22 @@
 // what it asked for. That is the deliberate consequence of the bus not being
 // the record: it is sized for reconnects, and anything wanting more reads the
 // ledger.
+//
+// # Backends
+//
+// Memory serves one process. Redis (Streams) and Postgres (two tables and
+// LISTEN/NOTIFY) are shared by every process on them. A program picks one by
+// constructing it; bustest holds all three to one contract. Postgres keeps
+// its window in an ordinary table, so every event body it carries, tool
+// arguments included, is stored durably in that database for up to
+// WithIndexTTL (see Postgres).
 package bus
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	goruntime "runtime"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/envelope"
@@ -102,7 +112,8 @@ var (
 )
 
 // Bus is the broker. Implementations must pass the conformance suite in
-// pkg/bus/bustest; both backends in this package are held to it.
+// pkg/bus/bustest; every backend in this package (Memory, Redis, Postgres)
+// is held to it.
 type Bus interface {
 	// Publish records e and fans it out to every matching subscriber. It
 	// assigns e.Seq when the caller left it 0, and treats a sequence the run
@@ -143,8 +154,7 @@ const (
 	// DefaultMaxRuns bounds how many runs Memory retains at once.
 	DefaultMaxRuns = 4096
 	// DefaultKeyPrefix namespaces every Redis key the bus owns.
-	// Keep the original namespace so a rename does not hide retained events.
-	DefaultKeyPrefix = "mandatum"
+	DefaultKeyPrefix = "fiber"
 	// DefaultPollInterval bounds how long a Redis subscriber blocks in one
 	// XREAD, and so how quickly it notices a new run or a closed stream.
 	DefaultPollInterval = 250 * time.Millisecond
@@ -222,7 +232,7 @@ func WithMaxRuns(n int) Option {
 	}
 }
 
-// WithKeyPrefix namespaces the Redis keys the bus owns (default "mandatum", retained for storage compatibility).
+// WithKeyPrefix namespaces the Redis keys the bus owns (default "fiber").
 // Memory ignores it.
 func WithKeyPrefix(p string) Option {
 	return func(o *options) {
@@ -235,7 +245,8 @@ func WithKeyPrefix(p string) Option {
 // WithPollInterval sets how long a Redis subscriber blocks in one XREAD
 // (default 250ms). It bounds how quickly a prefix subscriber notices a run
 // that started after it subscribed, and how long Close waits for the reader to
-// come back. Memory ignores it.
+// come back. On Postgres it is the reader's fallback poll while no LISTEN
+// connection is up. Memory ignores it.
 func WithPollInterval(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
@@ -245,13 +256,25 @@ func WithPollInterval(d time.Duration) Option {
 }
 
 // WithIndexTTL sets how long a run stays discoverable to Redis prefix
-// subscribers after its last event (default 24h). Memory ignores it.
+// subscribers after its last event (default 24h). Postgres forgets a run's
+// events and high-water mark that long after its last event. Memory ignores
+// it.
 func WithIndexTTL(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
 			o.indexTTL = d
 		}
 	}
+}
+
+// RedisPoolSize is the connection pool a Redis client needs for a process
+// that executes concurrentRuns runs at once, each holding streamsPerRun
+// subscriptions for its whole turn: go-redis's default of ten per CPU, plus
+// one connection per held subscription. A pool smaller than that makes
+// publishes wait behind subscriptions, and a publish that times out fails
+// the turn.
+func RedisPoolSize(concurrentRuns, streamsPerRun int) int {
+	return 10*goruntime.GOMAXPROCS(0) + max(concurrentRuns, 1)*max(streamsPerRun, 1)
 }
 
 // normalize validates e and fills in what the topic already says, so that a

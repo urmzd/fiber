@@ -60,7 +60,7 @@ token that came out went somewhere better:
 |---|---|---|
 | Event kind | A field, filtered | All events stream the same way. Splitting kinds across topics forces a consumer who wants the whole conversation to fan in from several topics and re-order them. |
 | Agent revision | A field, filtered | Canary observation is a filter on one topic, not a second topic that appears and disappears as agents are revised. |
-| Tenant | An authorization scope | A subscriber never names its own tenant. The server sets it from the caller's credential, so a subscriber cannot ask for another tenant's traffic by spelling it. |
+| Tenant | An authorization scope | A subscriber never names its own tenant in a topic. fiber authenticates nothing (see [No transport](#no-transport)): the program composing it sets the tenant from the caller's credential, so a subscriber cannot ask for another tenant's traffic by spelling it. |
 | Destination | A route on the run | The same agent answers into Slack for one tag and GitHub for the next. Neither destination should exist in the topic namespace. |
 
 The result is that a consumer only ever needs to know an agent's name to listen
@@ -183,7 +183,7 @@ be able to reply to what it had said so far. A run can be asked to stop at any
 point, and a stopped run is its own outcome: not a failure, not a completion.
 
 ```
-POST /v1/runs/{id}/stop            a host calls runtime.Stop instead
+App.Stop / runtime.Stop
   -> the run ledger                the request is recorded on the run (truth)
   -> control.stop                  then published to the asker's stop stream (fast path)
      -> the executing attempt      reads the ledger before its turn, listens on the bus
@@ -217,7 +217,7 @@ its own tenant.
 ### Where the request lives
 
 **The ledger is the truth.** `Stop` writes the request on the run as a
-write-once event record (`event:mandatum.stop#0`) in the anchor ledger the
+write-once event record (`event:fiber.stop#0`) in the anchor ledger the
 run already lives in: per run, scoped by the run's tenant, read in one round
 trip when an attempt starts, and on Postgres the same tables as every other
 record (`pkg/durable`), so there is no new schema. It records only for a run
@@ -234,9 +234,10 @@ to `agent:_control:stop-<key>`, where the key is a hash of the caller's tenant
 and the run id. It does not go on the run's own topic, because that topic has
 one writer: the attempt chooses its own sequence numbers and the bus keeps the
 first write of a sequence. `_control` is the one name no agent may take, the
-router never delivers what is published under it, and `BusService.Publish`
-refuses it, so the only way to write a request is the route that stamps the
-tenant and the asker from the credential. Because the tenant is part of the
+router never delivers what is published under it, and a host that lets
+callers publish must refuse it, so the only way to write a request is
+`Runtime.Stop`, called with the tenant and asker the host took from the
+caller's credential. Because the tenant is part of the
 key, one tenant's requests can never land in the stream another tenant's run
 reads, so they cannot push that tenant's own request out of it.
 
@@ -289,7 +290,7 @@ The deploy failed because
 The marker is a constant and the reason is not written there, because the
 journal is replayed byte for byte to every later run in the thread. The reason
 and who asked travel on `lifecycle.stopped`, on the run's output, and on
-`GetRun` (`RUN_STATUS_STOPPED`, with `stop_reason` and `stopped_by`). A request
+`App.Status` (`stopped`, with `StopReason` and `StoppedBy`). A request
 with no reason is given saige's default, "Stopped on request", once, so every
 path reports the same words. Sinks render a stopped run as stopped: the shared
 layout says so in the header and under the partial answer, and a GitHub check
@@ -337,15 +338,16 @@ keys); a deployment that needs Redis bounded sets an eviction policy.
 ## Compacting a run on request
 
 A host can ask a running turn to summarize the older part of its history now,
-instead of waiting for the deployment's budget (`FIBER_COMPACT_TOKENS`). The
+instead of waiting for the deployment's budget (`Compaction.MaxInputTokens`). The
 deployment has to take requests (`agentrt.Compaction.OnRequest` on its agents
 and `runtime.WithCompactRequests` on the runtime, both set by
-`FIBER_COMPACT_ON_REQUEST`). A turn of a runtime that takes them holds a
-second control subscription, beside the stop one, for as long as it runs; the
-binary sizes its Redis pool for both.
+`fiber.WithCompaction` with `OnRequest`). A turn of a runtime that takes them holds a
+second control subscription, beside the stop one, for as long as it runs;
+`bus.RedisPoolSize(runs, fiber.ControlStreams(true))` sizes a Redis pool
+for both.
 
 ```
-POST /v1/runs/{id}/compact         a host calls runtime.Compact instead
+App.Compact / runtime.Compact
   -> control.compact               published to the asker's compact stream
      -> the executing attempt      listens on the bus for as long as its turn runs
         -> the next model call     is preceded by the compaction the budget would make
@@ -377,7 +379,7 @@ twice.
 | `usage.child` | A child run a host carried out for a delegation, once it ended: its run id, agent and whole total, read from the ledger |
 | `lifecycle.completed`, `lifecycle.stopped` | The run's total as `usage` |
 | `runtime.Output.Usage` | The same total, in the ledger with the rest of the output, so it survives a restart |
-| `GetRun` | `Run.usage` (`RunUsage`): `own`, `children`, `total`, `context` |
+| `App.Status` | `Run.Usage` (`RunUsage`): `own`, `children`, `total`, `context` |
 | `runtime.RecordedUsage` | A failed run's total, from its ledger records |
 
 The total is a `payload.RunUsage`. `Own` is the run's own agent, `Children` is
@@ -394,15 +396,14 @@ before usage existed, and an event per model call that such a receiver
 refuses, or fails on and has retried in the run's ordered delivery lane, would
 delay its `lifecycle.completed`. "Everything" does not cover accounting, as
 the root topic does not cover the control namespace. Subscriptions are not
-routes: a subscription with no filter (`fiber listen`, SSE) sees usage like
+routes: a subscription with no filter sees usage like
 any other kind.
 
 Sinks that render a chat surface (Slack, GitHub, Jira) ignore usage even when a
 route names it: token counts and cost are for whoever pays, not for everyone
 in a channel or on an issue. A webhook route that selects `usage` receives it.
-`fiber listen` prints one line per call, and `fiber tag` prints the
-run's total on stderr once the run ends. `BusService.Publish` refuses the
-family: only the attempt that spent the tokens writes them.
+Only the attempt that spent the tokens writes them; a host that lets callers
+publish must refuse the family.
 
 ### Cost and money
 
@@ -439,7 +440,7 @@ and a delivery can repeat any event. The rule:
 - **Every model call any attempt made is counted, once.** Before the agent
   activity returns, failed or succeeded, it writes the calls it relayed to the
   run's ledger as a write-once event record,
-  `event:mandatum.usage.a<attempt>#0`. A failure is retried, and so is a
+  `event:fiber.usage.a<attempt>#0`. A failure is retried, and so is a
   success whose result anchor never managed to record; either way the
   attempt that finally records an outcome reads the earlier attempts' records
   inside the agent activity, adds its own calls, and the total is memoized
@@ -514,8 +515,8 @@ authorization) and, for `ask_person`, a `default`.
 The question is typed (`payload.Question`): its id, kind, prompt, options,
 for an approval the tool, the call id, the arguments and the tool's schema,
 `asked_of`, when it expires and what it defaults to. It travels on
-`lifecycle.parked` (`Lifecycle.Question`), and `GetRun` reports a parked run
-as `RUN_STATUS_PARKED` with `pending_question`, read from the run's records
+`lifecycle.parked` (`Lifecycle.Question`), and `App.Status` reports a parked
+run as `parked` with `Run.Question`, read from the run's records
 (`Runtime.PendingQuestion`).
 
 ### Ending the turn at the question
@@ -532,11 +533,11 @@ far is published and kept.
 
 ```
 agent activity (memoized)        returns the parked turn
-  -> step mandatum.question.<id>   announces lifecycle.parked once; the record is the question
-  -> event mandatum.answer.<id>    the resolution: absent, the body returns ErrParked and the run waits
+  -> step fiber.question.<id>   announces lifecycle.parked once; the record is the question
+  -> event fiber.answer.<id>    the resolution: absent, the body returns ErrParked and the run waits
 Runtime.Answer                   checks the answer, writes the resolution (first write wins), wakes the run
   -> next attempt replays         the turn and the question from records, reads the resolution
-  -> mandatum.turn.resume          continues the turn with the answer (memoized)
+  -> fiber.turn.resume          continues the turn with the answer (memoized)
 ```
 
 The resolution is a write-once anchor event record, and it is the only
@@ -552,10 +553,10 @@ asked parks even when an answer lands a moment later, and the answer's
 wake-up starts the next attempt, so each attempt's sequence band, usage
 record and accounting keys stay its own.
 
-`Runtime.Answer` (`InvokeService.Answer`, `fiber answer`) is scoped to the
+`Runtime.Answer` (`App.Answer`) is scoped to the
 caller's tenant: a question of another tenant's run is reported exactly like
-one that does not exist. Who answered comes from the credential, as for a tag
-or a stop (see "Who may answer" below). An answer is checked against its question before it is recorded:
+one that does not exist. Who answered comes from the host, taken from the
+caller's credential, as for a tag or a stop (see "Who may answer" below). An answer is checked against its question before it is recorded:
 a decision is `approve` or `deny` and only an approval carries arguments,
 which must satisfy the tool's schema (saige's validator); a choice must be one
 of the options; a reply must have text. Answer wakes the run through the queue
@@ -704,45 +705,37 @@ leaves (stdlib only)
 
 seams
   pkg/connector    Trigger / Sink / Actor faces, registry
-  pkg/bus          Bus interface, Memory and Redis Streams, bustest suite
-  pkg/registry     agent store, Memory implementation
+  pkg/bus          Bus interface, Memory, Redis Streams and Postgres, bustest
+  pkg/registry     agent store, Memory and Postgres, registrytest
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations
   pkg/runtime      the durable anchor turn, playscape sandbox, stop, usage, parking
   pkg/router       delivery fan-out to sinks
   pkg/connectors   slack, github, jira, cron, webhook
-  internal/server  Connect handlers, SSE, webhook ingress
-  internal/cli     command tree and the composition root
-  fiberapp         the composition root's public face, for downstream binaries
+  fiber (root)     the composition root, composed in Go
 ```
 
-`internal/cli/core.go` is the composition root and the fastest way to understand
-how the system fits together: it assembles the bus, registry, router, runtime,
-connectors, and transport in the order data flows through them.
+`app.go` at the module root (`fiber.New`) is the composition root and the fastest way to
+understand how the system fits together: it assembles the bus, registry,
+router, runtime, sandbox and connectors in the order data flows through them.
+Every backend is a constructed value passed by an option (`WithPostgres(pool)`
+for every store family, `WithBus`, or one store at a time), and anything not
+given is memory. The composition reads no configuration file and no
+`FIBER_*` variable (model providers still read their vendor's key, such as
+`ANTHROPIC_API_KEY`, when an agent is built); the program composing it owns
+configuration, and each backend family has
+a conformance suite (`bustest`, `registrytest`, `knowledgetest`,
+`threadtest`, `toolprovidertest`, `blobtest`) every implementation passes.
 
-## Transports
+## No transport
 
-Connect (connectrpc.com) serves gRPC, gRPC-Web, and HTTP/JSON from one handler
-set, so gRPC clients and browsers share one contract and one codegen path.
-
-| Surface | Purpose |
-|---------|---------|
-| `InvokeService.Invoke` | Tag an agent, return the run id once durable |
-| `InvokeService.InvokeStream` | Invoke and tail in one RPC, with no race between accept and subscribe |
-| `BusService.Subscribe` | Topic plus filter plus cursor, long-lived |
-| `BusService.Publish` | Append an event to a run's topic; lifecycle, control, usage and context kinds are the run's and the control plane's, and are refused |
-| `AgentService.*` | Agent spec control plane |
-| `GET /v1/sse` | The same stream, browser-native, resumable via `Last-Event-ID` |
-| `POST /v1/runs/{id}/stop` | Ask a run to stop; answers 202 for every run id. `GetRun` reports `RUN_STATUS_STOPPED` |
-| `POST /v1/runs/{id}/compact` | Ask a running turn to compact its history; answers 202 for every run id. The run's stream reports `context.compacted` |
-| `InvokeService.GetRun` | A run's record, its usage included (`Run.usage`), and the question a parked run waits on (`Run.pending_question`) |
-| `InvokeService.Answer` | Answer a parked run's question; the first answer recorded is the answer |
-| `POST /v1/webhooks/{connector}` | HMAC-verified ingress |
-
-`InvokeStream` exists because doing invoke and subscribe separately races: events
-emitted between the two are missed. Here the subscription is established before
-the run is enqueued.
+fiber serves nothing. A program composing fiber calls `App.Invoke`,
+`Status`, `Stop`, `Compact` and `Answer` in process, subscribes with
+`App.Bus().Subscribe`, and mounts `App.WebhookHandler()` (or the handlers in
+`App.Webhooks()`) wherever it serves HTTP; each webhook connector verifies its
+own signature. Authentication, and stamping the tenant and actor on what it
+accepts, belong to that program. warp is one.
 
 ## Security boundaries
 
@@ -768,15 +761,12 @@ areas and the spawn allowlist that governs agent-tags-agent.
 
 Verified against the code, and honest.
 
-- **The bus needs Redis or memory, not Postgres.** anchor's `pgqueue` does not
-  implement the `DeltaLog` capability, stated explicitly at
-  `adapters/postgres/pgqueue/pgqueue.go`. A Postgres-only deployment runs
-  durably but cannot stream.
-- **anchor's Redis and Postgres adapter submodules are not depended on.** They
-  currently fail checksum verification against `sum.golang.org`, so fiber
-  depends only on anchor's root module and ships its own Redis Streams bus
-  backend. anchor's in-memory ledger and queue are complete systems and are
-  what the single-binary deployment uses.
+- **The Postgres bus serializes publishes.** fiber's own `bus.Postgres`
+  takes one advisory lock per schema per publish, so the append id is commit
+  order and readers never skip a late commit. Throughput is one short
+  transaction per event; Redis is the better bus for a chatty deployment.
+  The run queue fiber builds on Postgres has no `DeltaLog`, so anchor's
+  per-run delta journal is not written; the bus carries every event.
 - **playscape's queue is at-most-once** in beta. Durability comes from anchor.
 - **Citations are derived from retrieval.** Citations are extracted from RAG
   `AssembledContext` blocks and emitted as fiber's own `delta.citation`
@@ -788,13 +778,12 @@ Verified against the code, and honest.
   cursors cover real-time consumers. If durable competing consumers with
   independent offsets become a requirement, the honest answer is NATS JetStream
   behind the `Bus` interface rather than growing a broker here.
-- **Agent specs are loaded from JSON**, not YAML, so the CLI carries no parser
-  dependency.
+- **Agent specs are JSON**, not YAML, so fiber carries no parser dependency.
 - **A stop is reliable only with the ledger.** `runtime.WithStopLedger` must
-  be given the ledger the runs execute from, as the CLI does. A host without it
+  be given the ledger the runs execute from, as `fiber.New` does. A host without it
   falls back to the bus alone, with the bounds in "How long the bus keeps a
   request". With an in-memory ledger, only the process that accepted a run can
-  stop it, which is also the only process that can read it with `GetRun`.
+  stop it, which is also the only process that can read it with `App.Status`.
 - **A crash between the wrap-up and its record loses the partial text from the
   thread.** If a worker dies after saige stopped the turn but before the
   stopped outcome was recorded, the next attempt finds the request in the
@@ -802,7 +791,7 @@ Verified against the code, and honest.
   holds only the marker, while the surface already showed what the first
   attempt streamed.
 - **A turn holds one bus subscription while it runs.** On Redis each one holds
-  a pooled connection for most of its poll cycle. The CLI sizes the pool at
+  a pooled connection for most of its poll cycle. `bus.RedisPoolSize` sizes the pool at
   go-redis's default plus one connection per run a process executes at once;
   a host building its own client should do the same. One shared subscription
   per process would remove this cost; it needs a way to subscribe to a prefix
@@ -811,10 +800,7 @@ Verified against the code, and honest.
   and the abort of an abandoned task cross from the waiting goroutine to the
   playscape tool in memory. A remote playscape node would need them carried over
   its own transport; only the in-process plane is supported and tested.
-- **Stop is an HTTP route, not an RPC.** `POST /v1/runs/{id}/stop`. A run's
-  stopped status is on the wire (`RUN_STATUS_STOPPED`); asking for a stop is
-  not yet a Connect method.
-- **A request to compact is live only, and is an HTTP route.** It is not
+- **A request to compact is live only.** It is not
   recorded, so it reaches only the attempt running when it is made, judged by
   the asking process's clock against when that attempt began to listen; a
   request within a clock skew of an attempt starting can be dropped. The
@@ -870,7 +856,7 @@ Verified against the code, and honest.
 - **Polls read records, not transcripts, only on Postgres.** The stop poll
   (every two seconds while a turn runs), `Answer`, `PendingQuestion` and the
   child-question watch read the run's row and the records they need through
-  `runtime.WithRecordReader` (`durable.Records`, which the CLI passes on
+  `runtime.WithRecordReader` (`durable.Records`, which `fiber.New` passes on
   Postgres). Without it each of those reads loads every record of the run,
   transcripts included.
 - **Expiry waits for a poll.** Nothing wakes a run at its question's

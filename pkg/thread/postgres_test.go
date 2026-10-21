@@ -133,7 +133,7 @@ func TestPostgresConstraintsRefuseADuplicateWrittenBehindTheStore(t *testing.T) 
 
 	insert := func(seq int, run, surfaceID string) error {
 		_, err := poolOf(t, store).Exec(context.Background(),
-			`INSERT INTO mandatum_thread_entries
+			`INSERT INTO fiber_thread_entries
 			   (tenant, agent, surface, seq, role, body, actor_id, actor_display, actor_bot, run_id, surface_id, at)
 			 VALUES ($1, $2, $3, $4, 'user', 'forged', '', '', false, $5, $6, now())`,
 			key.Tenant, key.Agent, key.Surface, seq, run, surfaceID)
@@ -154,14 +154,14 @@ func TestPostgresConstraintsRefuseADuplicateWrittenBehindTheStore(t *testing.T) 
 // attachments. The migration test builds it by hand, writes a row the old way,
 // and then lets the current Migrate bring it forward.
 const legacySchema = `
-CREATE TABLE mandatum_threads (
+CREATE TABLE fiber_threads (
 	tenant  text   NOT NULL,
 	agent   text   NOT NULL,
 	surface text   NOT NULL,
 	head    bigint NOT NULL CHECK (head >= 0),
 	PRIMARY KEY (tenant, agent, surface)
 );
-CREATE TABLE mandatum_thread_entries (
+CREATE TABLE fiber_thread_entries (
 	tenant        text        NOT NULL,
 	agent         text        NOT NULL,
 	surface       text        NOT NULL,
@@ -175,7 +175,7 @@ CREATE TABLE mandatum_thread_entries (
 	surface_id    text        NOT NULL,
 	at            timestamptz NOT NULL,
 	PRIMARY KEY (tenant, agent, surface, seq),
-	FOREIGN KEY (tenant, agent, surface) REFERENCES mandatum_threads (tenant, agent, surface)
+	FOREIGN KEY (tenant, agent, surface) REFERENCES fiber_threads (tenant, agent, surface)
 );
 `
 
@@ -212,12 +212,12 @@ func TestPostgresMigrationAddsAttachmentsWithoutChangingOldEntries(t *testing.T)
 	}
 	key := slackThread("docs-bot")
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	if _, err := pool.Exec(ctx, `INSERT INTO mandatum_threads VALUES ($1, $2, $3, 2)`, key.Tenant, key.Agent, key.Surface); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO fiber_threads VALUES ($1, $2, $3, 2)`, key.Tenant, key.Agent, key.Surface); err != nil {
 		t.Fatal(err)
 	}
 	for i, row := range []struct{ role, body, run string }{{"user", "old question", "run-1"}, {"assistant", "old answer", "run-1"}} {
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO mandatum_thread_entries VALUES ($1, $2, $3, $4, $5, $6, 'U1', 'ada', false, $7, '', $8)`,
+			`INSERT INTO fiber_thread_entries VALUES ($1, $2, $3, $4, $5, $6, 'U1', 'ada', false, $7, '', $8)`,
 			key.Tenant, key.Agent, key.Surface, i+1, row.role, row.body, row.run, at); err != nil {
 			t.Fatal(err)
 		}

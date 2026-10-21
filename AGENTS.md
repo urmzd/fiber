@@ -1,14 +1,17 @@
 # fiber
 
-Agent platform and low-latency pub/sub bus. Tag an agent from anywhere, stream
+Agent library and low-latency pub/sub bus. Tag an agent from anywhere, stream
 its events to anyone, deliver them anywhere. Go module
-`github.com/urmzd/fiber`, binary `fiber`.
+`github.com/urmzd/fiber`. It is a library you compose in Go: no binary, no
+service, no configuration files, no environment variables. The root package
+`fiber` is the composition root (`fiber.New(ctx, ...Option)`); warp is the
+platform built on it, owns all configuration, and imports only `pkg/`.
 
 **Status: v0 alpha, pre-1.0, not recommended for production.** Interfaces are
-still moving and may change between minor versions. The single-binary deployment
-is complete and tested; the Redis bus backend is conformance-tested but not
-exercised in CI. The Postgres registry, run ledger (`pkg/durable`) and
-knowledge store run in CI's integration job and in `make e2e`. Keep the surface small and document limitations honestly.
+still moving and may change between minor versions. The in-memory composition
+is complete and tested. Every Postgres store, the Postgres bus and the Redis
+bus pass their conformance suites in CI's integration job (`make integration`
+locally). Keep the surface small and document limitations honestly.
 
 The design turns on one idea: where a tag is raised and where its answer lands
 are independent. Read `docs/architecture/overview.md` before changing anything
@@ -28,24 +31,22 @@ sandboxing and access control.
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
 | `pkg/agentspec` | Immutable agent specs, content-addressed revisions. Leaf. |
 | `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
-| `pkg/registry` | Agent store and revision history. `Memory` and `Postgres` implementations, plus the adapter to `internal/server.Store`. |
+| `pkg/registry` | Agent store and revision history. `Memory` and `Postgres`, `registrytest` conformance suite, and `Specs`, the resolver `pkg/runtime` reads pinned revisions through. |
 | `pkg/durable` | The Postgres schema for anchor's ledger and queue adapters, and `Open`, which builds both on it. |
-| `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`. |
-| `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem. |
+| `pkg/internal/pgrename` | The one migration step every Postgres store runs first: renames objects a database created before fiber's rename still carries, refuses (naming both) when an old table was created again beside its new one, and the registry re-addresses revisions hashed under the old domain. It also names the pre-rename turn, which `pkg/runtime` registers only to fail such a run with a reason. The only code that knows the old names. |
+| `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`; `threadtest.Run` is its conformance suite. |
+| `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem; `blobtest`. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
-| `pkg/toolprovider` | MCP tool providers as versioned records: how to reach a server, its credential reference, and the admin-accepted, numbered tool snapshots. Changed tools stay pending; read/write class defaults to write. A tool is shown to models as `<provider>__<tool>` (`QualifiedName`). `Memory` and `Postgres`; the composition root migrates and wires it. |
+| `pkg/toolprovider` | MCP tool providers as versioned records: how to reach a server, its credential reference, and the admin-accepted, numbered tool snapshots. Changed tools stay pending; read/write class defaults to write. A tool is shown to models as `<provider>__<tool>` (`QualifiedName`). `Memory` and `Postgres`, `toolprovidertest`; the composition root migrates and wires it. |
 | `pkg/mcptools` | MCP client (stdio, streamable HTTP) over `toolprovider`: lists and diffs a server's tools, exposes only accepted ones as saige tools, enforces the grant's class per call, and redacts the resolved credential everywhere. `Grants` expands a spec's `mcp:<provider>[:write]` group grant (read only by default) per tenant, on sessions kept per provider record version, for `runtime.WithToolGroupSource`. |
-| `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`. |
+| `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`, `knowledgetest`. |
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
-| `pkg/bus` | `Bus` interface, `Memory` and Redis Streams backends, `bustest` conformance suite. |
+| `pkg/bus` | `Bus` interface; `Memory`, Redis Streams and Postgres backends; `bustest` conformance suite. The Postgres bus stores every event body in `fiber_bus_events` until it is trimmed or `WithIndexTTL` expires. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model (`WithStrictTools` refuses instead). `payload/` holds typed event bodies. |
 | `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
-| `internal/server` | Connect handlers, SSE, webhook ingress, tenant interceptor. |
-| `internal/cli` | Command tree. `core.go` is the composition root; `extensions.go` is what a downstream binary or `serve --providers FILE` adds to it. |
-| `fiberapp` | The public face of the composition root: `Main` runs the fiber command tree with options that register model providers, tool sources, connectors and MCP tool providers. It sits at the module root because nothing under `pkg/` may import `internal/`. `cmd/fiber` is `fiberapp.Main` with no options. |
-| `gen/`, `proto/` | The protobuf contract and its generated code. `gen/` is committed. |
+| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
 
 Discover layout with `tree` or ripgrep; do not trust stale listings.
 
@@ -54,18 +55,15 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 | Action | Command |
 |--------|---------|
 | init | `make init` |
-| build | `make build` |
+| build | `make build` (`go build ./...`) |
 | test | `go test ./...` |
 | race test | `go test ./... -race` |
 | lint | `golangci-lint run` |
 | fmt | `gofmt -w .` |
 | quality gate | `make check` |
-| run server | `make run` (or `go run ./cmd/fiber serve`) |
-| regenerate proto | `make proto` (needs `buf` on PATH) |
-| end-to-end demo | `go run ./examples/local` |
-| compose stack | `make up` (Postgres, Redis, fiber), `make down` |
-| compose end-to-end | `make e2e` |
-| registry on Postgres | `FIBER_POSTGRES_TEST_URL=postgres://... go test ./pkg/registry/` |
+| end-to-end demo | `go run ./examples/local`, `go run ./examples/downstream` |
+| backends | `make up` (Postgres with pgvector, Redis), `make down` |
+| suites on real backends | `make integration` (sets `FIBER_POSTGRES_TEST_URL` and `FIBER_REDIS_ADDR`) |
 
 ## Code Style
 
@@ -127,7 +125,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   estimated. Usage is opt-in for routes and chat sinks do not render it.
 - **A parked run decides from its records.** A question is a anchor step the
   body records once; its resolution is the write-once event record
-  `event:mandatum.answer.<id>#0`, written by `Runtime.Answer`, by a stop, or by
+  `event:fiber.answer.<id>#0`, written by `Runtime.Answer`, by a stop, or by
   an expiry, and whichever was first is the answer. The body never reads the
   clock or a request to decide; it reads that record. An attempt runs at most
   one turn: the attempt that asked parks, and the answer wakes the next.
@@ -146,8 +144,10 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   conversation.
 - **Sinks must be idempotent.** Delivery is at-least-once. Render one message
   per run and edit it; never post per delta.
-- **Tenant is never read from a request body.** The server sets it from the
+- **Tenant is never read from a request body.** fiber has no transport; a
+  program that accepts tags from callers (warp) sets the tenant from the
   caller's credential and overwrites whatever the client sent.
+  `App.Invoke` trusts the tag it is handed.
 - **Neither is the actor.** A tag's actor is the credential's subject unless
   the credential is marked `ActAs`, which is what a surface that authenticated
   the person itself holds. Authorship and approvals are decided on it. The
@@ -165,23 +165,22 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   rendering and HTTP plumbing rather than reimplementing them.
 - **New bus backend**: implement `bus.Bus` and run it through
   `pkg/bus/bustest.Run`, which holds every backend to the identical contract.
-- **New registry backend**: implement `registry.Store`; the adapter to the
-  server's interface already exists. Make `newStore` in
-  `pkg/registry/memory_test.go` able to build it, so it runs the same suite
-  `Memory` and `Postgres` do.
-- **New agent provider**: an OpenAI-compatible endpoint needs no code (a
-  `models` entry in `serve --providers FILE`). Anything else outside this repo
-  is a `fiberapp.WithModelProvider` in the downstream binary; see
+- **New store backend**: implement the package's `Store` and run it through
+  its suite (`registrytest`, `knowledgetest`, `threadtest`,
+  `toolprovidertest`, `blobtest`), as `Memory` and `Postgres` do. Wire it in
+  `app.go` behind an option, or let callers pass it to the existing one.
+- **New agent provider**: an OpenAI-compatible endpoint is
+  `fiber.WithOpenAICompatible`. Anything else outside this repo is a
+  `fiber.WithModelProvider` in the composing program; see
   `examples/downstream`. A built-in belongs in `pkg/agentrt`'s provider
   construction. Keep `agenttest.ScriptedProvider` working, since it is what
   makes the example and the tests run with no API key.
 - **Downstream extensions**: tool sources, connectors and MCP tool providers
-  are `fiberapp` options too. Each option is a field of `cli.Extensions`, so a
-  new extension point is a field there, its wiring in `newCore`, and an option
-  in `fiberapp`.
+  are `fiber` options too. Each option fills a field of `options`
+  (`extensions.go`), so a new extension point is a field there, its wiring in
+  `New`, and an option. No option reads a file or the environment.
 - **New event kind**: add it to `pkg/envelope`, give it a typed body in
   `pkg/agentrt/payload`, and teach the connector renderers about it. Kinds are
   fields, never topics. A kind that ends a run must also be taught to
-  everything that waits for a run to end: `render.Status.Terminal`, the
-  server's `terminalKind`, the CLI's `terminal`, and the ledger status mapping
-  in `internal/cli/core.go`.
+  everything that waits for a run to end: `render.Status.Terminal`, and the
+  ledger status mapping in `status.go` (`Status.Terminal`).

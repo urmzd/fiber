@@ -383,7 +383,7 @@ type parker struct {
 
 func (p *parker) hooks() saige.Hooks {
 	return saige.Hooks{
-		Name: "mandatum.park",
+		Name: "fiber.park",
 		AfterModelCall: func(_ context.Context, ev *saige.AfterModelCallEvent) error {
 			if len(ev.Path) > 0 || ev.Message == nil || ev.Err != nil {
 				return nil

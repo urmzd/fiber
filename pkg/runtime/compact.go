@@ -24,8 +24,8 @@ import (
 // turn compacts before its next model call, exactly as the budget would have
 // made it, and publishes context.compacted with Trigger "requested" and who
 // asked. The deployment has to take requests: WithCompactRequests on the
-// runtime and agentrt.Compaction.OnRequest on its agents,
-// FIBER_COMPACT_ON_REQUEST in the binary.
+// runtime and agentrt.Compaction.OnRequest on its agents, both of which
+// fiber.WithCompaction sets.
 //
 // # How the request reaches the turn
 //

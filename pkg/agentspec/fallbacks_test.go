@@ -13,7 +13,7 @@ import (
 // stored revision reads as changed.
 func TestFallbacksLeaveTheHashOfASpecWithoutThemUnchanged(t *testing.T) {
 	t.Parallel()
-	const before = "sha256:3dbf7901c3a3336ee0afd3806eca2f03c1348dbaa8c0dc49dcc9614d5d91da95" // valid().Hash() in v0.10.0
+	const before = "sha256:31deb5030b98b85b432d94ec650d6e134c0b1ccc6234d94f8869e2ed69d62435" // valid().Hash() under the fiber/agentspec/v1 domain, unchanged by later fields
 	empty := valid()
 	empty.Fallbacks = []agentspec.ModelRef{}
 	for name, s := range map[string]agentspec.AgentSpec{"nil": valid(), "empty": empty} {
