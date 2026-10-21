@@ -90,6 +90,9 @@ func newSlack(cfg options, agents mention.Set, files connectors.Files) (connecto
 	if token == "" || secret == "" {
 		return nil, configf("slack needs both a token and a signing secret")
 	}
+	if err := needTenant(cfg, "slack"); err != nil {
+		return nil, err
+	}
 	c, err := slack.New(slack.Config{
 		API:          slack.NewHTTPAPI(token, http.DefaultClient),
 		Verifier:     signature.NewSlack(secret),
@@ -116,6 +119,9 @@ func newGitHub(cfg options, agents mention.Set, files connectors.Files) (connect
 	}
 	if token == "" || secret == "" {
 		return nil, configf("github needs both a token and a webhook secret")
+	}
+	if err := needTenant(cfg, "github"); err != nil {
+		return nil, err
 	}
 	c, err := github.New(github.Config{
 		API:              github.NewHTTPAPI(token, http.DefaultClient),
@@ -147,6 +153,9 @@ func newJira(cfg options, agents mention.Set, files connectors.Files) (connector
 	if secret == "" {
 		return nil, configf("jira needs a webhook secret: Jira signs nothing, so a shared secret is the only thing standing between its webhook and the internet")
 	}
+	if err := needTenant(cfg, "jira"); err != nil {
+		return nil, err
+	}
 	sites := map[string]jira.Site{}
 	for key, base := range jc.Sites {
 		sites[key] = jira.Site{BaseURL: strings.TrimRight(base, "/"), Email: email, Token: token}
@@ -168,6 +177,19 @@ func newJira(cfg options, agents mention.Set, files connectors.Files) (connector
 		return nil, fmt.Errorf("fiber: jira: %w", err)
 	}
 	return c, nil
+}
+
+// needTenant refuses a trigger connector in a deployment with no tenant. A
+// webhook from Slack, GitHub or Jira carries no credential to derive one
+// from, so the connector resolves mentions and stamps tags in the
+// deployment's tenant (WithTenant); with none, no mention would name an agent
+// and no tag would be accepted, and the connector would be configured and
+// silently dead. A schedule carries its own tenant and does not need one.
+func needTenant(cfg options, name string) error {
+	if cfg.Tenant == "" {
+		return configf("%s raises tags in the deployment's tenant, and none is set: pass WithTenant", name)
+	}
+	return nil
 }
 
 // newWebhook builds the outbound webhook sink. It raises no tags, so it has

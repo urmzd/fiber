@@ -117,6 +117,15 @@ const listeningPollFactor = 20
 // Runs are forgotten WithIndexTTL after their last event, by a sweep a
 // publish runs at most every quarter of that.
 //
+// Unlike Redis's window, this one is durable: every event the bus carries,
+// body included, is a row in fiber_bus_events in the database it is given,
+// until its run's retention trim drops it or a sweep finds it older than
+// WithIndexTTL (24 hours by default; with no publishes, nothing is swept).
+// Those rows reach that database's WAL, replicas and backups like any other,
+// and tool events carry their call's arguments (up to 8 KiB). Where those can
+// hold secrets, scrub them before they are published
+// (agentrt.WithToolArguments), shorten WithIndexTTL, or use Redis.
+//
 // It does not own the pool. Call Migrate once before first use.
 type Postgres struct {
 	pool      *pgxpool.Pool

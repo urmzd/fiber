@@ -83,7 +83,10 @@
 //
 // Memory serves one process. Redis (Streams) and Postgres (two tables and
 // LISTEN/NOTIFY) are shared by every process on them. A program picks one by
-// constructing it; bustest holds all three to one contract.
+// constructing it; bustest holds all three to one contract. Postgres keeps
+// its window in an ordinary table, so every event body it carries, tool
+// arguments included, is stored durably in that database for up to
+// WithIndexTTL (see Postgres).
 package bus
 
 import (

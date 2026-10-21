@@ -74,9 +74,12 @@ func apply(opts []Option) options {
 
 // WithTenant sets the authorization scope this deployment serves. It is
 // stamped onto every tag a connector raises (a trigger has no credential to
-// derive one from), the author agent is seeded for it, and tool providers
-// declared without a tenant are recorded under it. Without it nothing is
-// seeded.
+// derive one from), mentions on Slack, GitHub and Jira resolve agents in it,
+// the author agent is seeded for it, and tool providers declared without a
+// tenant are recorded under it. There is no default: without it nothing is
+// seeded, and WithSlack, WithGitHub and WithJira are ErrConfig, since they
+// would raise nothing a run could be accepted for. A schedule carries its own
+// tenant.
 func WithTenant(tenant string) Option { return func(o *options) { o.Tenant = tenant } }
 
 // WithWorkspace sets the directory the sandbox writes agent artifacts under.

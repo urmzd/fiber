@@ -6,8 +6,9 @@ import (
 )
 
 // ErrConfig reports a composition that cannot be what its author meant: a
-// half-configured connector, a tool provider declared twice, a tool pinned
-// with no schema hash. New fails with it before anything runs.
+// half-configured connector, a trigger connector with no tenant to raise tags
+// in, a tool provider declared twice, a tool pinned with no schema hash. New
+// fails with it before anything runs.
 var ErrConfig = errors.New("fiber: invalid configuration")
 
 // ErrUnavailable reports a backend New could not migrate. Retrying unchanged
@@ -19,7 +20,8 @@ func configf(format string, args ...any) error {
 }
 
 // Slack configures the built-in Slack connector (WithSlack). Token and
-// SigningSecret together turn it on; one without the other is ErrConfig.
+// SigningSecret together turn it on; one without the other is ErrConfig, and
+// so is either without WithTenant.
 type Slack struct {
 	Token, SigningSecret string
 	// Team is the workspace id deliveries are confined to.
@@ -34,7 +36,7 @@ type Slack struct {
 }
 
 // GitHub configures the built-in GitHub connector (WithGitHub). Token and
-// WebhookSecret together turn it on.
+// WebhookSecret together turn it on, and it needs WithTenant.
 type GitHub struct {
 	Token, WebhookSecret string
 	Owners               []string
@@ -45,7 +47,7 @@ type GitHub struct {
 
 // Jira configures the built-in Jira connector (WithJira). Sites (short key
 // to base URL; the key is what a jira:// address names) turns it on, and then
-// Email, Token and WebhookSecret are required.
+// Email, Token, WebhookSecret and WithTenant are required.
 type Jira struct {
 	Sites                       map[string]string
 	Email, Token, WebhookSecret string

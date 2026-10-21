@@ -141,6 +141,28 @@ func awaitDelivered(t *testing.T, box *inbox, target string) {
 	}
 }
 
+// awaitEnded polls Status until the run is terminal and returns it. A run
+// publishes its terminal event from inside its turn, and the worker records
+// how the run ended in the ledger only after the turn returns, so a Status
+// read the moment that event is delivered can still say accepted.
+func awaitEnded(t *testing.T, app *App, tenant, runID string) Run {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		run, err := app.Status(context.Background(), tenant, runID)
+		if err != nil {
+			t.Fatalf("Status(%s): %v", runID, err)
+		}
+		if run.Status.Terminal() {
+			return run
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the ledger never recorded run %s as ended: status %q", runID, run.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 var offline = agentspec.AgentSpec{Name: "docs-bot", Model: "m", Provider: agentspec.ProviderOffline, SystemPrompt: "Answer."}
 
 // A tag id is whatever the caller sent, so two tenants can send the same one.
@@ -250,10 +272,7 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 	if !strings.Contains(string(last.Payload), "Stopped by a user") || !strings.Contains(string(last.Payload), "slack:U1") {
 		t.Errorf("lifecycle.stopped payload = %s, want the acme request", last.Payload)
 	}
-	run, err := app.Status(ctx, "acme", acc.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	run := awaitEnded(t, app, "acme", acc.RunID)
 	if run.Status != StatusStopped || !run.Status.Terminal() || run.StopReason != "Stopped by a user" || run.StoppedBy != "slack:U1" {
 		t.Errorf("run = status %q reason %q by %q, want stopped by slack:U1", run.Status, run.StopReason, run.StoppedBy)
 	}
@@ -296,10 +315,7 @@ func TestStatusReadsTheUsageTheRunRecorded(t *testing.T) {
 	if calls == 0 || delivered == nil || delivered.Total.ModelCalls != calls {
 		t.Fatalf("delivered %d usage.call events and a completed event with usage %+v", calls, delivered)
 	}
-	run, err := app.Status(ctx, "acme", acc.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	run := awaitEnded(t, app, "acme", acc.RunID)
 	if run.Status != StatusCompleted || run.Usage == nil || run.Usage.Total.ModelCalls != delivered.Total.ModelCalls {
 		t.Fatalf("Status = %q usage %+v, want the usage the run delivered %+v", run.Status, run.Usage, delivered)
 	}
@@ -355,8 +371,8 @@ func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T)
 			t.Fatal(err)
 		}
 		awaitDelivered(t, box, target.String())
-		if run, err := app.Status(ctx, "acme", acc.RunID); err != nil || run.Status != StatusCompleted {
-			t.Fatalf("Status = %+v, %v", run.Status, err)
+		if run := awaitEnded(t, app, "acme", acc.RunID); run.Status != StatusCompleted {
+			t.Fatalf("Status = %q (%s), want completed", run.Status, run.Error)
 		}
 	})
 }
@@ -367,13 +383,17 @@ func isType[T any](v any) bool {
 }
 
 // A composition that cannot be right fails New with ErrConfig, before
-// anything runs.
+// anything runs. A trigger connector with no tenant is one: it would resolve
+// no mention and raise no tag a run could be accepted for.
 func TestAnImpossibleCompositionIsErrConfig(t *testing.T) {
 	issues := toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP, Endpoint: "https://mcp.example.com"}
 	for name, opts := range map[string][]Option{
 		"slack with a token and no secret":  {WithSlack(Slack{Token: "xoxb"})},
 		"github with a secret and no token": {WithGitHub(GitHub{WebhookSecret: "s"})},
 		"jira with no secret":               {WithJira(Jira{Sites: map[string]string{"a": "https://a"}, Email: "e", Token: "t"})},
+		"slack with no tenant":              {WithSlack(Slack{Token: "xoxb", SigningSecret: "s"})},
+		"github with no tenant":             {WithGitHub(GitHub{Token: "ghs", WebhookSecret: "s"})},
+		"jira with no tenant":               {WithJira(Jira{Sites: map[string]string{"a": "https://a"}, Email: "e", Token: "t", WebhookSecret: "s"})},
 		"a webhook with no secret":          {WithWebhooks(map[string]webhook.Endpoint{"acme": {BaseURL: "https://hooks"}})},
 		"a ledger with no queue":            {WithDurable(ledger.NewMemory(), nil)},
 		"a tool provider declared twice":    {WithTenant("acme"), WithToolProvider(issues), WithToolProvider(issues)},
