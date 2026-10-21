@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,5 +234,45 @@ func TestADatabaseFromBeforeTheRenameKeepsItsData(t *testing.T) {
 	}
 	if got, err := after.ledger.GetRun(ctx, "r1"); err != nil || got.ID != "r1" {
 		t.Errorf("run after the upgrade = %+v, %v", got, err)
+	}
+}
+
+// A process from before the rename that starts after the upgrade creates its
+// old, empty tables again and writes there. The next migration refuses to
+// choose between the two and names both, instead of skipping the old table
+// and leaving whatever was written to it orphaned.
+func TestAnOldTableRecreatedAfterTheUpgradeFailsTheMigrationNamingBoth(t *testing.T) {
+	ctx := context.Background()
+	p := pool(t)
+	migrate(t, ctx, p)
+	old := pgrename.LegacyPrefix + "agents"
+	if _, err := p.Exec(ctx, `CREATE TABLE `+old+` (LIKE fiber_agents INCLUDING ALL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	err := registry.NewPostgres(p).Migrate(ctx)
+	if err == nil {
+		t.Fatalf("migrating with both %s and fiber_agents present succeeded", old)
+	}
+	for _, name := range []string{old, "fiber_agents"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the migration error %q does not name %s", err, name)
+		}
+	}
+	// Nothing was renamed or dropped: the operator decides.
+	if n := named(t, ctx, p, old); n == 0 {
+		t.Errorf("%s is gone after the refused migration", old)
+	}
+	var fiberAgents *string
+	if err := p.QueryRow(ctx, `SELECT to_regclass('fiber_agents')::text`).Scan(&fiberAgents); err != nil || fiberAgents == nil {
+		t.Errorf("fiber_agents after the refused migration = %v, %v", fiberAgents, err)
+	}
+
+	// Once the old table is gone, the migration goes through again.
+	if _, err := p.Exec(ctx, `DROP TABLE `+old); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.NewPostgres(p).Migrate(ctx); err != nil {
+		t.Errorf("migrating after dropping %s: %v", old, err)
 	}
 }

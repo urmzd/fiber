@@ -132,6 +132,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/internal/pgrename"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/topic"
 
@@ -587,6 +588,8 @@ func New(client *anchor.Client, specs Specs, b Bus, exec Executor, opts ...Optio
 	r.turn = anchor.ActivityIn(r.registry, ActivityTurn, r.runTurn)
 	r.agent = anchor.ActivityIn(r.registry, ActivityAgent, r.runAgent)
 	r.resume = anchor.ActivityIn(r.registry, ActivityResume, r.runResume)
+	// A run accepted before the rename is ended with a reason (legacy.go).
+	anchor.ActivityIn(r.registry, pgrename.LegacyActivityTurn, r.failRunFromBeforeRename)
 	return r, nil
 }
 

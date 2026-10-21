@@ -70,6 +70,14 @@ type Run struct {
 
 // Status reads a run's durable record, scoped to tenant. A run of another
 // tenant is ErrNotFound, exactly like one that does not exist.
+//
+// The record trails the run's terminal event briefly. A run publishes
+// lifecycle.completed, failed or stopped from inside its turn, and the worker
+// records how it ended only once the turn has returned, so a Status read the
+// moment that event arrives can still report accepted. The ledger is the
+// authority: a worker that dies in between leaves the run pending, and the
+// next attempt replays it. A caller that needs the two to agree polls until
+// the status is Terminal.
 func (a *App) Status(ctx context.Context, tenant, runID string) (Run, error) {
 	rec, err := a.ledger.GetRun(ctx, runID)
 	if err != nil {
