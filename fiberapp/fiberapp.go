@@ -1,55 +1,70 @@
-// Package fiberapp runs fiber with extensions: the same command tree, server
-// and composition root as the fiber binary, plus model providers, tool
-// sources, connectors and MCP tool providers a downstream binary registers in
-// Go. It exists so that adding a backend is an import and a few options, not
-// a fork of internal/cli.
+// Package fiberapp is fiber's composition root, as a library: New assembles
+// the registry, bus, router, durable runtime, sandbox, knowledge, threads,
+// files, tool providers, the author agent and the connectors into an App,
+// and Run drives it. There is no fiber binary and no fiber service; a program
+// embeds an App, and talks to it in process.
 //
-//	func main() {
-//		os.Exit(fiberapp.Main(fiberapp.Version{Version: "v1"},
-//			fiberapp.WithModelProvider("house", newHouseProvider),
-//			fiberapp.WithConnector(myConnector),
-//		))
-//	}
+//	app, err := fiberapp.New(ctx, fiberapp.Config{
+//		Tenant:   "acme",
+//		Postgres: os.Getenv("DATABASE_URL"), // every store family on Postgres
+//		Bus:      os.Getenv("DATABASE_URL"), // and the bus too
+//	}, fiberapp.WithModelProvider("house", newHouseProvider))
+//	if err != nil { ... }
+//	defer app.Close()
+//	go app.Run(ctx)
+//	acc, err := app.Invoke(ctx, tag)
 //
-// The common cases need no Go at all: `fiber serve --providers FILE` declares
-// OpenAI-compatible model endpoints and MCP tool providers in JSON (see
-// README.md). Options and the file combine; a name declared by both is an
-// error rather than an override.
+// # Choices are data or interfaces
+//
+// Every backend is chosen by Config: a bus URL (memory, redis://,
+// postgres://) and one Postgres URL for every store family, empty meaning
+// memory. Model endpoints and MCP tool providers can be declared in a JSON
+// providers file (Config.ProvidersFile). Anything that is code is an Option:
+// a model provider, a tool source, a connector, an MCP tool provider, or a
+// replacement for a whole backend (WithBus, WithRegistry, WithExecutor).
+// Options and the file combine; a name declared by both is ErrConfig rather
+// than an override.
 //
 // # Where it sits
 //
-// The package is at the module root rather than under pkg/ because it is the
-// public face of internal/cli, and nothing under pkg/ may import internal/.
-// It adds no behaviour of its own: every option is a field of the
-// composition root's configuration, and Main is the fiber command's Execute.
+// The package is at the module root rather than under pkg/ because it
+// composes everything under pkg/ and nothing under pkg/ may depend on it.
+// An App listens on nothing: connectors that receive webhooks are offered as
+// http.Handlers for the embedding program to mount.
 package fiberapp
 
 import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/internal/cli"
+	"github.com/urmzd/anchor/pkg/worker"
+
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
 
-// Version is the build metadata `fiber version` reports.
-type Version struct {
-	Version string
-	Commit  string
-	Date    string
-}
-
 // Option extends the composition root.
-type Option func(*cli.Extensions)
+type Option func(*extensions)
+
+func apply(opts []Option) extensions {
+	var e extensions
+	for _, o := range opts {
+		if o != nil {
+			o(&e)
+		}
+	}
+	return e
+}
 
 // WithModelProvider makes a model provider selectable by name: a spec whose
 // provider is name runs on what fn builds. The registry accepts specs naming
 // it, and a built-in of the same name is replaced.
 func WithModelProvider(name string, fn agentrt.ProviderFunc) Option {
-	return func(e *cli.Extensions) {
+	return func(e *extensions) {
 		if name == "" || fn == nil {
 			return
 		}
@@ -71,7 +86,7 @@ func WithOpenAICompatible(ep agentrt.OpenAICompatible) Option {
 // the connectors' actions. It is built per turn, so it can bind tools to the
 // run's tenant and surface; action reports a call as an action.taken event.
 func WithToolSource(c runtime.Catalog) Option {
-	return func(e *cli.Extensions) {
+	return func(e *extensions) {
 		if c != nil {
 			e.Catalogs = append(e.Catalogs, c)
 		}
@@ -91,7 +106,7 @@ func WithTools(tools ...saigetypes.Tool) Option {
 // (trigger, sink, actor) are derived from the interfaces it implements, as
 // every connector's are.
 func WithConnector(c connector.Connector) Option {
-	return func(e *cli.Extensions) {
+	return func(e *extensions) {
 		if c != nil {
 			e.Connectors = append(e.Connectors, c)
 		}
@@ -103,28 +118,55 @@ func WithConnector(c connector.Connector) Option {
 // with its Class (write when empty). Only an offered tool whose schema hash
 // matches its pin is accepted, and its description may not change once it
 // has been; anything the server adds or changes stays pending and is logged
-// with its hash. A tool with no SchemaHash stops startup. An empty p.Tenant
-// is the deployment's tenant. Agents reach the provider with an
-// "mcp:<name>" or "mcp:<name>:write" grant.
+// with its hash. A tool with no SchemaHash fails New. An empty p.Tenant is
+// the deployment's tenant. Agents reach the provider with an "mcp:<name>" or
+// "mcp:<name>:write" grant.
 func WithToolProvider(p toolprovider.Provider, accept ...toolprovider.Tool) Option {
-	return func(e *cli.Extensions) {
-		e.ToolProviders = append(e.ToolProviders, cli.ToolProviderSeed{Provider: p, Accept: accept})
+	return func(e *extensions) {
+		e.ToolProviders = append(e.ToolProviders, toolProviderSeed{Provider: p, Accept: accept})
 	}
 }
 
-// Main runs the fiber command tree with the options applied and returns the
-// process exit code, for os.Exit. Arguments come from os.Args, as for the
-// fiber binary.
-func Main(v Version, opts ...Option) int {
-	return cli.ExecuteWith(cli.Version(v), extensions(opts))
-}
-
-func extensions(opts []Option) cli.Extensions {
-	var e cli.Extensions
-	for _, o := range opts {
-		if o != nil {
-			o(&e)
+// WithProvidersFile loads a providers file when the App is built, as
+// Config.ProvidersFile does: OpenAI-compatible model endpoints and MCP tool
+// providers with schema-hash pins, recorded for the deployment's tenant. A
+// name it shares with another option or file is ErrConfig.
+func WithProvidersFile(path string) Option {
+	return func(e *extensions) {
+		if path != "" {
+			e.ProvidersFiles = append(e.ProvidersFiles, path)
 		}
 	}
-	return e
+}
+
+// WithBus replaces the broker Config.Bus would open. The App does not close
+// it.
+func WithBus(b bus.Bus) Option {
+	return func(e *extensions) { e.Bus = b }
+}
+
+// WithRegistry replaces the agent store Config.Postgres would select. The
+// store decides which providers it accepts (registry.WithProviders); see
+// App.Providers for the names this App can run.
+func WithRegistry(s registry.Store) Option {
+	return func(e *extensions) { e.Registry = s }
+}
+
+// WithExecutor replaces the playscape sandbox a turn runs in. Model
+// providers, tool sources, compaction and knowledge are wired into the
+// sandbox, so an executor passed here brings its own.
+func WithExecutor(x runtime.Executor) Option {
+	return func(e *extensions) { e.Executor = x }
+}
+
+// WithRuntimeOptions adds options to the durable runtime, after the App's
+// own, so they can override them.
+func WithRuntimeOptions(opts ...runtime.Option) Option {
+	return func(e *extensions) { e.RuntimeOptions = append(e.RuntimeOptions, opts...) }
+}
+
+// WithWorkerOptions adds options to the durable worker Run starts, after the
+// App's own.
+func WithWorkerOptions(opts ...worker.Option) Option {
+	return func(e *extensions) { e.WorkerOptions = append(e.WorkerOptions, opts...) }
 }

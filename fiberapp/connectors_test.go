@@ -1,4 +1,4 @@
-package cli
+package fiberapp
 
 import (
 	"reflect"
@@ -21,7 +21,12 @@ func TestEveryConnectorThatCanListAThreadIsWiredAsAReconciler(t *testing.T) {
 	t.Setenv(EnvJiraEmail, "ops@acme.example")
 	t.Setenv(EnvJiraToken, "token")
 	t.Setenv(EnvJiraSecret, "secret")
-	reg, err := buildConnectors(coreConfig{Tenant: "acme"}, registry.NewMemory(), blob.NewMemory())
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tenant = "acme"
+	reg, err := buildConnectors(cfg, extensions{}, registry.NewMemory(), blob.NewMemory())
 	if err != nil {
 		t.Fatal(err)
 	}

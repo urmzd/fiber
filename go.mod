@@ -3,16 +3,13 @@ module github.com/urmzd/fiber
 go 1.26.9
 
 require (
-	connectrpc.com/connect v1.20.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/redis/go-redis/v9 v9.21.0
-	github.com/spf13/cobra v1.10.2
 	github.com/urmzd/anchor v0.2.0
 	github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261018021017-188198d7a00b
 	github.com/urmzd/playscape v0.3.0
 	github.com/urmzd/saige v0.38.0
-	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -24,7 +21,6 @@ require (
 	github.com/dslipak/pdf v0.0.2 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -33,7 +29,6 @@ require (
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

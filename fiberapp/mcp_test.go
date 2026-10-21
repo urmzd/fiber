@@ -1,4 +1,4 @@
-package cli
+package fiberapp
 
 import (
 	"context"
@@ -75,15 +75,12 @@ func coreExpandsAnMCPGrant(t *testing.T, postgres, tenant string) {
 	t.Setenv("OPENAI_API_KEY", "k")
 	t.Setenv("ISSUES_TOKEN", secret)
 
-	c, err := newCore(coreConfig{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres})
-	if err != nil {
-		t.Fatalf("newCore: %v", err)
-	}
-	t.Cleanup(func() { _ = c.close() })
-	ctx, cancel := context.WithCancel(context.Background())
+	box := &inbox{}
+	c := newApp(t, Config{Tenant: tenant, Postgres: postgres}, WithConnector(box))
+	ctx := context.Background()
 
 	// An admin registers the provider and accepts its tool.
-	p, err := c.tools.PutProvider(ctx, toolprovider.Provider{Tenant: tenant, Name: "issues",
+	p, err := c.ToolProviders().PutProvider(ctx, toolprovider.Provider{Tenant: tenant, Name: "issues",
 		Transport: toolprovider.TransportHTTP, Endpoint: mcpTS.URL, CredentialRef: "env:ISSUES_TOKEN"})
 	if err != nil {
 		t.Fatal(err)
@@ -98,24 +95,14 @@ func coreExpandsAnMCPGrant(t *testing.T, postgres, tenant string) {
 		t.Fatal(err)
 	}
 	offered[0].Class = toolprovider.ClassRead
-	if _, err := c.tools.Accept(ctx, tenant, "issues", 0, offered, "admin"); err != nil {
+	if _, err := c.ToolProviders().Accept(ctx, tenant, "issues", 0, offered, "admin"); err != nil {
 		t.Fatal(err)
 	}
 
-	box := &inbox{}
-	if err := c.sinks.Register(box); err != nil {
-		t.Fatal(err)
-	}
-	var g group
-	c.startDelivery(ctx, &g)
-	c.startExecution(ctx, &g)
-	t.Cleanup(func() {
-		cancel()
-		_ = g.wait(10 * time.Second)
-	})
+	start(t, c.Run)
 	spec := agentspec.AgentSpec{Name: "triage", Model: "m", Provider: agentspec.ProviderOpenAI,
 		SystemPrompt: "Triage.", Tools: []string{"mcp:issues"}}
-	if _, err := c.store.Create(ctx, tenant, spec, "test"); err != nil {
+	if _, err := c.Registry().Create(ctx, tenant, spec, "test"); err != nil {
 		t.Fatal(err)
 	}
 	target, _ := address.Parse("inbox://" + tenant + "/out")

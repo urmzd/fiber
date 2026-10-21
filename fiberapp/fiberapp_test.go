@@ -15,11 +15,11 @@ type named string
 
 func (n named) Name() string { return string(n) }
 
-// Every option lands in the field of the composition root's configuration it
+// Every option lands in the field of the composition root's extensions it
 // names, and nothing else; a nil or empty one adds nothing.
 func TestOptionsBecomeTheCompositionRootsExtensions(t *testing.T) {
 	fn := func(agentrt.Spec) (saigetypes.Provider, error) { return &agenttest.ScriptedProvider{}, nil }
-	ext := extensions([]Option{
+	ext := apply([]Option{
 		WithModelProvider("house", fn),
 		WithModelProvider("", fn),
 		WithModelProvider("nil", nil),

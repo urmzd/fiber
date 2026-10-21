@@ -1,4 +1,4 @@
-package cli
+package fiberapp
 
 import (
 	"bytes"
@@ -16,20 +16,24 @@ import (
 
 	saigetypes "github.com/urmzd/saige/agent/types"
 
+	"github.com/urmzd/anchor/pkg/worker"
+
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/mcptools"
+	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
 
-// Extensions are what a binary built on fiber adds to the composition root
-// without forking it: model providers, tool sources, connectors and MCP tool
-// providers. The fiber command itself runs with none; fiberapp fills them
-// from Go options, and `serve --providers FILE` from a file.
-type Extensions struct {
+// extensions are what a program built on fiber adds to the composition root
+// without forking it: model providers, tool sources, connectors, MCP tool
+// providers and replacement backends. Options fill them from Go, and a
+// providers file (Config.ProvidersFile, WithProvidersFile) from JSON.
+type extensions struct {
 	// Providers are model providers by the name a spec's provider field
 	// selects. A name already built in is replaced.
 	Providers map[string]agentrt.ProviderFunc
@@ -41,22 +45,34 @@ type Extensions struct {
 	Connectors []connector.Connector
 	// ToolProviders are MCP tool providers recorded in the tool provider
 	// store at startup, with the tools accepted from each.
-	ToolProviders []ToolProviderSeed
+	ToolProviders []toolProviderSeed
+	// ProvidersFiles are providers files to load when the app is built,
+	// for the deployment's tenant.
+	ProvidersFiles []string
+
+	// Backends and pieces that replace what Config would build. Nil builds
+	// it from Config.
+	Bus      bus.Bus
+	Registry registry.Store
+	Executor runtime.Executor
+	// RuntimeOptions and WorkerOptions are appended after the app's own.
+	RuntimeOptions []runtime.Option
+	WorkerOptions  []worker.Option
 }
 
-// ToolProviderSeed is an MCP tool provider a deployment declares rather than
+// toolProviderSeed is an MCP tool provider a deployment declares rather than
 // an admin registering it: the record, and the tools the deployment accepts
 // from it, each pinned by name, schema hash and class. Only an offered tool
 // whose schema hash matches its pin is accepted; anything the server adds or
 // changes stays pending, so a restart never accepts what was not declared.
-type ToolProviderSeed struct {
+type toolProviderSeed struct {
 	Provider toolprovider.Provider
 	Accept   []toolprovider.Tool
 }
 
 // providerNames is the provider table definitions are validated against: the
 // built-in names plus every extension's, sorted.
-func (e Extensions) providerNames() []string {
+func (e extensions) providerNames() []string {
 	names := agentspec.KnownProviders()
 	for name := range e.Providers {
 		if !slices.Contains(names, name) {
@@ -69,27 +85,26 @@ func (e Extensions) providerNames() []string {
 
 // merge adds o to e, refusing a name both declare: a provider or a tool
 // provider defined twice would leave which one runs to the order of startup.
-func (e Extensions) merge(o Extensions) (Extensions, error) {
-	out := Extensions{
-		Providers:     maps.Clone(e.Providers),
-		Catalogs:      slices.Concat(e.Catalogs, o.Catalogs),
-		Connectors:    slices.Concat(e.Connectors, o.Connectors),
-		ToolProviders: slices.Clone(e.ToolProviders),
-	}
+func (e extensions) merge(o extensions) (extensions, error) {
+	out := e
+	out.Providers = maps.Clone(e.Providers)
+	out.Catalogs = slices.Concat(e.Catalogs, o.Catalogs)
+	out.Connectors = slices.Concat(e.Connectors, o.Connectors)
+	out.ToolProviders = slices.Clone(e.ToolProviders)
 	if out.Providers == nil {
 		out.Providers = map[string]agentrt.ProviderFunc{}
 	}
 	for name, fn := range o.Providers {
 		if _, dup := out.Providers[name]; dup {
-			return Extensions{}, usagef("model provider %q is declared twice", name)
+			return extensions{}, configf("model provider %q is declared twice", name)
 		}
 		out.Providers[name] = fn
 	}
 	for _, seed := range o.ToolProviders {
-		if slices.ContainsFunc(out.ToolProviders, func(s ToolProviderSeed) bool {
+		if slices.ContainsFunc(out.ToolProviders, func(s toolProviderSeed) bool {
 			return s.Provider.Tenant == seed.Provider.Tenant && s.Provider.Name == seed.Provider.Name
 		}) {
-			return Extensions{}, usagef("tool provider %q is declared twice", seed.Provider.Name)
+			return extensions{}, configf("tool provider %q is declared twice", seed.Provider.Name)
 		}
 		out.ToolProviders = append(out.ToolProviders, seed)
 	}
@@ -153,8 +168,8 @@ func (c chained) ToolGroup(name string) (agentrt.ToolGroup, error) {
 	return agentrt.ToolGroup{}, errors.Join(errs...)
 }
 
-// providersFile is the shape of `serve --providers FILE`: model endpoints and
-// MCP tool providers a deployment declares so that the common cases need no Go.
+// providersFile is the shape of a providers file: model endpoints and MCP
+// tool providers a deployment declares so that the common cases need no Go.
 // It is JSON, like agent specs and schedules, and unknown fields are refused,
 // so "api_key" where "api_key_env" belongs is an error rather than ignored.
 type providersFile struct {
@@ -217,8 +232,8 @@ type toolProviderConfig struct {
 	CredentialRef string   `json:"credential_ref,omitempty"`
 	CredentialEnv string   `json:"credential_env,omitempty"`
 	// Tools are the tools the deployment accepts, each pinned by the hash
-	// of its schema (toolprovider.Tool.SchemaHash, which the server log
-	// prints for every pending tool). A tool left out stays pending; a class
+	// of its schema (toolprovider.Tool.SchemaHash, which the app logs for
+	// every pending tool). A tool left out stays pending; a class
 	// left out is write.
 	Tools []struct {
 		Name       string `json:"name"`
@@ -227,30 +242,30 @@ type toolProviderConfig struct {
 	} `json:"tools"`
 }
 
-// loadProvidersFile reads a providers file into Extensions for tenant.
-// Everything is validated here, so a typo stops the server at startup.
-func loadProvidersFile(path, tenant string) (Extensions, error) {
+// loadProvidersFile reads a providers file into extensions for tenant.
+// Everything is validated here, so a typo fails New rather than a run.
+func loadProvidersFile(path, tenant string) (extensions, error) {
 	if strings.TrimSpace(path) == "" {
-		return Extensions{}, nil
+		return extensions{}, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return Extensions{}, usagef("providers: %v", err)
+		return extensions{}, configf("providers: %v", err)
 	}
 	var f providersFile
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&f); err != nil {
-		return Extensions{}, usagef("providers %q: %v", path, err)
+		return extensions{}, configf("providers %q: %v", path, err)
 	}
-	ext := Extensions{Providers: map[string]agentrt.ProviderFunc{}}
+	ext := extensions{Providers: map[string]agentrt.ProviderFunc{}}
 	for _, m := range f.Models {
 		ep, err := m.endpoint()
 		if err != nil {
-			return Extensions{}, usagef("providers %q: %v", path, err)
+			return extensions{}, configf("providers %q: %v", path, err)
 		}
 		if _, dup := ext.Providers[ep.Name]; dup {
-			return Extensions{}, usagef("providers %q: model %q is declared twice", path, ep.Name)
+			return extensions{}, configf("providers %q: model %q is declared twice", path, ep.Name)
 		}
 		ext.Providers[ep.Name] = ep.Provider()
 	}
@@ -260,24 +275,24 @@ func loadProvidersFile(path, tenant string) (Extensions, error) {
 			Args: tp.Args, CredentialRef: tp.CredentialRef, CredentialEnv: tp.CredentialEnv,
 		}
 		if err := p.Validate(); err != nil {
-			return Extensions{}, usagef("providers %q: %v", path, err)
+			return extensions{}, configf("providers %q: %v", path, err)
 		}
-		seed := ToolProviderSeed{Provider: p}
+		seed := toolProviderSeed{Provider: p}
 		for _, t := range tp.Tools {
 			seed.Accept = append(seed.Accept, toolprovider.Tool{Name: t.Name, SchemaHash: t.SchemaHash, Class: toolprovider.Class(t.Class)})
 		}
 		if err := checkPins(seed); err != nil {
-			return Extensions{}, usagef("providers %q: %v", path, err)
+			return extensions{}, configf("providers %q: %v", path, err)
 		}
 		ext.ToolProviders = append(ext.ToolProviders, seed)
 	}
-	return Extensions{}.merge(ext)
+	return extensions{}.merge(ext)
 }
 
 // checkPins refuses a declared tool with no name or no schema hash. A tool
 // accepted without a pin would be accepted in whatever form the server offers
 // it, which is the drift declaring it is meant to rule out.
-func checkPins(seed ToolProviderSeed) error {
+func checkPins(seed toolProviderSeed) error {
 	for _, t := range seed.Accept {
 		switch {
 		case t.Name == "":
@@ -297,10 +312,10 @@ func checkPins(seed ToolProviderSeed) error {
 //
 // Declaring a tool is the admin's acceptance of that tool as pinned, and of
 // nothing else: see acceptDeclared.
-func seedToolProviders(ctx context.Context, store toolprovider.Store, tenant string, seeds []ToolProviderSeed, dial mcptools.Dial, log *slog.Logger) error {
+func seedToolProviders(ctx context.Context, store toolprovider.Store, tenant string, seeds []toolProviderSeed, dial mcptools.Dial, log *slog.Logger) error {
 	for _, seed := range seeds {
 		if err := checkPins(seed); err != nil {
-			return usagef("%v", err)
+			return configf("%v", err)
 		}
 	}
 	for _, seed := range seeds {
@@ -309,23 +324,23 @@ func seedToolProviders(ctx context.Context, store toolprovider.Store, tenant str
 			p.Tenant = tenant
 		}
 		if p.Tenant == "" {
-			return usagef("tool provider %q: no tenant to record it under", p.Name)
+			return configf("tool provider %q: no tenant to record it under", p.Name)
 		}
 		rec, err := putProvider(ctx, store, p)
 		if err != nil {
-			return fmt.Errorf("cli: tool provider %q: %w", p.Name, err)
+			return fmt.Errorf("fiberapp: tool provider %q: %w", p.Name, err)
 		}
 		if len(seed.Accept) == 0 {
 			continue
 		}
 		held, err := acceptDeclared(ctx, store, rec, seed.Accept, dial)
 		if err != nil {
-			log.Warn("cli: tool provider not seeded; its tools are unavailable until it is reachable",
+			log.Warn("fiberapp: tool provider not seeded; its tools are unavailable until it is reachable",
 				"provider", p.Name, "tenant", p.Tenant, "error", err)
 			continue
 		}
 		for _, h := range held {
-			log.Warn("cli: tool held back pending review; it does not match what the deployment declares",
+			log.Warn("fiberapp: tool held back pending review; it does not match what the deployment declares",
 				"provider", p.Name, "tenant", p.Tenant, "tool", h.tool.Name, "reason", h.reason,
 				"schema_hash", h.tool.SchemaHash)
 		}

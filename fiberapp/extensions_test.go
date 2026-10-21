@@ -1,9 +1,10 @@
-package cli
+package fiberapp
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,7 +24,6 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
@@ -43,28 +43,18 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 		}}, nil
 	}
 	box := &inbox{}
-	c, err := newCore(coreConfig{Tenant: "acme", Workspace: t.TempDir(), Ext: Extensions{
-		Providers: map[string]agentrt.ProviderFunc{"house": house},
-		Catalogs: []runtime.Catalog{func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
+	c := newApp(t, Config{Tenant: "acme"},
+		WithModelProvider("house", house),
+		WithToolSource(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
 			return agentrt.StaticTools(lookup), nil
-		}},
-		Connectors: []connector.Connector{box},
-	}})
-	if err != nil {
-		t.Fatalf("newCore: %v", err)
-	}
-	t.Cleanup(func() { _ = c.close() })
-	ctx, cancel := context.WithCancel(context.Background())
-	var g group
-	c.startDelivery(ctx, &g)
-	c.startExecution(ctx, &g)
-	t.Cleanup(func() {
-		cancel()
-		_ = g.wait(10 * time.Second)
-	})
+		}),
+		WithConnector(box),
+	)
+	start(t, c.Run)
+	ctx := context.Background()
 
 	spec := agentspec.AgentSpec{Name: "oncall", Model: "house-1", Provider: "house", SystemPrompt: "Help.", Tools: []string{"lookup_runbook"}}
-	if _, err := c.store.Create(ctx, "acme", spec, "test"); err != nil {
+	if _, err := c.Registry().Create(ctx, "acme", spec, "test"); err != nil {
 		t.Fatalf("the registry refused an agent on the registered provider: %v", err)
 	}
 	target, _ := address.Parse("inbox://acme/out")
@@ -162,21 +152,18 @@ func TestAProvidersFileDeclaresModelsAndToolProviders(t *testing.T) {
 
 func providersFileDeclares(t *testing.T, postgres, tenant string) {
 	_, url := fakeMCP(t)
-	ext, err := loadProvidersFile(issuesFile(t, url), tenant)
+	file := issuesFile(t, url)
+	ext, err := loadProvidersFile(file, tenant)
 	if err != nil {
 		t.Fatalf("loadProvidersFile: %v", err)
 	}
-	c, err := newCore(coreConfig{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres, Ext: ext})
-	if err != nil {
-		t.Fatalf("newCore: %v", err)
-	}
-	t.Cleanup(func() { _ = c.close() })
+	c := newApp(t, Config{Tenant: tenant, Postgres: postgres, ProvidersFile: file})
 	ctx := context.Background()
 
-	if _, err := c.store.Create(ctx, tenant, agentspec.AgentSpec{Name: "a", Model: "m", Provider: "fireworks", SystemPrompt: "x"}, "test"); err != nil {
+	if _, err := c.Registry().Create(ctx, tenant, agentspec.AgentSpec{Name: "a", Model: "m", Provider: "fireworks", SystemPrompt: "x"}, "test"); err != nil {
 		t.Errorf("an agent on the declared model endpoint was refused: %v", err)
 	}
-	snap, err := c.tools.Snapshot(ctx, tenant, "issues", 0)
+	snap, err := c.ToolProviders().Snapshot(ctx, tenant, "issues", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +177,7 @@ func providersFileDeclares(t *testing.T, postgres, tenant string) {
 
 	// What the file accepted is what "mcp:issues" grants: the read tool
 	// alone, and with ":write" the write tool as well.
-	grants := mcptools.NewGrants(c.tools, mcptools.Dialer())
+	grants := mcptools.NewGrants(c.ToolProviders(), mcptools.Dialer())
 	t.Cleanup(func() { _ = grants.Close() })
 	for grant, want := range map[string]string{"mcp:issues": "issues__search", "mcp:issues:write": "issues__close_issue,issues__search"} {
 		tools, ok, err := grants.Expand(ctx, tenant, grant)
@@ -208,17 +195,17 @@ func providersFileDeclares(t *testing.T, postgres, tenant string) {
 
 	// A second start with the same declaration changes nothing.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := seedToolProviders(ctx, c.tools, tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
+	if err := seedToolProviders(ctx, c.ToolProviders(), tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := c.tools.GetProvider(ctx, tenant, "issues")
-	again, _ := c.tools.Snapshot(ctx, tenant, "issues", 0)
+	p, _ := c.ToolProviders().GetProvider(ctx, tenant, "issues")
+	again, _ := c.ToolProviders().Snapshot(ctx, tenant, "issues", 0)
 	if p.Version != 1 || again.Version != 1 {
 		t.Errorf("a repeated start minted provider version %d, snapshot %d; want both still 1", p.Version, again.Version)
 	}
 }
 
-// A file that cannot be what its author meant stops the server at startup.
+// A file that cannot be what its author meant fails at startup.
 func TestAProvidersFileThatCannotBeRightIsAUsageError(t *testing.T) {
 	for name, body := range map[string]string{
 		"a key where its variable's name belongs": `{"models": [{"name": "fw", "api_key": "sk-123"}]}`,
@@ -231,12 +218,12 @@ func TestAProvidersFileThatCannotBeRightIsAUsageError(t *testing.T) {
 		"not JSON":                                `models: []`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := loadProvidersFile(writeFile(t, body), "acme"); exitCodeFor(err) != ExitUsage {
+			if _, err := loadProvidersFile(writeFile(t, body), "acme"); !errors.Is(err, ErrConfig) {
 				t.Fatalf("loadProvidersFile = %v, want a usage error", err)
 			}
 		})
 	}
-	if _, err := loadProvidersFile(filepath.Join(t.TempDir(), "missing.json"), "acme"); exitCodeFor(err) != ExitUsage {
+	if _, err := loadProvidersFile(filepath.Join(t.TempDir(), "missing.json"), "acme"); !errors.Is(err, ErrConfig) {
 		t.Errorf("a missing file: %v, want a usage error", err)
 	}
 }
@@ -245,15 +232,15 @@ func TestAProvidersFileThatCannotBeRightIsAUsageError(t *testing.T) {
 // than one silently winning.
 func TestExtensionsFromGoAndTheFileMustNotCollide(t *testing.T) {
 	fn := func(agentrt.Spec) (saigetypes.Provider, error) { return nil, nil }
-	goExt := Extensions{Providers: map[string]agentrt.ProviderFunc{"fw": fn}}
-	if _, err := goExt.merge(Extensions{Providers: map[string]agentrt.ProviderFunc{"other": fn}}); err != nil {
+	goExt := extensions{Providers: map[string]agentrt.ProviderFunc{"fw": fn}}
+	if _, err := goExt.merge(extensions{Providers: map[string]agentrt.ProviderFunc{"other": fn}}); err != nil {
 		t.Fatalf("distinct names: %v", err)
 	}
-	if _, err := goExt.merge(Extensions{Providers: map[string]agentrt.ProviderFunc{"fw": fn}}); exitCodeFor(err) != ExitUsage {
+	if _, err := goExt.merge(extensions{Providers: map[string]agentrt.ProviderFunc{"fw": fn}}); !errors.Is(err, ErrConfig) {
 		t.Fatalf("a name declared twice: %v, want a usage error", err)
 	}
-	seed := ToolProviderSeed{Provider: toolprovider.Provider{Tenant: "acme", Name: "issues"}}
-	if _, err := (Extensions{ToolProviders: []ToolProviderSeed{seed}}).merge(Extensions{ToolProviders: []ToolProviderSeed{seed}}); exitCodeFor(err) != ExitUsage {
+	seed := toolProviderSeed{Provider: toolprovider.Provider{Tenant: "acme", Name: "issues"}}
+	if _, err := (extensions{ToolProviders: []toolProviderSeed{seed}}).merge(extensions{ToolProviders: []toolProviderSeed{seed}}); !errors.Is(err, ErrConfig) {
 		t.Fatalf("a tool provider declared twice: %v, want a usage error", err)
 	}
 }
@@ -276,15 +263,16 @@ func TestARestartNeverAcceptsWhatTheProvidersFileDoesNotDeclare(t *testing.T) {
 func restartHoldsBackDrift(t *testing.T, postgres, tenant string) {
 	ctx := context.Background()
 	srv, url := fakeMCP(t)
-	ext, err := loadProvidersFile(issuesFile(t, url), tenant)
+	file := issuesFile(t, url)
+	ext, err := loadProvidersFile(file, tenant)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := newCore(coreConfig{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres, Ext: ext})
+	first, err := New(ctx, Config{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres, ProvidersFile: file})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = first.close() })
+	t.Cleanup(func() { _ = first.Close() })
 
 	// The server drifts: a new write tool, and search takes a new argument.
 	srv.AddTool(&mcp.Tool{Name: "drop_db", Description: "drop_db", InputSchema: map[string]any{"type": "object"}}, okTool)
@@ -295,15 +283,11 @@ func restartHoldsBackDrift(t *testing.T, postgres, tenant string) {
 	// The restart.
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
-	store := first.tools
+	store := first.ToolProviders()
 	if postgres != "" {
-		_ = first.close()
-		again, err := newCore(coreConfig{Tenant: tenant, Workspace: t.TempDir(), Postgres: postgres, Ext: ext, Log: log})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = again.close() })
-		store = again.tools
+		_ = first.Close()
+		again := newApp(t, Config{Tenant: tenant, Postgres: postgres, ProvidersFile: file, Log: log})
+		store = again.ToolProviders()
 	} else if err := seedToolProviders(ctx, store, tenant, ext.ToolProviders, mcptools.Dialer(), log); err != nil {
 		t.Fatal(err)
 	}
