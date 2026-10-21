@@ -2,10 +2,12 @@
 
 Agent library and low-latency pub/sub bus. Tag an agent from anywhere, stream
 its events to anyone, deliver them anywhere. Go module
-`github.com/urmzd/fiber`. It is a library you compose in Go: no binary, no
+`github.com/urmzd/fiber`. It is a library first, composed in Go: no
 service, no configuration files, no environment variables. The root package
 `fiber` is the composition root (`fiber.New(ctx, ...Option)`); warp is the
-platform built on it, owns all configuration, and imports only `pkg/`.
+platform built on it, owns all configuration, and imports only `pkg/`. The
+module's one command, `cmd/fiber` (`fiber run`), is a program on the library
+for validating a spec locally, not a way to serve one.
 
 **Status: v0 alpha, pre-1.0, not recommended for production.** Interfaces are
 still moving and may change between minor versions. The in-memory composition
@@ -43,10 +45,11 @@ sandboxing and access control.
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
 | `pkg/bus` | `Bus` interface; `Memory`, Redis Streams and Postgres backends; `bustest` conformance suite. The Postgres bus stores every event body in `fiber_bus_events` until it is trimmed or `WithIndexTTL` expires. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
-| `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model by name (`WithStrictTools` refuses instead), with the error's `ModelNote` when it has one. `payload/` holds typed event bodies. |
-| `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. Every turn's context carries the actor on the run's record (`envelope.ActorFrom`). |
+| `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model by name (`WithStrictTools` refuses instead), with the error's `ModelNote` when it has one. `ResolveTools` resolves a revision's grants exactly as `New` does and builds nothing else (no model client). `payload/` holds typed event bodies. |
+| `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. Every turn's context carries the actor on the run's record (`envelope.ActorFrom`). `Sandbox.ToolsFor` assembles a turn's tools as `Execute` does and runs nothing. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
-| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers and each person's credentials for them (`WithPersonCredentials`) (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
+| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers and each person's credentials for them (`WithPersonCredentials`) (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. `App.ToolsFor` reports what a run of a tag would be granted without running it. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
+| `cmd/fiber` | `fiber run [flags] SPEC MESSAGE`: registers one JSON spec on a `fiber.New` with memory backends and a temporary workspace, raises one tag, prints the run's events (text, or `-json` one per line) and exits 0 completed, 1 not, 2 bad input. `-offline`, `-provider`, `-model`, `-tools` (prints `App.ToolsFor`, runs nothing), `-timeout`. Nothing imports it. |
 
 Discover layout with `tree` or ripgrep; do not trust stale listings.
 
@@ -62,6 +65,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 | fmt | `gofmt -w .` |
 | quality gate | `make check` |
 | end-to-end demo | `go run ./examples/local`, `go run ./examples/downstream` |
+| validate a spec | `go run ./cmd/fiber run -offline SPEC MESSAGE`, `-tools` to list its grants |
 | backends | `make up` (Postgres with pgvector, Redis), `make down` |
 | suites on real backends | `make integration` (sets `FIBER_POSTGRES_TEST_URL` and `FIBER_REDIS_ADDR`) |
 
@@ -147,7 +151,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 - **Tenant is never read from a request body.** fiber has no transport; a
   program that accepts tags from callers (warp) sets the tenant from the
   caller's credential and overwrites whatever the client sent.
-  `App.Invoke` trusts the tag it is handed.
+  `App.Invoke` and `App.ToolsFor` trust the tag they are handed.
 - **Neither is the actor.** A tag's actor is the credential's subject unless
   the credential is marked `ActAs`, which is what a surface that authenticated
   the person itself holds. Authorship and approvals are decided on it. The
@@ -167,6 +171,13 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   task in process; it is never read from a `Request`, the task input, trigger
   metadata or anything a model produced, and a turn for nobody acts for
   nobody.
+- **The command is a program on the library.** `cmd/fiber` composes
+  `fiber.New` through exported API only, reads no file but the spec it is
+  given and no environment variable of its own (the model providers read
+  their vendors' keys, as in any program), listens on nothing and keeps
+  nothing. What it needs from fiber is library API that any program could
+  call, as `App.ToolsFor` is; it never reaches past that, and nothing in the
+  module imports it.
 - This is a v0 alpha: keep the surface small and document limitations honestly
   rather than papering over them.
 

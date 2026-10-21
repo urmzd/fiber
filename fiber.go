@@ -1,10 +1,12 @@
 // Package fiber is an agent library you compose in Go. New assembles the
 // agent registry, the bus, the router, the durable runtime, the sandbox,
 // knowledge, thread journals, files, MCP tool providers, the author agent and
-// the connectors into an App, and Run drives it in process. There is no
-// binary, no service, no configuration file and no environment variable:
+// the connectors into an App, and Run drives it in process. It is a library:
+// there is no service, no configuration file and no environment variable,
 // every choice is a value passed to an Option, and anything not passed is the
-// in-memory implementation, which is complete rather than a stub.
+// in-memory implementation, which is complete rather than a stub. The one
+// command in the module, cmd/fiber, is a program built on it like any other,
+// for running a spec locally (fiber run).
 //
 //	pool, _ := pgxpool.New(ctx, dsn) // the program's own pool
 //	pg := bus.NewPostgres(pool)
