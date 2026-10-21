@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.20.1 (2026-10-21)
+
+### Bug Fixes
+
+- **mcptools**: inline local $defs references before converting a tool schema (#38) ([66b9f81](https://github.com/urmzd/fiber/commit/66b9f81753fddc19060065186ecd91a6797b2385))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.20.0...v0.20.1)
+
+
 ## 0.20.0 (2026-10-20)
 
 ### Features
