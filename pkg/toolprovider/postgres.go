@@ -8,22 +8,24 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/urmzd/fiber/pkg/internal/pgrename"
 )
 
 // schema is everything the Postgres store owns: one row per provider, one row
 // per accepted snapshot.
 //
-// mandatum_tool_providers holds the current record and exists to be locked:
+// fiber_tool_providers holds the current record and exists to be locked:
 // an Accept takes the provider's row FOR UPDATE, so two accepts for one
 // provider serialize on it and the snapshot number each checks is the one it
 // writes after.
 //
-// mandatum_tool_snapshots only ever receives INSERTs. Its tools column is
+// fiber_tool_snapshots only ever receives INSERTs. Its tools column is
 // text, not jsonb, on purpose: jsonb reorders keys and rewrites whitespace,
 // and an accepted schema is shown to the model byte for byte, so a snapshot
 // must read back exactly as it was written.
 const schema = `
-CREATE TABLE IF NOT EXISTS mandatum_tool_providers (
+CREATE TABLE IF NOT EXISTS fiber_tool_providers (
 	tenant         text        NOT NULL,
 	name           text        NOT NULL,
 	transport      text        NOT NULL CHECK (transport IN ('stdio', 'http')),
@@ -37,7 +39,7 @@ CREATE TABLE IF NOT EXISTS mandatum_tool_providers (
 	PRIMARY KEY (tenant, name)
 );
 
-CREATE TABLE IF NOT EXISTS mandatum_tool_snapshots (
+CREATE TABLE IF NOT EXISTS fiber_tool_snapshots (
 	tenant      text        NOT NULL,
 	provider    text        NOT NULL,
 	version     bigint      NOT NULL CHECK (version >= 1),
@@ -45,7 +47,7 @@ CREATE TABLE IF NOT EXISTS mandatum_tool_snapshots (
 	accepted_by text        NOT NULL,
 	accepted_at timestamptz NOT NULL,
 	PRIMARY KEY (tenant, provider, version),
-	FOREIGN KEY (tenant, provider) REFERENCES mandatum_tool_providers (tenant, name)
+	FOREIGN KEY (tenant, provider) REFERENCES fiber_tool_providers (tenant, name)
 );
 `
 
@@ -72,6 +74,10 @@ var _ Store = (*Postgres)(nil)
 func (p *Postgres) Migrate(ctx context.Context) error {
 	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(migrateLock)); err != nil {
+			return err
+		}
+		// A database created before the rename is moved forward first.
+		if _, err := tx.Exec(ctx, pgrename.SQL("tool_providers", "tool_snapshots")); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, schema)
@@ -108,7 +114,7 @@ func (p *Postgres) PutProvider(ctx context.Context, rec Provider) (Provider, err
 	var tag interface{ RowsAffected() int64 }
 	if rec.Version == 0 {
 		tag, err = p.pool.Exec(ctx,
-			`INSERT INTO mandatum_tool_providers (`+providerColumns+`)
+			`INSERT INTO fiber_tool_providers (`+providerColumns+`)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9)
 			 ON CONFLICT (tenant, name) DO NOTHING`,
 			rec.Tenant, rec.Name, string(rec.Transport), rec.Endpoint, argsJSON,
@@ -122,7 +128,7 @@ func (p *Postgres) PutProvider(ctx context.Context, rec Provider) (Provider, err
 		return out, nil
 	}
 	tag, err = p.pool.Exec(ctx,
-		`UPDATE mandatum_tool_providers
+		`UPDATE fiber_tool_providers
 		    SET transport = $3, endpoint = $4, args = $5, credential_ref = $6, credential_env = $7,
 		        version = version + 1, updated_by = $8, updated_at = $9
 		  WHERE tenant = $1 AND name = $2 AND version = $10`,
@@ -147,7 +153,7 @@ func (p *Postgres) GetProvider(ctx context.Context, tenant, name string) (Provid
 		return Provider{}, err
 	}
 	rows, err := p.pool.Query(ctx,
-		`SELECT `+providerColumns+` FROM mandatum_tool_providers WHERE tenant = $1 AND name = $2`, tenant, name)
+		`SELECT `+providerColumns+` FROM fiber_tool_providers WHERE tenant = $1 AND name = $2`, tenant, name)
 	if err != nil {
 		return Provider{}, wrap("get provider", err)
 	}
@@ -170,7 +176,7 @@ func (p *Postgres) ListProviders(ctx context.Context, tenant string) ([]Provider
 		return nil, fmt.Errorf("%w: no tenant", ErrInvalid)
 	}
 	rows, err := p.pool.Query(ctx,
-		`SELECT `+providerColumns+` FROM mandatum_tool_providers WHERE tenant = $1 ORDER BY name COLLATE "C"`, tenant)
+		`SELECT `+providerColumns+` FROM fiber_tool_providers WHERE tenant = $1 ORDER BY name COLLATE "C"`, tenant)
 	if err != nil {
 		return nil, wrap("list providers", err)
 	}
@@ -227,7 +233,7 @@ func (p *Postgres) Accept(ctx context.Context, tenant, provider string, base uin
 	err = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		var one int
 		err := tx.QueryRow(ctx,
-			`SELECT 1 FROM mandatum_tool_providers WHERE tenant = $1 AND name = $2 FOR UPDATE`,
+			`SELECT 1 FROM fiber_tool_providers WHERE tenant = $1 AND name = $2 FOR UPDATE`,
 			tenant, provider).Scan(&one)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w: provider %q", ErrNotFound, provider)
@@ -237,7 +243,7 @@ func (p *Postgres) Accept(ctx context.Context, tenant, provider string, base uin
 		}
 		var cur int64
 		if err := tx.QueryRow(ctx,
-			`SELECT COALESCE(max(version), 0) FROM mandatum_tool_snapshots WHERE tenant = $1 AND provider = $2`,
+			`SELECT COALESCE(max(version), 0) FROM fiber_tool_snapshots WHERE tenant = $1 AND provider = $2`,
 			tenant, provider).Scan(&cur); err != nil {
 			return err
 		}
@@ -245,7 +251,7 @@ func (p *Postgres) Accept(ctx context.Context, tenant, provider string, base uin
 			return fmt.Errorf("%w: provider %q is at snapshot %d, not %d", ErrConflict, provider, cur, base)
 		}
 		_, err = tx.Exec(ctx,
-			`INSERT INTO mandatum_tool_snapshots (tenant, provider, version, tools, accepted_by, accepted_at)
+			`INSERT INTO fiber_tool_snapshots (tenant, provider, version, tools, accepted_by, accepted_at)
 			 VALUES ($1, $2, $3, $4, $5, $6)`,
 			tenant, provider, int64(s.Version), string(body), by, s.AcceptedAt)
 		return err
@@ -263,18 +269,18 @@ func (p *Postgres) Snapshot(ctx context.Context, tenant, provider string, versio
 	}
 	var exists bool
 	if err := p.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM mandatum_tool_providers WHERE tenant = $1 AND name = $2)`,
+		`SELECT EXISTS (SELECT 1 FROM fiber_tool_providers WHERE tenant = $1 AND name = $2)`,
 		tenant, provider).Scan(&exists); err != nil {
 		return Snapshot{}, wrap("snapshot", err)
 	}
 	if !exists {
 		return Snapshot{}, fmt.Errorf("%w: provider %q", ErrNotFound, provider)
 	}
-	q := `SELECT version, tools, accepted_by, accepted_at FROM mandatum_tool_snapshots
+	q := `SELECT version, tools, accepted_by, accepted_at FROM fiber_tool_snapshots
 	       WHERE tenant = $1 AND provider = $2 AND version = $3`
 	args := []any{tenant, provider, int64(version)}
 	if version == 0 {
-		q = `SELECT version, tools, accepted_by, accepted_at FROM mandatum_tool_snapshots
+		q = `SELECT version, tools, accepted_by, accepted_at FROM fiber_tool_snapshots
 		      WHERE tenant = $1 AND provider = $2 ORDER BY version DESC LIMIT 1`
 		args = args[:2]
 	}

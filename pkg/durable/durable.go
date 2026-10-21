@@ -51,6 +51,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/urmzd/fiber/pkg/internal/pgrename"
 )
 
 // The tables this package owns. They are exported so the mapping handed to
@@ -58,13 +60,13 @@ import (
 // one edit instead of two that can disagree.
 const (
 	// RunsTable holds one row per accepted run.
-	RunsTable = "mandatum_runs"
+	RunsTable = "fiber_runs"
 
 	// RecordsTable holds one row per memoized activity or step result.
-	RecordsTable = "mandatum_run_records"
+	RecordsTable = "fiber_run_records"
 
 	// QueueTable holds one row per run that has ever been enqueued.
-	QueueTable = "mandatum_run_queue"
+	QueueTable = "fiber_run_queue"
 )
 
 // ErrNoPool is returned by Migrate when it is handed a nil pool. It is a
@@ -74,7 +76,7 @@ var ErrNoPool = errors.New("durable: no connection pool")
 
 // schema is everything this package owns.
 //
-// mandatum_runs is the ledger's run table. run_id is the primary key because
+// fiber_runs is the ledger's run table. run_id is the primary key because
 // accepting a run is an insert that must be idempotent on it: the run id is
 // the submit idempotency key, and ON CONFLICT needs a plain unique index to
 // arbitrate on. It is COLLATE "C" because the janitor pages through pending
@@ -92,13 +94,13 @@ var ErrNoPool = errors.New("durable: no connection pool")
 // in the majority, because the adapter passes the status as a parameter and a
 // cached generic plan cannot prove a parameter matches an index predicate.
 //
-// mandatum_run_records is write-once: (run_id, record_key) is the primary key
+// fiber_run_records is write-once: (run_id, record_key) is the primary key
 // and the first insert wins, which is how two attempts of one run converge on
 // one history. The foreign key states what the adapter already enforces, that
 // a record belongs to an accepted run, and its cascade makes deleting a run a
 // single statement for whoever implements retention.
 //
-// mandatum_run_queue is flow. ready_at and lease_until are both nullable and
+// fiber_run_queue is flow. ready_at and lease_until are both nullable and
 // their combination is the row's state: ready_at set means queued, lease_until
 // set means claimed, both null means settled. A settled row is kept, never
 // deleted, because attempt is the fencing token and must stay monotonic across
@@ -113,24 +115,24 @@ var ErrNoPool = errors.New("durable: no connection pool")
 // columns null, indexing only the non-null values keeps a claim proportional to
 // the work outstanding and not to every run the deployment has ever finished.
 const schema = `
-CREATE TABLE IF NOT EXISTS mandatum_runs (
+CREATE TABLE IF NOT EXISTS fiber_runs (
 	run_id     text        COLLATE "C" PRIMARY KEY,
 	status     text        NOT NULL CHECK (status IN ('pending', 'succeeded', 'failed')),
 	envelope   jsonb       NOT NULL,
 	created_at timestamptz NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS mandatum_runs_status_created_idx
-	ON mandatum_runs (status, created_at, run_id);
+CREATE INDEX IF NOT EXISTS fiber_runs_status_created_idx
+	ON fiber_runs (status, created_at, run_id);
 
-CREATE TABLE IF NOT EXISTS mandatum_run_records (
-	run_id     text  COLLATE "C" NOT NULL REFERENCES mandatum_runs (run_id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS fiber_run_records (
+	run_id     text  COLLATE "C" NOT NULL REFERENCES fiber_runs (run_id) ON DELETE CASCADE,
 	record_key text  NOT NULL,
 	envelope   jsonb NOT NULL,
 	PRIMARY KEY (run_id, record_key)
 );
 
-CREATE TABLE IF NOT EXISTS mandatum_run_queue (
+CREATE TABLE IF NOT EXISTS fiber_run_queue (
 	run_id      text        COLLATE "C" PRIMARY KEY,
 	ready_at    timestamptz,
 	lease_until timestamptz,
@@ -138,11 +140,11 @@ CREATE TABLE IF NOT EXISTS mandatum_run_queue (
 	failures    integer     NOT NULL DEFAULT 0 CHECK (failures >= 0)
 );
 
-CREATE INDEX IF NOT EXISTS mandatum_run_queue_ready_idx
-	ON mandatum_run_queue (ready_at) WHERE ready_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS fiber_run_queue_ready_idx
+	ON fiber_run_queue (ready_at) WHERE ready_at IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS mandatum_run_queue_lease_idx
-	ON mandatum_run_queue (lease_until) WHERE lease_until IS NOT NULL;
+CREATE INDEX IF NOT EXISTS fiber_run_queue_lease_idx
+	ON fiber_run_queue (lease_until) WHERE lease_until IS NOT NULL;
 `
 
 // migrateLock is the advisory lock Migrate holds. CREATE TABLE IF NOT EXISTS is
@@ -163,6 +165,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(migrateLock)); err != nil {
+			return err
+		}
+		// A database created before the rename is moved forward first.
+		if _, err := tx.Exec(ctx, pgrename.SQL("runs", "run_records", "run_queue")); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, schema)

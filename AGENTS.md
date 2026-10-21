@@ -33,6 +33,7 @@ sandboxing and access control.
 | `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
 | `pkg/registry` | Agent store and revision history. `Memory` and `Postgres`, `registrytest` conformance suite, and `Specs`, the resolver `pkg/runtime` reads pinned revisions through. |
 | `pkg/durable` | The Postgres schema for anchor's ledger and queue adapters, and `Open`, which builds both on it. |
+| `pkg/internal/pgrename` | The one migration step every Postgres store runs first: renames objects a database created before fiber's rename still carries, and the registry re-addresses revisions hashed under the old domain. The only code that knows the old names. |
 | `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`; `threadtest.Run` is its conformance suite. |
 | `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem; `blobtest`. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
@@ -124,7 +125,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   estimated. Usage is opt-in for routes and chat sinks do not render it.
 - **A parked run decides from its records.** A question is a anchor step the
   body records once; its resolution is the write-once event record
-  `event:mandatum.answer.<id>#0`, written by `Runtime.Answer`, by a stop, or by
+  `event:fiber.answer.<id>#0`, written by `Runtime.Answer`, by a stop, or by
   an expiry, and whichever was first is the answer. The body never reads the
   clock or a request to decide; it reads that record. An attempt runs at most
   one turn: the attempt that asked parks, and the answer wakes the next.

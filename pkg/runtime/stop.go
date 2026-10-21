@@ -50,7 +50,7 @@ import (
 // attempts) has to wait for one, and it waits in two places:
 //
 //   - The run's ledger, when the runtime has one (WithStopLedger). Stop writes
-//     the request as an event record on the run, "event:mandatum.stop#0",
+//     the request as an event record on the run, "event:fiber.stop#0",
 //     after checking that the run exists, belongs to the asker's tenant and
 //     has not ended. Every attempt reads the ledger before its turn starts,
 //     and a recorded request ends the turn before the executor is called. The
@@ -168,7 +168,7 @@ const stopVerb = "stop"
 // shape of a anchor event record, which is the kind of record the ledger
 // expects to be written from outside a run.
 const (
-	stopRecordName = "mandatum.stop"
+	stopRecordName = "fiber.stop"
 	stopRecordKey  = "event:" + stopRecordName + "#0"
 )
 

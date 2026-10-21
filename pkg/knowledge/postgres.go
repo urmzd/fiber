@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/urmzd/fiber/pkg/internal/pgrename"
 )
 
 // schema is everything the Postgres store owns: one row per document, one row
@@ -46,7 +48,7 @@ import (
 const schema = `
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
-CREATE TABLE IF NOT EXISTS mandatum_knowledge_documents (
+CREATE TABLE IF NOT EXISTS fiber_knowledge_documents (
 	tenant   text    NOT NULL,
 	source   text    COLLATE "C" NOT NULL,
 	uri      text    COLLATE "C" NOT NULL,
@@ -58,7 +60,7 @@ CREATE TABLE IF NOT EXISTS mandatum_knowledge_documents (
 	PRIMARY KEY (tenant, source, uri)
 );
 
-CREATE TABLE IF NOT EXISTS mandatum_knowledge_chunks (
+CREATE TABLE IF NOT EXISTS fiber_knowledge_chunks (
 	tenant     text       NOT NULL,
 	source     text       COLLATE "C" NOT NULL,
 	uri        text       COLLATE "C" NOT NULL,
@@ -73,11 +75,11 @@ CREATE TABLE IF NOT EXISTS mandatum_knowledge_chunks (
 	terms      tsvector   NOT NULL,
 	PRIMARY KEY (tenant, source, uri, idx),
 	FOREIGN KEY (tenant, source, uri)
-		REFERENCES mandatum_knowledge_documents (tenant, source, uri) ON DELETE CASCADE
+		REFERENCES fiber_knowledge_documents (tenant, source, uri) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS mandatum_knowledge_chunks_terms
-	ON mandatum_knowledge_chunks USING gin (terms);
+CREATE INDEX IF NOT EXISTS fiber_knowledge_chunks_terms
+	ON fiber_knowledge_chunks USING gin (terms);
 `
 
 // migrateLock is the advisory lock Migrate holds, for the reason
@@ -127,7 +129,7 @@ var _ Store = (*Postgres)(nil)
 // It fails with ErrDimensions when the chunk table already exists with a
 // different embedding width, which is what happens when the embedding model is
 // swapped for one of another size. The store cannot convert the old vectors;
-// the operator drops mandatum_knowledge_chunks and mandatum_knowledge_documents
+// the operator drops fiber_knowledge_chunks and fiber_knowledge_documents
 // and indexes again.
 func (p *Postgres) Migrate(ctx context.Context) error {
 	dims := p.embedder.Dimensions()
@@ -138,6 +140,10 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(migrateLock)); err != nil {
 			return err
 		}
+		// A database created before the rename is moved forward first.
+		if _, err := tx.Exec(ctx, pgrename.SQL("knowledge_documents", "knowledge_chunks")); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, fmt.Sprintf(schema, dims)); err != nil {
 			return err
 		}
@@ -145,7 +151,7 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 		var have int
 		if err := tx.QueryRow(ctx,
 			`SELECT atttypmod FROM pg_attribute
-			  WHERE attrelid = 'mandatum_knowledge_chunks'::regclass AND attname = 'embedding'`,
+			  WHERE attrelid = 'fiber_knowledge_chunks'::regclass AND attname = 'embedding'`,
 		).Scan(&have); err != nil {
 			return err
 		}
@@ -192,7 +198,7 @@ func (p *Postgres) Upsert(ctx context.Context, tenant string, doc Document) (Rec
 
 	var current string
 	err = p.pool.QueryRow(ctx,
-		`SELECT hash FROM mandatum_knowledge_documents WHERE tenant = $1 AND source = $2 AND uri = $3`,
+		`SELECT hash FROM fiber_knowledge_documents WHERE tenant = $1 AND source = $2 AND uri = $3`,
 		tenant, d.doc.Source, d.doc.URI,
 	).Scan(&current)
 	switch {
@@ -247,7 +253,7 @@ func (p *Postgres) Upsert(ctx context.Context, tenant string, doc Document) (Rec
 		// hash is, and it never commits: this transaction either replaces
 		// it or rolls back.
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO mandatum_knowledge_documents (tenant, source, uri, title, hash, model, metadata, chunks)
+			`INSERT INTO fiber_knowledge_documents (tenant, source, uri, title, hash, model, metadata, chunks)
 			 VALUES ($1, $2, $3, '', '', '', '{}', 0)
 			 ON CONFLICT (tenant, source, uri) DO NOTHING`,
 			tenant, d.doc.Source, d.doc.URI); err != nil {
@@ -255,7 +261,7 @@ func (p *Postgres) Upsert(ctx context.Context, tenant string, doc Document) (Rec
 		}
 		var locked string
 		if err := tx.QueryRow(ctx,
-			`SELECT hash FROM mandatum_knowledge_documents
+			`SELECT hash FROM fiber_knowledge_documents
 			  WHERE tenant = $1 AND source = $2 AND uri = $3 FOR UPDATE`,
 			tenant, d.doc.Source, d.doc.URI,
 		).Scan(&locked); err != nil {
@@ -265,12 +271,12 @@ func (p *Postgres) Upsert(ctx context.Context, tenant string, doc Document) (Rec
 			return nil
 		}
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM mandatum_knowledge_chunks WHERE tenant = $1 AND source = $2 AND uri = $3`,
+			`DELETE FROM fiber_knowledge_chunks WHERE tenant = $1 AND source = $2 AND uri = $3`,
 			tenant, d.doc.Source, d.doc.URI); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO mandatum_knowledge_chunks
+			`INSERT INTO fiber_knowledge_chunks
 			   (tenant, source, uri, idx, start_byte, end_byte, start_line, end_line, heading, body, embedding, terms)
 			 SELECT $1, $2, $3, u.idx, u.start_byte, u.end_byte, u.start_line, u.end_line, u.heading, u.body,
 			        u.embedding::vector, to_tsvector($4::regconfig, u.terms)
@@ -282,7 +288,7 @@ func (p *Postgres) Upsert(ctx context.Context, tenant string, doc Document) (Rec
 			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE mandatum_knowledge_documents
+			`UPDATE fiber_knowledge_documents
 			    SET title = $4, hash = $5, model = $6, metadata = $7, chunks = $8
 			  WHERE tenant = $1 AND source = $2 AND uri = $3`,
 			tenant, d.doc.Source, d.doc.URI, d.doc.Title, d.hash, p.embedder.Model(), metadata, n); err != nil {
@@ -307,7 +313,7 @@ func (p *Postgres) Delete(ctx context.Context, tenant, source, uri string) error
 		return err
 	}
 	tag, err := p.pool.Exec(ctx,
-		`DELETE FROM mandatum_knowledge_documents WHERE tenant = $1 AND source = $2 AND uri = $3`,
+		`DELETE FROM fiber_knowledge_documents WHERE tenant = $1 AND source = $2 AND uri = $3`,
 		tenant, source, uri)
 	if err != nil {
 		return wrap("delete", err)
@@ -348,8 +354,8 @@ func (p *Postgres) Search(ctx context.Context, tenant string, q Query) ([]Hit, e
 const searchSQL = `
 WITH dense AS (
 	SELECT c.source, c.uri, c.idx, 1 - (c.embedding <=> $3::vector) AS score
-	  FROM mandatum_knowledge_chunks c
-	  JOIN mandatum_knowledge_documents d
+	  FROM fiber_knowledge_chunks c
+	  JOIN fiber_knowledge_documents d
 	    ON d.tenant = c.tenant AND d.source = c.source AND d.uri = c.uri
 	 WHERE c.tenant = $1
 	   AND ($2::text[] IS NULL OR c.source = ANY ($2::text[]))
@@ -359,7 +365,7 @@ WITH dense AS (
 	 LIMIT $6
 ), lexical AS (
 	SELECT c.source, c.uri, c.idx, ts_rank_cd(c.terms, q.query, 1)::float8 AS score
-	  FROM mandatum_knowledge_chunks c,
+	  FROM fiber_knowledge_chunks c,
 	       (SELECT to_tsquery($7::regconfig, $8::text) AS query WHERE $8::text <> '') q
 	 WHERE c.tenant = $1
 	   AND ($2::text[] IS NULL OR c.source = ANY ($2::text[]))
@@ -374,9 +380,9 @@ WITH dense AS (
 SELECT p.arm, p.score, c.source, c.uri, c.idx, c.start_byte, c.end_byte, c.start_line, c.end_line,
        c.heading, c.body, d.title, d.metadata
   FROM picked p
-  JOIN mandatum_knowledge_chunks c
+  JOIN fiber_knowledge_chunks c
     ON c.tenant = $1 AND c.source = p.source AND c.uri = p.uri AND c.idx = p.idx
-  JOIN mandatum_knowledge_documents d
+  JOIN fiber_knowledge_documents d
     ON d.tenant = $1 AND d.source = p.source AND d.uri = p.uri
  ORDER BY p.arm, p.pos
 `

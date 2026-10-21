@@ -217,7 +217,7 @@ its own tenant.
 ### Where the request lives
 
 **The ledger is the truth.** `Stop` writes the request on the run as a
-write-once event record (`event:mandatum.stop#0`) in the anchor ledger the
+write-once event record (`event:fiber.stop#0`) in the anchor ledger the
 run already lives in: per run, scoped by the run's tenant, read in one round
 trip when an attempt starts, and on Postgres the same tables as every other
 record (`pkg/durable`), so there is no new schema. It records only for a run
@@ -440,7 +440,7 @@ and a delivery can repeat any event. The rule:
 - **Every model call any attempt made is counted, once.** Before the agent
   activity returns, failed or succeeded, it writes the calls it relayed to the
   run's ledger as a write-once event record,
-  `event:mandatum.usage.a<attempt>#0`. A failure is retried, and so is a
+  `event:fiber.usage.a<attempt>#0`. A failure is retried, and so is a
   success whose result anchor never managed to record; either way the
   attempt that finally records an outcome reads the earlier attempts' records
   inside the agent activity, adds its own calls, and the total is memoized
@@ -533,11 +533,11 @@ far is published and kept.
 
 ```
 agent activity (memoized)        returns the parked turn
-  -> step mandatum.question.<id>   announces lifecycle.parked once; the record is the question
-  -> event mandatum.answer.<id>    the resolution: absent, the body returns ErrParked and the run waits
+  -> step fiber.question.<id>   announces lifecycle.parked once; the record is the question
+  -> event fiber.answer.<id>    the resolution: absent, the body returns ErrParked and the run waits
 Runtime.Answer                   checks the answer, writes the resolution (first write wins), wakes the run
   -> next attempt replays         the turn and the question from records, reads the resolution
-  -> mandatum.turn.resume          continues the turn with the answer (memoized)
+  -> fiber.turn.resume          continues the turn with the answer (memoized)
 ```
 
 The resolution is a write-once anchor event record, and it is the only

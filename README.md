@@ -211,6 +211,18 @@ See [the example index](examples/README.md) for more.
 
 API reference: [pkg.go.dev/github.com/urmzd/fiber](https://pkg.go.dev/github.com/urmzd/fiber)
 
+## Where this sits
+
+fiber is layer four of five: **warp > fiber > saige > playscape > anchor**.
+It builds on [saige](https://github.com/urmzd/saige)'s agent loop,
+[playscape](https://github.com/urmzd/playscape)'s sandbox and
+[anchor](https://github.com/urmzd/anchor)'s durability, and adds addressing,
+distribution, connectors and the control plane.
+[warp](https://github.com/urmzd/warp) is the only thing that configures or
+runs it: fiber is composed in Go and reads no configuration of its own. See
+[the ecosystem guide](https://github.com/urmzd/warp/blob/main/docs/ecosystem.md)
+for who owns what and the limitations that span the stack.
+
 ## Architecture
 
 fiber builds on three libraries and adds addressing, distribution and the
@@ -224,8 +236,7 @@ control plane:
 | Topics, bus, routing, connectors, specs | fiber |
 
 See the [architecture guide](docs/architecture/overview.md) for delivery,
-authorization, and replay guarantees. [warp](https://github.com/urmzd/warp)
-adds product workflows and a web surface on top of the platform.
+authorization, and replay guarantees.
 
 ## Composition
 
@@ -292,6 +303,11 @@ the providers file and every `FIBER_*` variable are gone. Compose
 `WithSlack`, `WithGitHub`, `WithJira` and `WithWebhooks`. `GetRun` is
 `App.Status`, the stop and compact routes are `App.Stop` and `App.Compact`,
 `InvokeService.Answer` is `App.Answer`, and `fiber index` is `App.Index`.
+
+**Persisted names moved to `fiber`.** Postgres objects, Redis keys, anchor
+activity and record names and the agent-spec hash domain no longer use the
+old name. Drain runs before upgrading; Postgres migrates itself and keeps its
+rows. See [docs/renaming.md](docs/renaming.md).
 
 ## Limitations
 

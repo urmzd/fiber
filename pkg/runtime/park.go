@@ -35,15 +35,15 @@ import (
 //
 //  1. announces the question once, as a anchor step that publishes
 //     lifecycle.parked with the question, so the step's record is the question
-//     as the run asked it ("mandatum.question.<id>#0"), and a replay neither
+//     as the run asked it ("fiber.question.<id>#0"), and a replay neither
 //     asks again nor announces again;
 //  2. reads the question's resolution, a anchor event record
-//     ("event:mandatum.answer.<id>#0"). With none, the body returns
+//     ("event:fiber.answer.<id>#0"). With none, the body returns
 //     run.ErrParked: the worker settles the run, it holds no goroutine and no
 //     lease, it costs no retry budget, and it survives any restart, because
 //     the question and the turn are in the ledger;
 //  3. with one, continues the turn with the answer as the
-//     mandatum.turn.resume activity, whose input is the parked outcome and
+//     fiber.turn.resume activity, whose input is the parked outcome and
 //     the answer, both read from records.
 //
 // The resolution is write-once and the first write is the only one that
@@ -81,9 +81,9 @@ import (
 // Record names. A question is a anchor step the body records; its
 // resolution is an event record anything outside the run may write.
 const (
-	questionStepPrefix = "mandatum.question."
-	answerRecordPrefix = "mandatum.answer."
-	childStepPrefix    = "mandatum.child."
+	questionStepPrefix = "fiber.question."
+	answerRecordPrefix = "fiber.answer."
+	childStepPrefix    = "fiber.child."
 )
 
 func questionStepKey(id string) string  { return questionStepPrefix + id + "#0" }

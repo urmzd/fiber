@@ -98,7 +98,7 @@ func usageRecords(t *testing.T, w *world, runID string) []string {
 	}
 	var keys []string
 	for _, rec := range records {
-		if strings.HasPrefix(rec.Key, "event:mandatum.usage") {
+		if strings.HasPrefix(rec.Key, "event:fiber.usage") {
 			keys = append(keys, rec.Key)
 		}
 	}
@@ -266,7 +266,7 @@ func TestARetriedAttemptsSpendIsCountedOnceAndAReplayAddsNothing(t *testing.T) {
 	}
 	// Each attempt that executed the agent recorded its calls; the replay
 	// executed nothing and recorded nothing.
-	if keys := usageRecords(t, w, runID); fmt.Sprint(keys) != "[event:mandatum.usage.a1#0 event:mandatum.usage.a2#0]" {
+	if keys := usageRecords(t, w, runID); fmt.Sprint(keys) != "[event:fiber.usage.a1#0 event:fiber.usage.a2#0]" {
 		t.Errorf("usage records = %v, want the two attempts that called the model", keys)
 	}
 }

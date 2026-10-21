@@ -126,11 +126,11 @@ func TestMigrateLeavesExistingRunsInPlace(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO mandatum_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'pending', '{}', now())`); err != nil {
+		`INSERT INTO fiber_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'pending', '{}', now())`); err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO mandatum_run_queue (run_id, ready_at, attempt, failures) VALUES ('run-1', NULL, 3, 1)`); err != nil {
+		`INSERT INTO fiber_run_queue (run_id, ready_at, attempt, failures) VALUES ('run-1', NULL, 3, 1)`); err != nil {
 		t.Fatalf("insert queue row: %v", err)
 	}
 	if err := durable.Migrate(ctx, pool); err != nil {
@@ -138,13 +138,13 @@ func TestMigrateLeavesExistingRunsInPlace(t *testing.T) {
 	}
 
 	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM mandatum_runs WHERE run_id = 'run-1'`).Scan(&status); err != nil || status != "pending" {
+	if err := pool.QueryRow(ctx, `SELECT status FROM fiber_runs WHERE run_id = 'run-1'`).Scan(&status); err != nil || status != "pending" {
 		t.Errorf("run after a second Migrate = %q, %v; want pending", status, err)
 	}
 	// The counters are the one part of the queue the ledger cannot rebuild.
 	var attempt, failures int
 	if err := pool.QueryRow(ctx,
-		`SELECT attempt, failures FROM mandatum_run_queue WHERE run_id = 'run-1'`).Scan(&attempt, &failures); err != nil {
+		`SELECT attempt, failures FROM fiber_run_queue WHERE run_id = 'run-1'`).Scan(&attempt, &failures); err != nil {
 		t.Fatalf("read queue row: %v", err)
 	}
 	if attempt != 3 || failures != 1 {
@@ -168,32 +168,32 @@ func TestSchemaRefusesRowsThatBreakTheLedgerContract(t *testing.T) {
 	}{
 		{
 			name: "a second run under an accepted id",
-			sql:  `INSERT INTO mandatum_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'pending', '{}', now())`,
+			sql:  `INSERT INTO fiber_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'pending', '{}', now())`,
 			code: unique,
 		},
 		{
 			name: "a status anchor cannot finish",
-			sql:  `INSERT INTO mandatum_runs (run_id, status, envelope, created_at) VALUES ('run-2', 'running', '{}', now())`,
+			sql:  `INSERT INTO fiber_runs (run_id, status, envelope, created_at) VALUES ('run-2', 'running', '{}', now())`,
 			code: check,
 		},
 		{
 			name: "a second result under a recorded key",
-			sql:  `INSERT INTO mandatum_run_records (run_id, record_key, envelope) VALUES ('run-1', 'step-1', '{}')`,
+			sql:  `INSERT INTO fiber_run_records (run_id, record_key, envelope) VALUES ('run-1', 'step-1', '{}')`,
 			code: unique,
 		},
 		{
 			name: "a record for a run nobody accepted",
-			sql:  `INSERT INTO mandatum_run_records (run_id, record_key, envelope) VALUES ('ghost', 'step-1', '{}')`,
+			sql:  `INSERT INTO fiber_run_records (run_id, record_key, envelope) VALUES ('ghost', 'step-1', '{}')`,
 			code: foreign,
 		},
 		{
 			name: "a second queue row for one run",
-			sql:  `INSERT INTO mandatum_run_queue (run_id, ready_at) VALUES ('run-1', now())`,
+			sql:  `INSERT INTO fiber_run_queue (run_id, ready_at) VALUES ('run-1', now())`,
 			code: unique,
 		},
 		{
 			name: "a fencing token below zero",
-			sql:  `INSERT INTO mandatum_run_queue (run_id, attempt) VALUES ('run-3', -1)`,
+			sql:  `INSERT INTO fiber_run_queue (run_id, attempt) VALUES ('run-3', -1)`,
 			code: check,
 		},
 	}
@@ -201,9 +201,9 @@ func TestSchemaRefusesRowsThatBreakTheLedgerContract(t *testing.T) {
 	pool := migrated(t)
 	ctx := context.Background()
 	for _, seed := range []string{
-		`INSERT INTO mandatum_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'pending', '{}', now())`,
-		`INSERT INTO mandatum_run_records (run_id, record_key, envelope) VALUES ('run-1', 'step-1', '{}')`,
-		`INSERT INTO mandatum_run_queue (run_id, ready_at) VALUES ('run-1', now())`,
+		`INSERT INTO fiber_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'pending', '{}', now())`,
+		`INSERT INTO fiber_run_records (run_id, record_key, envelope) VALUES ('run-1', 'step-1', '{}')`,
+		`INSERT INTO fiber_run_queue (run_id, ready_at) VALUES ('run-1', now())`,
 	} {
 		if _, err := pool.Exec(ctx, seed); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -232,11 +232,11 @@ func TestRunIDsSortBytewise(t *testing.T) {
 	// other way round.
 	for _, id := range []string{"a", "B", "_", "0"} {
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO mandatum_runs (run_id, status, envelope, created_at) VALUES ($1, 'pending', '{}', 'epoch')`, id); err != nil {
+			`INSERT INTO fiber_runs (run_id, status, envelope, created_at) VALUES ($1, 'pending', '{}', 'epoch')`, id); err != nil {
 			t.Fatalf("insert %q: %v", id, err)
 		}
 	}
-	rows, err := pool.Query(ctx, `SELECT run_id FROM mandatum_runs ORDER BY created_at, run_id`)
+	rows, err := pool.Query(ctx, `SELECT run_id FROM fiber_runs ORDER BY created_at, run_id`)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -257,16 +257,16 @@ func TestDeletingARunTakesItsRecords(t *testing.T) {
 	ctx := context.Background()
 
 	for _, stmt := range []string{
-		`INSERT INTO mandatum_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'succeeded', '{}', now())`,
-		`INSERT INTO mandatum_run_records (run_id, record_key, envelope) VALUES ('run-1', 'step-1', '{}'), ('run-1', 'step-2', '{}')`,
-		`DELETE FROM mandatum_runs WHERE run_id = 'run-1'`,
+		`INSERT INTO fiber_runs (run_id, status, envelope, created_at) VALUES ('run-1', 'succeeded', '{}', now())`,
+		`INSERT INTO fiber_run_records (run_id, record_key, envelope) VALUES ('run-1', 'step-1', '{}'), ('run-1', 'step-2', '{}')`,
+		`DELETE FROM fiber_runs WHERE run_id = 'run-1'`,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
 	var left int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mandatum_run_records`).Scan(&left); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM fiber_run_records`).Scan(&left); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if left != 0 {

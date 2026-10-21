@@ -640,7 +640,7 @@ func TestReplayingAParkedThenResumedRunIsDeterministic(t *testing.T) {
 	}
 	questions := 0
 	for _, rec := range records {
-		if strings.HasPrefix(rec.Name, "mandatum.question.") {
+		if strings.HasPrefix(rec.Name, "fiber.question.") {
 			questions++
 		}
 	}

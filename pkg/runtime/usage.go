@@ -54,10 +54,10 @@ import (
 // events still report every call.
 
 // usageRecordName is the ledger record an attempt that failed after spending
-// tokens writes its calls to: "mandatum.usage.a<attempt>", as an event record
-// "event:mandatum.usage.a<attempt>#0", the shape the ledger expects from
+// tokens writes its calls to: "fiber.usage.a<attempt>", as an event record
+// "event:fiber.usage.a<attempt>#0", the shape the ledger expects from
 // outside a call. The workflow body claims the ones the outcome counted.
-const usageRecordName = "mandatum.usage.a"
+const usageRecordName = "fiber.usage.a"
 
 func usageRecordKey(attempt int) string {
 	return "event:" + usageRecordName + strconv.Itoa(attempt) + "#0"

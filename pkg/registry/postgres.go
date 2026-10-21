@@ -11,14 +11,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/internal/pgrename"
 )
 
 // schema is everything the Postgres store owns: one row per agent name, one row
 // per revision.
 //
-// The split is the tombstone rule written as tables. mandatum_agents holds the
+// The split is the tombstone rule written as tables. fiber_agents holds the
 // two facts that are allowed to change, which revision is current and whether
-// the name is retired; mandatum_agent_revisions holds what is not, and this
+// the name is retired; fiber_agent_revisions holds what is not, and this
 // package never issues an UPDATE or a DELETE against it. head is kept on the
 // agent row rather than derived with max(rev) so that the row is the single
 // thing a writer locks: two revises of one agent serialize on it, and two
@@ -29,7 +30,7 @@ import (
 // Memory uses, and a page token issued by one backend would mean a different
 // position in the other.
 const schema = `
-CREATE TABLE IF NOT EXISTS mandatum_agents (
+CREATE TABLE IF NOT EXISTS fiber_agents (
 	tenant  text    NOT NULL,
 	name    text    COLLATE "C" NOT NULL,
 	head    integer NOT NULL,
@@ -37,7 +38,7 @@ CREATE TABLE IF NOT EXISTS mandatum_agents (
 	PRIMARY KEY (tenant, name)
 );
 
-CREATE TABLE IF NOT EXISTS mandatum_agent_revisions (
+CREATE TABLE IF NOT EXISTS fiber_agent_revisions (
 	tenant     text        NOT NULL,
 	name       text        COLLATE "C" NOT NULL,
 	rev        integer     NOT NULL CHECK (rev >= 1),
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS mandatum_agent_revisions (
 	created_at timestamptz NOT NULL,
 	created_by text        NOT NULL,
 	PRIMARY KEY (tenant, name, rev),
-	FOREIGN KEY (tenant, name) REFERENCES mandatum_agents (tenant, name)
+	FOREIGN KEY (tenant, name) REFERENCES fiber_agents (tenant, name)
 );
 `
 
@@ -86,11 +87,68 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(migrateLock)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, schema)
-		return err
+		// A database created before the rename is moved forward first.
+		var legacy bool
+		if err := tx.QueryRow(ctx, `SELECT to_regclass(quote_ident(current_schema()) || '.' || quote_ident($1)) IS NOT NULL`, pgrename.LegacyPrefix+"agent_revisions").Scan(&legacy); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, pgrename.SQL("agents", "agent_revisions")); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, schema); err != nil {
+			return err
+		}
+		if legacy {
+			return readdress(ctx, tx)
+		}
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("registry: migrate: %w", err)
+	}
+	return nil
+}
+
+// readdress rewrites the hash of every revision stored under the agent-spec
+// hash domain fiber used before its rename, so that the hash check on read
+// keeps passing. A revision whose stored hash matches neither domain is left
+// as it is, and still fails that check: it changed.
+func readdress(ctx context.Context, tx pgx.Tx) error {
+	rows, err := tx.Query(ctx, `SELECT tenant, name, rev, hash, spec FROM fiber_agent_revisions`)
+	if err != nil {
+		return err
+	}
+	type move struct {
+		tenant, name, hash string
+		rev                int
+	}
+	var moves []move
+	for rows.Next() {
+		var m move
+		var stored string
+		var body []byte
+		if err := rows.Scan(&m.tenant, &m.name, &m.rev, &stored, &body); err != nil {
+			rows.Close()
+			return err
+		}
+		var spec agentspec.AgentSpec
+		if err := json.Unmarshal(body, &spec); err != nil {
+			continue
+		}
+		if stored == spec.HashIn(pgrename.LegacyAgentSpecDomain) {
+			m.hash = spec.Hash()
+			moves = append(moves, m)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, m := range moves {
+		if _, err := tx.Exec(ctx, `UPDATE fiber_agent_revisions SET hash = $4 WHERE tenant = $1 AND name = $2 AND rev = $3`,
+			m.tenant, m.name, m.rev, m.hash); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -110,7 +168,7 @@ func (p *Postgres) Create(ctx context.Context, tenant string, spec agentspec.Age
 	var out agentspec.Revision
 	err = pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO mandatum_agents (tenant, name, head, deleted) VALUES ($1, $2, 0, true)
+			`INSERT INTO fiber_agents (tenant, name, head, deleted) VALUES ($1, $2, 0, true)
 			 ON CONFLICT (tenant, name) DO NOTHING`,
 			tenant, canonical.Name); err != nil {
 			return err
@@ -189,8 +247,8 @@ func (p *Postgres) Get(ctx context.Context, tenant, name string, rev int) (agent
 	)
 	err := p.pool.QueryRow(ctx,
 		`SELECT a.head, a.deleted, r.rev, r.hash, r.spec, r.created_at, r.created_by
-		   FROM mandatum_agents a
-		   LEFT JOIN mandatum_agent_revisions r
+		   FROM fiber_agents a
+		   LEFT JOIN fiber_agent_revisions r
 		     ON r.tenant = a.tenant AND r.name = a.name
 		    AND r.rev = CASE WHEN $3::integer = 0 THEN a.head ELSE $3::integer END
 		  WHERE a.tenant = $1 AND a.name = $2`,
@@ -228,8 +286,8 @@ func (p *Postgres) List(ctx context.Context, tenant string, page Page) ([]agents
 	// name, so the first page needs no special case.
 	rows, err := p.pool.Query(ctx,
 		`SELECT a.name, r.rev, r.hash, r.spec, r.created_at, r.created_by
-		   FROM mandatum_agents a
-		   JOIN mandatum_agent_revisions r
+		   FROM fiber_agents a
+		   JOIN fiber_agent_revisions r
 		     ON r.tenant = a.tenant AND r.name = a.name AND r.rev = a.head
 		  WHERE a.tenant = $1 AND NOT a.deleted AND a.name > $2
 		  ORDER BY a.name
@@ -267,7 +325,7 @@ func (p *Postgres) History(ctx context.Context, tenant, name string) ([]agentspe
 	}
 	rows, err := p.pool.Query(ctx,
 		`SELECT name, rev, hash, spec, created_at, created_by
-		   FROM mandatum_agent_revisions
+		   FROM fiber_agent_revisions
 		  WHERE tenant = $1 AND name = $2
 		  ORDER BY rev`,
 		tenant, key)
@@ -316,7 +374,7 @@ func (p *Postgres) Delete(ctx context.Context, tenant, name string, expectedRev 
 			return fmt.Errorf("%w: agent %q is at revision %d, not %d; re-read it before retiring it", ErrConflict, key, head, expectedRev)
 		}
 		_, err = tx.Exec(ctx,
-			`UPDATE mandatum_agents SET deleted = true WHERE tenant = $1 AND name = $2`,
+			`UPDATE fiber_agents SET deleted = true WHERE tenant = $1 AND name = $2`,
 			tenant, key)
 		return err
 	})
@@ -330,7 +388,7 @@ func (p *Postgres) Delete(ctx context.Context, tenant, name string, expectedRev 
 // the Postgres spelling of Memory's write lock, scoped to one agent.
 func lockAgent(ctx context.Context, tx pgx.Tx, tenant, name string) (head int, deleted bool, err error) {
 	err = tx.QueryRow(ctx,
-		`SELECT head, deleted FROM mandatum_agents WHERE tenant = $1 AND name = $2 FOR UPDATE`,
+		`SELECT head, deleted FROM fiber_agents WHERE tenant = $1 AND name = $2 FOR UPDATE`,
 		tenant, name,
 	).Scan(&head, &deleted)
 	return head, deleted, err
@@ -345,7 +403,7 @@ func (p *Postgres) appendLocked(ctx context.Context, tx pgx.Tx, tenant string, c
 		var row revisionRow
 		err := tx.QueryRow(ctx,
 			`SELECT rev, hash, spec, created_at, created_by
-			   FROM mandatum_agent_revisions
+			   FROM fiber_agent_revisions
 			  WHERE tenant = $1 AND name = $2 AND rev = $3`,
 			tenant, canonical.Name, head,
 		).Scan(&row.rev, &row.hash, &row.spec, &row.at, &row.by)
@@ -354,7 +412,7 @@ func (p *Postgres) appendLocked(ctx context.Context, tx pgx.Tx, tenant string, c
 		}
 		if *row.hash == canonical.Hash() {
 			if _, err := tx.Exec(ctx,
-				`UPDATE mandatum_agents SET deleted = false WHERE tenant = $1 AND name = $2`,
+				`UPDATE fiber_agents SET deleted = false WHERE tenant = $1 AND name = $2`,
 				tenant, canonical.Name); err != nil {
 				return agentspec.Revision{}, err
 			}
@@ -374,13 +432,13 @@ func (p *Postgres) appendLocked(ctx context.Context, tx pgx.Tx, tenant string, c
 		return agentspec.Revision{}, fmt.Errorf("encode agent %q: %w", canonical.Name, err)
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO mandatum_agent_revisions (tenant, name, rev, hash, spec, created_at, created_by)
+		`INSERT INTO fiber_agent_revisions (tenant, name, rev, hash, spec, created_at, created_by)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		tenant, canonical.Name, rev.Rev, rev.Hash, body, rev.CreatedAt, rev.CreatedBy); err != nil {
 		return agentspec.Revision{}, err
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE mandatum_agents SET head = $3, deleted = false WHERE tenant = $1 AND name = $2`,
+		`UPDATE fiber_agents SET head = $3, deleted = false WHERE tenant = $1 AND name = $2`,
 		tenant, canonical.Name, rev.Rev); err != nil {
 		return agentspec.Revision{}, err
 	}

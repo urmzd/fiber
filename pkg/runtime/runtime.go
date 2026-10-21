@@ -143,17 +143,17 @@ import (
 // name, never a redefinition of an existing one.
 const (
 	// ActivityTurn is the run's entry point: one durable turn.
-	ActivityTurn = "mandatum.turn"
+	ActivityTurn = "fiber.turn"
 	// ActivityAgent is the nested activity that executes the agent. It is
 	// separate from the turn so that its result is memoized on its own: a
 	// replay of the turn re-publishes lifecycle events but must never pay for
 	// the model a second time.
-	ActivityAgent = "mandatum.turn.agent"
+	ActivityAgent = "fiber.turn.agent"
 	// ActivityResume continues a turn that parked on a question, with the
 	// answer. It is its own activity because its input is not Input: it
 	// carries the parked turn and the answer, both read from records, so a
 	// replay hashes the same input and reads the same result.
-	ActivityResume = "mandatum.turn.resume"
+	ActivityResume = "fiber.turn.resume"
 )
 
 // ErrInvalid reports a tag or configuration this package cannot run.

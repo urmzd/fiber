@@ -20,8 +20,7 @@ const HashAlgorithm = "sha256"
 // separator can be made to collide across schemes; a definition and, say, a
 // run's input must never be able to produce the same digest, whatever a caller
 // puts in a free-text field.
-// Keep the original domain so published revisions retain their content addresses.
-const hashDomain = "mandatum/agentspec/v1"
+const hashDomain = "fiber/agentspec/v1"
 
 // Hash is the content address of the definition: the digest of its canonical
 // form, and of nothing else.
@@ -63,10 +62,15 @@ const hashDomain = "mandatum/agentspec/v1"
 // makes the encoding unambiguous. Collections are written the same way, count
 // first, so that appending a tool cannot be confused with lengthening the
 // previous one.
-func (s AgentSpec) Hash() string {
+func (s AgentSpec) Hash() string { return s.HashIn(hashDomain) }
+
+// HashIn is Hash under another domain separator. It exists for migrations
+// that re-address revisions stored under an earlier domain; everything else
+// calls Hash.
+func (s AgentSpec) HashIn(domain string) string {
 	c := s.Normalize()
 	h := sha256.New()
-	writeString(h, hashDomain)
+	writeString(h, domain)
 	writeString(h, c.Name)
 	writeString(h, c.Description)
 	writeString(h, c.Model)

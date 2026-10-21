@@ -151,8 +151,7 @@ const (
 	// DefaultMaxRuns bounds how many runs Memory retains at once.
 	DefaultMaxRuns = 4096
 	// DefaultKeyPrefix namespaces every Redis key the bus owns.
-	// Keep the original namespace so a rename does not hide retained events.
-	DefaultKeyPrefix = "mandatum"
+	DefaultKeyPrefix = "fiber"
 	// DefaultPollInterval bounds how long a Redis subscriber blocks in one
 	// XREAD, and so how quickly it notices a new run or a closed stream.
 	DefaultPollInterval = 250 * time.Millisecond
@@ -230,7 +229,7 @@ func WithMaxRuns(n int) Option {
 	}
 }
 
-// WithKeyPrefix namespaces the Redis keys the bus owns (default "mandatum", retained for storage compatibility).
+// WithKeyPrefix namespaces the Redis keys the bus owns (default "fiber").
 // Memory ignores it.
 func WithKeyPrefix(p string) Option {
 	return func(o *options) {

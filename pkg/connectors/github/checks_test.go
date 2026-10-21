@@ -129,7 +129,7 @@ func TestCompletedChecksUseApplicationConclusionOrDefaultToNeutral(t *testing.T)
 		name, text, outcome, want string
 	}{
 		{"ordinary text", "Tests passed", "", "neutral"},
-		{"structured text", `{"format":"mandatum.github.review.v1","findings":[{"severity":"error"}]}`, "", "neutral"},
+		{"structured text", `{"format":"fiber.github.review.v1","findings":[{"severity":"error"}]}`, "", "neutral"},
 		{"application success", "Application verified the result", "success", "success"},
 		{"application failure", "Application found a failure", "failure", "failure"},
 	} {

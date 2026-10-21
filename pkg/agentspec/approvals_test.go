@@ -12,7 +12,7 @@ import (
 // revision reads as changed; one that requires some hashes differently.
 func TestApprovalsLeaveTheHashOfASpecWithoutThemUnchanged(t *testing.T) {
 	t.Parallel()
-	const before = "sha256:3dbf7901c3a3336ee0afd3806eca2f03c1348dbaa8c0dc49dcc9614d5d91da95" // valid().Hash() in v0.10.0
+	const before = "sha256:31deb5030b98b85b432d94ec650d6e134c0b1ccc6234d94f8869e2ed69d62435" // valid().Hash() under the fiber/agentspec/v1 domain, unchanged by later fields
 	if got := valid().Hash(); got != before {
 		t.Fatalf("a spec without approvals hashes to %s, want %s as before approvals existed", got, before)
 	}
