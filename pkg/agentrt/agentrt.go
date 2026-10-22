@@ -1123,18 +1123,21 @@ func conversation(history []Message, prompt string) ([]saigetypes.Message, error
 }
 
 // renderMeta formats a tag's metadata as a context block, in sorted key order.
+// A private key (envelope.PrivateMeta) is the host's and is left out.
 //
 // Determinism matters more than prettiness here: the rendered prompt is part of
 // the input a durable turn re-executes with, and Go's map iteration order is
 // random, so an unsorted rendering would make two attempts of the same tag ask
 // the model two different questions.
 func renderMeta(meta map[string]string) string {
-	if len(meta) == 0 {
-		return ""
-	}
 	keys := make([]string, 0, len(meta))
 	for k := range meta {
-		keys = append(keys, k)
+		if !envelope.PrivateMeta(k) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
 	}
 	sort.Strings(keys)
 	var b strings.Builder
