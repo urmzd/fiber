@@ -230,6 +230,11 @@ func TestEachPersonReachesAPersonScopedProviderWithTheirOwnCredentialAndSession(
 	if got := names(anaTools); !slices.Equal(got, []string{"fake__echo_auth", "fake__search"}) {
 		t.Fatalf("ana's group = %v", got)
 	}
+	for _, tool := range anaTools {
+		if p, ok := tool.(interface{ ActsForPerson() bool }); !ok || !p.ActsForPerson() {
+			t.Errorf("%s does not say it acts as the person, so an approver could edit it", tool.Definition().Name)
+		}
+	}
 	bobTools, _, err := w.grants.Expand(as(bob), tenant, "mcp:fake")
 	if err != nil {
 		t.Fatalf("Expand as bob: %v", err)

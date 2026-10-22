@@ -1220,6 +1220,13 @@ func (t *hostCallTool) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalR
 	return agentrt.ApprovalRequest{}, false
 }
 
+// ActsForPerson forwards whether the tool the host wraps runs with the
+// credential of the person the turn acts for, so an approval of it says so.
+func (t *hostCallTool) ActsForPerson() bool {
+	p, ok := t.Tool.(agentrt.PersonScoped)
+	return ok && p.ActsForPerson()
+}
+
 func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
 	if awaiting, ok := t.Tool.(agentrt.Awaiting); ok {
 		return awaiting.AwaitQuestion(call)

@@ -598,6 +598,15 @@ raised as itself, whoever it names, because it could otherwise name anyone
 A refusal is `runtime.ErrNotAllowed`, `PERMISSION_DENIED` on the wire, and
 records nothing. A question's `asked_of` is a routing hint and admits nobody.
 
+A call that runs with the credential of the person the run acts for, a tool
+of a person-scoped provider (`agentrt.PersonScoped`), says so on its question
+(`tool.acts_for_person`). Anyone who may approve it may approve or deny it as
+asked, but only that person may approve it with edited arguments: the
+actor's `user` when the tag names one, and otherwise the requester. Anyone
+else's edit would act as them, with their credential, on something they did
+not ask for, so it is refused with `runtime.ErrNotAllowed` and records
+nothing. A host shows such a question to anyone else without its edit.
+
 ### The conversation across the park
 
 The resumed turn has the whole context because it is the same conversation.

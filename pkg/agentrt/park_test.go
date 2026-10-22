@@ -87,6 +87,49 @@ func textThen(text string, rest []saigetypes.Delta) []saigetypes.Delta {
 	return out
 }
 
+// personTool runs with the credential of the person the turn acts for, as a
+// person-scoped provider's tools do.
+type personTool struct{ *agenttest.MockTool }
+
+func (personTool) ActsForPerson() bool { return true }
+
+// An approval of a call that runs as the person the turn acts for says so,
+// through the marker a spec's approvals add, so the runtime lets only that
+// person edit it. An approval of any other tool does not.
+func TestAnApprovalSaysWhetherTheCallActsAsThePerson(t *testing.T) {
+	t.Parallel()
+	for _, person := range []bool{true, false} {
+		deploy := &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "deploy", Parameters: saigetypes.ParameterSchema{
+			Type: "object", Properties: map[string]saigetypes.PropertyDef{"env": {Type: "string"}},
+		}}, Result: "deployed"}
+		var tool saigetypes.Tool = deploy
+		if person {
+			tool = personTool{deploy}
+		}
+		model := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
+			toolCalls(saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}),
+		}}
+		rev := offlineRevision(1, "You deploy things.")
+		rev.Spec.Tools, rev.Spec.Approvals = []string{"deploy"}, []string{"deploy"}
+		r, err := agentrt.New(rev, agentrt.WithTools(agentrt.StaticTools(tool)),
+			agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		res, err := r.Run(context.Background(), agentrt.Turn{Text: "ship it", Park: true, Accounting: "r/a1"},
+			func(context.Context, agentrt.Chunk) error { return nil })
+		if err != nil || res.Parked == nil || res.Parked.Question.Tool == nil {
+			t.Fatalf("person %v: the turn did not park on an approval: %+v, %v", person, res, err)
+		}
+		if got := res.Parked.Question.Tool.ActsForPerson; got != person {
+			t.Errorf("person %v: the question says acts_for_person %v", person, got)
+		}
+		if deploy.CallCount() != 0 {
+			t.Errorf("person %v: deploy ran while the turn parked", person)
+		}
+	}
+}
+
 // An approval parks the turn before anything in the model's batch runs, the
 // tool that needed no approval included, and the question carries the call.
 func TestAnApprovalParksTheTurnBeforeItsBatchRuns(t *testing.T) {

@@ -40,7 +40,7 @@ sandboxing and access control.
 | `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem; `blobtest`. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
 | `pkg/toolprovider` | MCP tool providers as versioned records: how to reach a server, whose credential it is reached with (`CredentialScope`: `shared`, the default, with its credential reference, or `person`, which names none), and the admin-accepted, numbered tool snapshots. Changed tools stay pending; read/write class defaults to write. A tool is shown to models as `<provider>__<tool>` (`QualifiedName`). `Memory` and `Postgres`, `toolprovidertest`; the composition root migrates and wires it. |
-| `pkg/mcptools` | MCP client (stdio, streamable HTTP) over `toolprovider`: lists and diffs a server's tools, exposes only accepted ones as saige tools, enforces the grant's class per call, and redacts the resolved credential everywhere. `Grants` expands a spec's `mcp:<provider>[:write]` group grant (read only by default) per tenant, on sessions kept per provider record version, for `runtime.WithToolGroupSource`. A person-scoped provider is expanded for the actor on the turn's context with that person's own credential (`PersonResolver`), on a session per person; a person with none gets `ErrNoPersonCredential` and a note for the model, never the shared credential. |
+| `pkg/mcptools` | MCP client (stdio, streamable HTTP) over `toolprovider`: lists and diffs a server's tools, exposes only accepted ones as saige tools, enforces the grant's class per call, and redacts the resolved credential everywhere. `Grants` expands a spec's `mcp:<provider>[:write]` group grant (read only by default) per tenant, on sessions kept per provider record version, for `runtime.WithToolGroupSource`. A person-scoped provider is expanded for the actor on the turn's context with that person's own credential (`PersonResolver`), on a session per person; a person with none gets `ErrNoPersonCredential` and a note for the model, never the shared credential. Such a provider's tools report `ActsForPerson` (`agentrt.PersonScoped`), so an approval of their calls says so. |
 | `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`, `knowledgetest`. |
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
 | `pkg/bus` | `Bus` interface; `Memory`, Redis Streams and Postgres backends; `bustest` conformance suite. The Postgres bus stores every event body in `fiber_bus_events` until it is trimmed or `WithIndexTTL` expires. |
@@ -137,6 +137,10 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   approval from the requester, or from the credential that raised the run,
   unless the pinned spec sets `self_approval`, and admits only the spec's
   `approvers`/`answerers` when it names them. Never widen this to tenant-wide.
+  A call that runs with the credential of the person the run acts for
+  (`agentrt.PersonScoped`, `QuestionTool.ActsForPerson`) is approved with
+  edited arguments only by that person; anyone else approves or denies it as
+  asked.
 - **A run never waits for another run in its turn.** With
   `runtime.WithChildRuns` a delegation parks the parent on the child's ending;
   a blocking wait holds a worker and N of them deadlock N workers.
