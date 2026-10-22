@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.0 (2026-10-22)
+
+### Features
+
+- per-person tool credentials, and fiber run for local tests (#40) ([b588324](https://github.com/urmzd/fiber/commit/b588324b836e2550627b28de8b6250726ce3f2ac))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.21.0...v0.22.0)
+
+
 ## 0.21.0 (2026-10-21)
 
 ### Breaking
