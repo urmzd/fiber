@@ -20,6 +20,9 @@ import (
 // provider serialize on it and the snapshot number each checks is the one it
 // writes after.
 //
+// credential_scope arrived after the table did, so it is added to a table
+// that predates it, where every existing row is the shared provider it was.
+//
 // fiber_tool_snapshots only ever receives INSERTs. Its tools column is
 // text, not jsonb, on purpose: jsonb reorders keys and rewrites whitespace,
 // and an accepted schema is shown to the model byte for byte, so a snapshot
@@ -38,6 +41,9 @@ CREATE TABLE IF NOT EXISTS fiber_tool_providers (
 	updated_at     timestamptz NOT NULL,
 	PRIMARY KEY (tenant, name)
 );
+
+ALTER TABLE fiber_tool_providers ADD COLUMN IF NOT EXISTS
+	credential_scope text NOT NULL DEFAULT 'shared' CHECK (credential_scope IN ('shared', 'person'));
 
 CREATE TABLE IF NOT EXISTS fiber_tool_snapshots (
 	tenant      text        NOT NULL,
@@ -89,7 +95,7 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	return nil
 }
 
-const providerColumns = `tenant, name, transport, endpoint, args, credential_ref, credential_env, version, updated_by, updated_at`
+const providerColumns = `tenant, name, transport, endpoint, args, credential_scope, credential_ref, credential_env, version, updated_by, updated_at`
 
 // PutProvider implements Store.
 func (p *Postgres) PutProvider(ctx context.Context, rec Provider) (Provider, error) {
@@ -107,7 +113,7 @@ func (p *Postgres) PutProvider(ctx context.Context, rec Provider) (Provider, err
 	if err != nil {
 		return Provider{}, fmt.Errorf("toolprovider: encode args: %w", err)
 	}
-	out := rec.clone()
+	out := rec.stored()
 	out.Version = rec.Version + 1
 	out.UpdatedAt = p.stamp()
 
@@ -115,10 +121,10 @@ func (p *Postgres) PutProvider(ctx context.Context, rec Provider) (Provider, err
 	if rec.Version == 0 {
 		tag, err = p.pool.Exec(ctx,
 			`INSERT INTO fiber_tool_providers (`+providerColumns+`)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10)
 			 ON CONFLICT (tenant, name) DO NOTHING`,
 			rec.Tenant, rec.Name, string(rec.Transport), rec.Endpoint, argsJSON,
-			rec.CredentialRef, rec.CredentialEnv, rec.UpdatedBy, out.UpdatedAt)
+			string(out.CredentialScope), rec.CredentialRef, rec.CredentialEnv, rec.UpdatedBy, out.UpdatedAt)
 		if err != nil {
 			return Provider{}, wrap("put provider", err)
 		}
@@ -129,11 +135,11 @@ func (p *Postgres) PutProvider(ctx context.Context, rec Provider) (Provider, err
 	}
 	tag, err = p.pool.Exec(ctx,
 		`UPDATE fiber_tool_providers
-		    SET transport = $3, endpoint = $4, args = $5, credential_ref = $6, credential_env = $7,
-		        version = version + 1, updated_by = $8, updated_at = $9
-		  WHERE tenant = $1 AND name = $2 AND version = $10`,
+		    SET transport = $3, endpoint = $4, args = $5, credential_scope = $6, credential_ref = $7,
+		        credential_env = $8, version = version + 1, updated_by = $9, updated_at = $10
+		  WHERE tenant = $1 AND name = $2 AND version = $11`,
 		rec.Tenant, rec.Name, string(rec.Transport), rec.Endpoint, argsJSON,
-		rec.CredentialRef, rec.CredentialEnv, rec.UpdatedBy, out.UpdatedAt, int64(rec.Version))
+		string(out.CredentialScope), rec.CredentialRef, rec.CredentialEnv, rec.UpdatedBy, out.UpdatedAt, int64(rec.Version))
 	if err != nil {
 		return Provider{}, wrap("put provider", err)
 	}
@@ -194,11 +200,12 @@ func collectProviders(rows pgx.Rows) ([]Provider, error) {
 		var (
 			rec       Provider
 			transport string
+			scope     string
 			args      []byte
 			version   int64
 		)
 		if err := rows.Scan(&rec.Tenant, &rec.Name, &transport, &rec.Endpoint, &args,
-			&rec.CredentialRef, &rec.CredentialEnv, &version, &rec.UpdatedBy, &rec.UpdatedAt); err != nil {
+			&scope, &rec.CredentialRef, &rec.CredentialEnv, &version, &rec.UpdatedBy, &rec.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(args, &rec.Args); err != nil {
@@ -207,7 +214,8 @@ func collectProviders(rows pgx.Rows) ([]Provider, error) {
 		if len(rec.Args) == 0 {
 			rec.Args = nil
 		}
-		rec.Transport, rec.Version, rec.UpdatedAt = Transport(transport), uint64(version), rec.UpdatedAt.UTC()
+		rec.Transport, rec.CredentialScope = Transport(transport), CredentialScope(scope)
+		rec.Version, rec.UpdatedAt = uint64(version), rec.UpdatedAt.UTC()
 		out = append(out, rec)
 	}
 	return out, rows.Err()

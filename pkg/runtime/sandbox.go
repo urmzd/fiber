@@ -182,6 +182,11 @@ type turn struct {
 	// childQuestion checks and reads a child run a Delegator watches for
 	// questions (WatchChildQuestions). Nil when the runtime offered none.
 	childQuestion func(context.Context, string) (payload.ChildQuestion, bool, bool, error)
+	// actor is who the turn acts for, from the context the runtime executed
+	// it under: the actor on the run's durable record, or a delegated
+	// sub-task's parent's. The task never carries it, so nothing the task
+	// input says (and nothing a model wrote into it) can name someone else.
+	actor envelope.Actor
 }
 
 // SandboxOption configures a Sandbox.
@@ -202,6 +207,13 @@ func WithCatalog(c Catalog) SandboxOption {
 // "mcp:github" or "mcp:github:write", for one tenant. *mcptools.Grants is the
 // store-backed one: it expands a grant to the MCP provider's accepted tools
 // under the grant's class.
+//
+// Expand is called under the turn's context, which carries the actor the run
+// acts for (envelope.ActorFrom): the actor on the tag in the run's durable
+// record, the same one approvals are decided on, or a delegated sub-task's
+// parent's. A source that reaches a provider as a person, with that person's
+// own credential, reads it there and nowhere else. A turn that acts for
+// nobody (a schedule, a tag with no actor) carries none.
 type ToolGroupSource interface {
 	// Expand returns the tools grant stands for in tenant. ok is false for
 	// a group this source does not supply, which is then asked of the
@@ -380,7 +392,8 @@ func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Co
 	// request that arrives before the task has been picked up is not lost to
 	// timing.
 	childQuestion, _ := ctx.Value(childQuestionKey{}).(func(context.Context, string) (payload.ChildQuestion, bool, bool, error))
-	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), compact: CompactSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx), childQuestion: childQuestion}); err != nil {
+	actor, _ := envelope.ActorFrom(ctx)
+	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), compact: CompactSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx), childQuestion: childQuestion, actor: actor}); err != nil {
 		return Outcome{}, err
 	}
 	// Detaching aborts the task if it is still running, which it is on every
@@ -593,14 +606,23 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
-		go func(abort <-chan struct{}) {
+		go func(abort, done <-chan struct{}) {
 			select {
 			case <-abort:
 				cancel()
-			case <-ctx.Done():
+			case <-done:
 			}
-		}(waited.abort)
+		}(waited.abort, ctx.Done())
 	}
+
+	// The turn acts for whoever the turn it was submitted for does, and for
+	// nobody when it is unwatched. It is set here whatever the node's own
+	// context carried, so a task cannot inherit someone it was not given.
+	var actor envelope.Actor
+	if waited != nil {
+		actor = waited.actor
+	}
+	ctx = envelope.WithActor(ctx, actor)
 
 	// A delegated sub-task's sink is read by the delegation waiting on it,
 	// which relays only the sub-task's usage onto the parent's stream: its
@@ -698,6 +720,35 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	return json.Marshal(out)
 }
 
+// ToolsFor reports what a turn of req would be granted, without running it:
+// the tools its model would be shown and the grants it would drop, each with
+// its reason. The tools are assembled exactly as Execute assembles them (the
+// catalog, the tool groups for req's tenant and for the actor ctx carries, a
+// delegation tool per agent in Access.Spawn) and resolved as the turn's
+// runner resolves them, and none is called. No model client is built, so it
+// needs no model credential. A group source may reach the server behind a
+// group to expand it, as a turn does.
+//
+// ctx carries the actor as it does for Execute: whoever asks puts the actor
+// the turn would act for on it (envelope.WithActor), and a context with none
+// is a turn for nobody.
+func (s *Sandbox) ToolsFor(ctx context.Context, req Request) (agentrt.Granted, error) {
+	rev := req.Revision
+	if err := rev.Validate(); err != nil {
+		return agentrt.Granted{}, err
+	}
+	req.Accounting = accountingOf(req)
+	// Nothing runs, so there is no node runtime to hand the delegation tools
+	// and nothing they report has anywhere to go.
+	tools, granted, err := s.turnTools(ctx, nil, req, func(agentrt.Chunk) error { return nil })
+	if err != nil {
+		return agentrt.Granted{}, err
+	}
+	rev.Spec.Tools = granted
+	opts := append(append([]agentrt.Option{agentrt.WithLogger(s.logger)}, s.agentOpts...), agentrt.WithTools(tools))
+	return agentrt.ResolveTools(rev, opts...)
+}
+
 // turnTools assembles the tools one turn may call: the deployment's catalog for
 // the names the spec grants, plus one delegation tool per agent in Access.Spawn.
 //
@@ -710,6 +761,8 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 // stable order so that two turns of the same revision show the model the same
 // tools in the same sequence.
 func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, send func(agentrt.Chunk) error) (agentrt.Tools, []string, error) {
+	// A sub-task acts for the person its parent acts for.
+	actor, _ := envelope.ActorFrom(ctx)
 	report := func(a payload.Action) error {
 		body, err := payload.Encode(a)
 		if err != nil {
@@ -734,7 +787,7 @@ func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, s
 	delegates := make(map[string]saigetypes.Tool, len(req.Revision.Spec.Access.Spawn))
 	for _, target := range req.Revision.Spec.Access.Spawn {
 		name := DelegateToolName(target)
-		delegates[name] = s.delegateTool(rt, req, target, report, send)
+		delegates[name] = s.delegateTool(rt, req, actor, target, report, send)
 		if s.callTool == "" {
 			add(name)
 		}
@@ -842,7 +895,7 @@ func (c turnCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
 // whether the child answers, fails or is aborted. A host Delegator reports the
 // run it started with ReportChildUsage, from the context it is given, and the
 // runtime reads that run's total from the ledger.
-func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, report func(payload.Action) error, send func(agentrt.Chunk) error) saigetypes.Tool {
+func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.Actor, target string, report func(payload.Action) error, send func(agentrt.Chunk) error) saigetypes.Tool {
 	if parent.ChildRuns && parent.RunID != "" {
 		return &childRunTool{s: s, parent: parent, target: target, send: send}
 	}
@@ -885,7 +938,7 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, target string, r
 			// nobody will read.
 			sub := fmt.Sprintf("sub-%d", s.subs.Add(1))
 			sink := make(chan agentrt.Chunk, s.buffer)
-			if err := s.attach(sub, &turn{sink: sink, abort: make(chan struct{})}); err != nil {
+			if err := s.attach(sub, &turn{sink: sink, abort: make(chan struct{}), actor: actor}); err != nil {
 				return "", err
 			}
 			defer s.detach(sub)
@@ -1165,6 +1218,13 @@ func (t *hostCallTool) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalR
 		return approving.Approval(call)
 	}
 	return agentrt.ApprovalRequest{}, false
+}
+
+// ActsForPerson forwards whether the tool the host wraps runs with the
+// credential of the person the turn acts for, so an approval of it says so.
+func (t *hostCallTool) ActsForPerson() bool {
+	p, ok := t.Tool.(agentrt.PersonScoped)
+	return ok && p.ActsForPerson()
 }
 
 func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {

@@ -408,8 +408,9 @@ func WithRoles(fn Roles) Option {
 }
 
 // ErrNotAllowed reports an answer from someone the question may not be
-// answered by: the requester approving their own call, or someone outside
-// the spec's approvers or answerers.
+// answered by: the requester approving their own call, someone outside the
+// spec's approvers or answerers, or anyone but the person a call runs as
+// approving it with edited arguments.
 var ErrNotAllowed = errors.New("runtime: not allowed to answer this question")
 
 // Answer answers a question a run is parked on, and wakes the run.
@@ -420,7 +421,9 @@ var ErrNotAllowed = errors.New("runtime: not allowed to answer this question")
 // default instead, and returns that. An answer is checked against the
 // question before it is recorded: a decision must be approve or deny, edited
 // arguments must satisfy the tool's schema, a choice must be one of the
-// options offered, and a reply must not be empty.
+// options offered, and a reply must not be empty. A call that runs with the
+// credential of the person the run acts for (QuestionTool.ActsForPerson) is
+// approved with edited arguments only by that person.
 //
 // It returns ErrNoQuestion for a question this tenant has no run with,
 // ErrQuestionClosed when the run was stopped while it waited or has ended
@@ -471,6 +474,9 @@ func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer
 		if err != nil {
 			return payload.Answer{}, false, err
 		}
+		if err := mayEdit(in.Tag, q, req, a); err != nil {
+			return payload.Answer{}, false, err
+		}
 		a.QuestionID, a.By, a.At, a.Expired = q.ID, clip(req.By), now, false
 		res.Answer = &a
 	}
@@ -519,7 +525,8 @@ func findQuestion(records []run.Record, id string) (payload.Question, bool) {
 // CheckAnswer reports whether an answer fits its question, as Answer checks
 // it: a decision is approve or deny and only an approval carries arguments,
 // which must satisfy the tool's schema; a choice is one of the options; a
-// reply has text. A host can check an answer before it submits one.
+// reply has text. A host can check an answer before it submits one. Who may
+// answer, and who may edit a call's arguments, Answer decides.
 func CheckAnswer(q payload.Question, a payload.Answer) error {
 	_, err := checkAnswer(q, a)
 	return err
@@ -875,6 +882,32 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 // requesterOf is every name the person whose tag raised a run goes by: the
 // actor's id, and the id qualified by the trigger it came through, which is
 // how a surface trusted to act for others names people ("slack:U1").
+// mayEdit refuses edited arguments on an approval of a call that runs with
+// the credential of the person the run acts for, unless that person is the
+// one answering. Anyone else's edit would act as them on something they did
+// not ask for, at whatever their credential reaches; they may still approve
+// or deny the call as it was asked.
+func mayEdit(tag envelope.Tag, q payload.Question, req AnswerRequest, a payload.Answer) error {
+	if len(a.Arguments) == 0 || q.Tool == nil || !q.Tool.ActsForPerson || isActor(tag, clip(req.By)) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s runs with the credential of the person this run acts for, so only they may change its arguments; approve or deny it as asked",
+		ErrNotAllowed, q.Tool.Name)
+}
+
+// isActor reports whether by is the person a run acts for: the host's
+// account for its actor (Actor.User) when the tag names one, and otherwise
+// the actor under the names the requester goes by. A bot is nobody.
+func isActor(tag envelope.Tag, by string) bool {
+	if by == "" || tag.Actor.Bot {
+		return false
+	}
+	if user := strings.TrimSpace(tag.Actor.User); user != "" {
+		return by == user
+	}
+	return requesterOf(tag)[by]
+}
+
 func requesterOf(tag envelope.Tag) map[string]bool {
 	out := map[string]bool{}
 	if id := strings.TrimSpace(tag.Actor.ID); id != "" {

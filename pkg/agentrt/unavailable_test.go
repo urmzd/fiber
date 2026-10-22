@@ -155,3 +155,72 @@ func TestStrictToolsFailsOnTheFirstUnresolvableTool(t *testing.T) {
 		t.Fatalf("New = %v, want it to match ErrInvalid too", err)
 	}
 }
+
+// notedErr is a refusal whose cause was written for the model, the way
+// pkg/mcptools reports a person with no credential of their own.
+type notedErr struct{ operator, model string }
+
+func (e notedErr) Error() string     { return e.operator }
+func (e notedErr) ModelNote() string { return e.model }
+
+// A dropped grant whose error carries a note for the model is announced with
+// it, so the agent can tell the person what to do; the operator's reason,
+// which may name infrastructure, still never reaches the model, and a grant
+// dropped without a note is announced by name alone, as before.
+func TestADroppedGrantsNoteForTheModelFollowsItsName(t *testing.T) {
+	t.Parallel()
+
+	var tools [][]saigetypes.ToolDef
+	var msgs []saigetypes.Message
+	rev := offlineRevision(1, "You triage.")
+	rev.Spec.Provider = "spy"
+	rev.Spec.Tools = []string{"lookup", agentrt.MCPGroup("issues"), "jira_transition"}
+	catalog := groupCatalog{Tools: agentrt.ToolsFunc(func(name string) (saigetypes.Tool, error) {
+		if name == "lookup" {
+			return lookupTool("lookup"), nil
+		}
+		return nil, fmt.Errorf("%w: %q on host jira.internal.corp", agentrt.ErrNoSuchTool, name)
+	})}
+	refusal := notedErr{
+		operator: `mcptools: provider "issues" on mcp.internal.corp: ana has no credential`,
+		model:    "it needs a credential of your own,\n which you have not connected.",
+	}
+	r, err := agentrt.New(rev,
+		agentrt.WithProvider("spy", spyRequests(&tools, &msgs)),
+		agentrt.WithTools(noted{groupCatalog: catalog, err: refusal}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	collect(t, r, agentrt.Turn{Text: "triage"})
+
+	var system string
+	for _, m := range msgs {
+		if m.Role() == saigetypes.RoleSystem {
+			system = renderMessages([]saigetypes.Message{m})
+		}
+	}
+	for _, want := range []string{"mcp:issues, jira_transition", `mcp:issues: it needs a credential of your own, which you have not connected.`} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system prompt %s does not contain %q", system, want)
+		}
+	}
+	for _, leak := range []string{"internal.corp", "ana has no credential"} {
+		if strings.Contains(system, leak) {
+			t.Errorf("the operator's reason %q reached the model: %s", leak, system)
+		}
+	}
+	got := r.Unavailable()
+	if len(got) != 2 || got[0].Note == "" || !strings.Contains(got[0].Reason, "ana has no credential") || got[1].Note != "" {
+		t.Errorf("Unavailable() = %+v, want the group with its note and reason, the tool with its reason only", got)
+	}
+}
+
+// noted is a catalog whose every group fails with err.
+type noted struct {
+	groupCatalog
+	err error
+}
+
+func (n noted) ToolGroup(name string) (agentrt.ToolGroup, error) {
+	return agentrt.ToolGroup{}, fmt.Errorf("%w: %q: %w", agentrt.ErrNoSuchToolGroup, name, n.err)
+}

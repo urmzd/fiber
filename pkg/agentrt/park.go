@@ -212,6 +212,25 @@ type Approving interface {
 	Approval(call saigetypes.ToolCallPart) (ApprovalRequest, bool)
 }
 
+// PersonScoped is a tool that may run with the credential of the person the
+// turn acts for, as a person-scoped MCP provider's tools do (pkg/mcptools).
+// ActsForPerson reports whether it does. An approval of a call to one says
+// so (payload.QuestionTool.ActsForPerson), and the runtime takes edited
+// arguments for it only from that person.
+type PersonScoped interface {
+	ActsForPerson() bool
+}
+
+// actsForPerson reports whether t, unwrapped from the marker a spec's
+// Approvals adds, runs with the credential of the person the turn acts for.
+func actsForPerson(t saigetypes.Tool) bool {
+	if marked, ok := t.(*saigetypes.MarkedTool); ok {
+		t = marked.Inner
+	}
+	p, ok := t.(PersonScoped)
+	return ok && p.ActsForPerson()
+}
+
 // approvingOf returns the Approving behind a registered tool, unwrapping the
 // marker a spec's Approvals adds.
 func approvingOf(tools *saigetypes.ToolRegistry, name string) (Approving, saigetypes.Tool, bool) {
@@ -519,7 +538,7 @@ func (p *parker) approval(q payload.Question, tc saigetypes.ToolCallPart, t saig
 	}
 	args, _ := json.Marshal(tc.Arguments)
 	schema, _ := json.Marshal(t.Definition().Parameters)
-	q.Tool = &payload.QuestionTool{Name: tc.Name, CallID: tc.ID, Arguments: args, Schema: schema}
+	q.Tool = &payload.QuestionTool{Name: tc.Name, CallID: tc.ID, Arguments: args, Schema: schema, ActsForPerson: actsForPerson(t)}
 	q.ID = saigetypes.InterruptID(p.scope, nil, q.Kind, tc.ID)
 	q.Default = &payload.Answer{QuestionID: q.ID, Decision: payload.DecisionDeny, Expired: true,
 		Note: "nobody answered before the question expired"}

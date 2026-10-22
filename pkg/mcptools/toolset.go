@@ -142,6 +142,14 @@ func newCallable(s *Session, t toolprovider.Tool, grant toolprovider.Grant) (*ca
 
 func (c *callable) Definition() saigetypes.ToolDef { return c.def }
 
+// ActsForPerson reports whether the tool runs with the credential of the
+// person the turn acts for, which it does when its provider is
+// person-scoped. It is agentrt.PersonScoped, so an approval of a call to it
+// says so and nobody but that person changes what it is called with.
+func (c *callable) ActsForPerson() bool {
+	return c.session.provider.Scope() == toolprovider.ScopePerson
+}
+
 // Execute checks the grant, checks the server still offers the tool exactly
 // as accepted, and only then calls it.
 func (c *callable) Execute(ctx context.Context, args map[string]any) (string, error) {

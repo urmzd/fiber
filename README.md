@@ -48,10 +48,12 @@
 fiber is a Go library for agents and a low-latency pub/sub bus. Define an agent
 with a spec, tag it from Slack, GitHub, Jira or a schedule, and its events
 stream to any subscriber while being delivered to any destination you name.
-It is a library you compose in Go: there is no binary, no service, no
-configuration file and no environment variable. `fiber.New` composes the
-packages under `pkg/`, every backend is a constructed value passed as an
-option, and anything not passed is the in-memory implementation.
+It is a library you compose in Go: there is no service, no configuration
+file and no environment variable. `fiber.New` composes the packages under
+`pkg/`, every backend is a constructed value passed as an option, and anything
+not passed is the in-memory implementation. One small command, `fiber run`,
+runs a spec once on that in-memory composition so you can check it locally
+([Validate a spec locally](#validate-a-spec-locally)).
 [warp](https://github.com/urmzd/warp) is the platform built on it.
 
 **Where a tag is raised and where its answer lands are independent.** A GitHub
@@ -129,6 +131,7 @@ acc, err := app.Invoke(ctx, envelope.Tag{
 
 `App.Bus().Subscribe` streams any topic (`agent:docs-bot` sees every run of
 that agent); `App.Status`, `Stop`, `Compact` and `Answer` act on a run;
+`App.ToolsFor` lists what a run of a tag would be granted, without running it;
 `App.WebhookHandler()` is an `http.Handler` for the connectors that receive
 webhooks, for your program to mount.
 [`examples/downstream`](examples/downstream/main.go) is a complete program.
@@ -190,6 +193,91 @@ provider store (Postgres with `fiber.WithPostgres`) and resolves
 `mcptools.Grants`; one embedding `pkg/agentrt` alone supplies groups with
 `agentrt.WithToolGroups` or from its tool catalog.
 
+A provider is reached with one shared credential, its `CredentialRef`, unless
+it is person-scoped (`CredentialScope: toolprovider.ScopePerson`): then each
+run reaches it with the credential of the person the run acts for, the actor
+on its tag, which `fiber.WithPersonCredentials` looks up. That actor is the
+one recorded when the run was accepted, so nothing a model says can change
+it. Each person gets a session of their own, opened with their own
+credential. A person with none gets no tools from the provider, the model is
+told they have not connected one, and the operator log names them; a shared
+credential is never used instead, and a person-scoped provider cannot even
+name one.
+
+```go
+fiber.WithPersonCredentials(mcptools.PersonResolverFunc(
+    func(ctx context.Context, tenant string, p toolprovider.Provider, who envelope.Actor) (mcptools.PersonCredential, error) {
+        tok, ok := vault.Token(ctx, tenant, who.User, p.Name) // your own store, keyed by your account id
+        if !ok {
+            return mcptools.PersonCredential{}, mcptools.ErrNoPersonCredential
+        }
+        return mcptools.PersonCredential{Secret: mcptools.NewSecret(tok)}, nil
+    }))
+```
+
+## Validate a spec locally
+
+`fiber run` runs one agent spec once, in process, and prints what the run
+does. It is `cmd/fiber`, a program built on the library like any other: it
+composes `fiber.New` with the in-memory backends and a temporary workspace,
+registers the spec, raises one tag with your message, and prints the run's
+events as they stream. It listens on nothing, reads no configuration file and
+no environment variable of its own, and keeps nothing once it exits. It is
+not the server binary earlier releases had (see [Upgrading](#upgrading)).
+
+Releases publish the Go module, not a prebuilt binary. Install the command at
+the version of fiber you build against, or run it from a checkout with
+`go run ./cmd/fiber`:
+
+```sh
+go install github.com/urmzd/fiber/cmd/fiber@latest
+fiber run -offline docs-bot.json "how does a release get out the door?"
+```
+
+```text
+[lifecycle.accepted] docs-bot revision 1, run r22e035b6d38cc721ba356a8a0290f805
+[lifecycle.started] attempt 1
+docs-bot is running with the offline provider, so no model was called. ...
+[usage.call] MODEL: 0 tokens in (0 cached), 0 out
+[lifecycle.completed] attempt 1, 1 model calls, 0 tokens in, 0 out
+```
+
+Each line is one event under its kind, the name a route's `kinds` selects,
+except the answer and any reasoning, which stream inline as they arrive.
+Warnings from the operator log, such as a granted tool this composition
+cannot resolve, go to standard error.
+
+| Flag | Does |
+|------|------|
+| `-offline` | Runs on the offline provider: no model is called and no key is needed. The spec's fallbacks are dropped with its provider. |
+| `-provider NAME`, `-model NAME` | Replace the spec's provider and model. A real provider reads its vendor's variables when the agent is built (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`, `OLLAMA_HOST`). |
+| `-tools` | Lists the tools the agent would be granted, marks those whose calls wait for approval, and names each grant left out and why, then exits without running anything. It needs no key and no MESSAGE. |
+| `-json` | Prints one JSON object per event, per line: the event as the bus carries it, with its payload as JSON. With `-tools`, the listing as one object. |
+| `-timeout D` | Gives up after `D`, such as `30s` (default `5m`; `0` waits forever). |
+
+Flags go before SPEC. SPEC is a file holding one agent spec as JSON (the
+fields of `agentspec.AgentSpec`), or `-` for standard input. A field the
+format does not have is an error rather than ignored, so a misspelt
+`system-prompt` is caught.
+
+| Exit status | Means |
+|-------------|-------|
+| `0` | The run completed, or the listing was printed. |
+| `1` | The run did not complete: it failed, was stopped, parked on a question, or ran out of time. A failed attempt is retried as in any deployment, and the run counts as failed only once the run ledger says so. |
+| `2` | The command line or the spec is wrong, and nothing ran. |
+
+A local run has what this composition has: the built-in providers, the
+`ask_person` tool, the `author_*` tools every App carries, and a
+`tag_<agent>` tool per agent the spec may spawn (only the one spec is
+registered, so a delegation finds no agent to tag). No connector and no MCP
+tool provider is configured, so a connector's actions (`jira_transition`) and
+`mcp:` grants are unavailable here: the run goes ahead without them, as a
+deployment's would, and `-tools` says which and why. Nothing here can answer
+a question, so a run that parks on an approval or on `ask_person` exits `1`.
+The knowledge store is empty, so `sources` retrieve nothing. To list what a
+run would be granted in your own composition, call `App.ToolsFor(ctx, tag)`
+there.
+
 ## Examples
 
 | Example | What it demonstrates |
@@ -219,7 +307,7 @@ It builds on [saige](https://github.com/urmzd/saige)'s agent loop,
 [anchor](https://github.com/urmzd/anchor)'s durability, and adds addressing,
 distribution, connectors and the control plane.
 [warp](https://github.com/urmzd/warp) is the only thing that configures or
-runs it: fiber is composed in Go and reads no configuration of its own. See
+serves it: fiber is composed in Go and reads no configuration of its own. See
 [the ecosystem guide](https://github.com/urmzd/warp/blob/main/docs/ecosystem.md)
 for who owns what and the limitations that span the stack.
 
@@ -255,11 +343,13 @@ environment belongs to the program composing fiber
 | `WithTenant`, `WithConcurrency`, `WithCompaction`, `WithAuthor`, `WithLogger`, `WithMetrics` | Deployment | none, one, off, offline, discard, none |
 | `WithSlack`, `WithGitHub`, `WithJira`, `WithWebhooks`, `WithSchedules` | Built-in connectors, typed Go values | off |
 | `WithModelProvider`, `WithOpenAICompatible`, `WithTools`, `WithToolSource`, `WithConnector`, `WithToolProvider` | Extensions | none |
+| `WithPersonCredentials` | Each person's own credential for person-scoped MCP providers | none, so those providers offer no tools |
 
 Model providers read their own credentials when an agent is built:
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`, `OLLAMA_HOST`,
 and the variable an `OpenAICompatible.KeyEnv` names. An MCP provider's
-`env:NAME` credential reference resolves the same way. Connector setup is
+`env:NAME` credential reference resolves the same way, as does a reference a
+`WithPersonCredentials` resolver returns for a person. Connector setup is
 covered in the [GitHub](docs/architecture/github.md) and
 [Slack](docs/architecture/slack.md) guides.
 
@@ -285,7 +375,12 @@ matches its `SchemaHash`, and its description may not change once accepted.
 Anything the server adds or changes stays pending, so a restart never accepts
 what the program does not declare. `fiber.New` logs every pending tool with
 its schema hash; review it, then pin it. A server that cannot be reached at
-startup is logged and its tools are unavailable to runs.
+startup is logged and its tools are unavailable to runs. A person-scoped
+provider is not dialled at startup, since it has no credential of its own:
+each tool declared for it carries the `Description` and `InputSchema` the
+server offers, and is accepted in that form when its `SchemaHash` matches.
+Review one with a credential of your own
+(`mcptools.Connect(ctx, p, mcptools.WithPersonCredential(mine))`).
 
 A new backend implements the package's interface and passes its conformance
 suite: `bustest`, `registrytest`, `knowledgetest`, `threadtest`,
@@ -336,6 +431,8 @@ starts. Postgres migrates itself and keeps its rows. See
 - `App.Status` reports a stopped run as `stopped`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
 - A request to compact a running turn (`App.Compact`) is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
 - A program declares MCP tool providers with `fiber.WithToolProvider`, or writes them to the tool provider store (`App.ToolProviders`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) is dropped like a single unavailable tool: the run continues without it, the model is told it is unavailable, the operator is logged why, and `Runner.Unavailable` lists it. `agentrt.WithStrictTools` fails the build with `agentrt.ErrNoSuchToolGroup` instead.
+- A person-scoped MCP provider's tools are expanded per person, so two people in one thread can be offered different tools, and the thread's prompt cache misses when the person changes. At most 128 person sessions are kept open (`mcptools.WithPersonSessions` on a hand-built `Grants`); past that the one used longest ago is closed and a turn still holding its tools sees a tool error. A stdio provider runs a server per open person session. The resolver is asked on every turn, and a new value behind an unchanged reference is not noticed until the reference, the secret or the provider record changes.
+- Only MCP tool providers take a person's credential. The Slack, GitHub and Jira connectors' actions and sinks still act with the credential the deployment configured for them.
 - A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
 - A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).

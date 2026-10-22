@@ -2,10 +2,12 @@
 
 Agent library and low-latency pub/sub bus. Tag an agent from anywhere, stream
 its events to anyone, deliver them anywhere. Go module
-`github.com/urmzd/fiber`. It is a library you compose in Go: no binary, no
+`github.com/urmzd/fiber`. It is a library first, composed in Go: no
 service, no configuration files, no environment variables. The root package
 `fiber` is the composition root (`fiber.New(ctx, ...Option)`); warp is the
-platform built on it, owns all configuration, and imports only `pkg/`.
+platform built on it, owns all configuration, and imports only `pkg/`. The
+module's one command, `cmd/fiber` (`fiber run`), is a program on the library
+for validating a spec locally, not a way to serve one.
 
 **Status: v0 alpha, pre-1.0, not recommended for production.** Interfaces are
 still moving and may change between minor versions. The in-memory composition
@@ -27,7 +29,7 @@ sandboxing and access control.
 |---------|------|
 | `pkg/topic` | Topic addressing: `agent`, `agent:<name>`, `agent:<name>:<run>`. Prefix containment, no wildcards. The reserved control namespace `agent:_control:<verb>-<key>`. Leaf. |
 | `pkg/address` | Mesh endpoint URIs: `github://urmzd/fiber/issues/42`, `slack://T01/C02?thread=...`. Leaf. |
-| `pkg/envelope` | Wire contract: `Tag`, `Event`, `Kind`, `Route`, `Filter`, `Subscription`. Leaf. |
+| `pkg/envelope` | Wire contract: `Tag`, `Event`, `Kind`, `Route`, `Filter`, `Subscription`, and the actor a context acts for (`WithActor`, `ActorFrom`). Leaf. |
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
 | `pkg/agentspec` | Immutable agent specs, content-addressed revisions. Leaf. |
 | `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
@@ -37,16 +39,17 @@ sandboxing and access control.
 | `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`; `threadtest.Run` is its conformance suite. |
 | `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem; `blobtest`. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
-| `pkg/toolprovider` | MCP tool providers as versioned records: how to reach a server, its credential reference, and the admin-accepted, numbered tool snapshots. Changed tools stay pending; read/write class defaults to write. A tool is shown to models as `<provider>__<tool>` (`QualifiedName`). `Memory` and `Postgres`, `toolprovidertest`; the composition root migrates and wires it. |
-| `pkg/mcptools` | MCP client (stdio, streamable HTTP) over `toolprovider`: lists and diffs a server's tools, exposes only accepted ones as saige tools, enforces the grant's class per call, and redacts the resolved credential everywhere. `Grants` expands a spec's `mcp:<provider>[:write]` group grant (read only by default) per tenant, on sessions kept per provider record version, for `runtime.WithToolGroupSource`. |
+| `pkg/toolprovider` | MCP tool providers as versioned records: how to reach a server, whose credential it is reached with (`CredentialScope`: `shared`, the default, with its credential reference, or `person`, which names none), and the admin-accepted, numbered tool snapshots. Changed tools stay pending; read/write class defaults to write. A tool is shown to models as `<provider>__<tool>` (`QualifiedName`). `Memory` and `Postgres`, `toolprovidertest`; the composition root migrates and wires it. |
+| `pkg/mcptools` | MCP client (stdio, streamable HTTP) over `toolprovider`: lists and diffs a server's tools, exposes only accepted ones as saige tools, enforces the grant's class per call, and redacts the resolved credential everywhere. `Grants` expands a spec's `mcp:<provider>[:write]` group grant (read only by default) per tenant, on sessions kept per provider record version, for `runtime.WithToolGroupSource`. A person-scoped provider is expanded for the actor on the turn's context with that person's own credential (`PersonResolver`), on a session per person; a person with none gets `ErrNoPersonCredential` and a note for the model, never the shared credential. Such a provider's tools report `ActsForPerson` (`agentrt.PersonScoped`), so an approval of their calls says so. |
 | `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`, `knowledgetest`. |
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
 | `pkg/bus` | `Bus` interface; `Memory`, Redis Streams and Postgres backends; `bustest` conformance suite. The Postgres bus stores every event body in `fiber_bus_events` until it is trimmed or `WithIndexTTL` expires. |
 | `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
-| `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model (`WithStrictTools` refuses instead). `payload/` holds typed event bodies. |
-| `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. |
+| `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model by name (`WithStrictTools` refuses instead), with the error's `ModelNote` when it has one. `ResolveTools` resolves a revision's grants exactly as `New` does and builds nothing else (no model client). `payload/` holds typed event bodies. |
+| `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. Every turn's context carries the actor on the run's record (`envelope.ActorFrom`). `Sandbox.ToolsFor` assembles a turn's tools as `Execute` does and runs nothing. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
-| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
+| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers and each person's credentials for them (`WithPersonCredentials`) (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. `App.ToolsFor` reports what a run of a tag would be granted without running it. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
+| `cmd/fiber` | `fiber run [flags] SPEC MESSAGE`: registers one JSON spec on a `fiber.New` with memory backends and a temporary workspace, raises one tag, prints the run's events (text, or `-json` one per line) and exits 0 completed, 1 not, 2 bad input. `-offline`, `-provider`, `-model`, `-tools` (prints `App.ToolsFor`, runs nothing), `-timeout`. Nothing imports it. |
 
 Discover layout with `tree` or ripgrep; do not trust stale listings.
 
@@ -62,6 +65,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 | fmt | `gofmt -w .` |
 | quality gate | `make check` |
 | end-to-end demo | `go run ./examples/local`, `go run ./examples/downstream` |
+| validate a spec | `go run ./cmd/fiber run -offline SPEC MESSAGE`, `-tools` to list its grants |
 | backends | `make up` (Postgres with pgvector, Redis), `make down` |
 | suites on real backends | `make integration` (sets `FIBER_POSTGRES_TEST_URL` and `FIBER_REDIS_ADDR`) |
 
@@ -133,6 +137,10 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   approval from the requester, or from the credential that raised the run,
   unless the pinned spec sets `self_approval`, and admits only the spec's
   `approvers`/`answerers` when it names them. Never widen this to tenant-wide.
+  A call that runs with the credential of the person the run acts for
+  (`agentrt.PersonScoped`, `QuestionTool.ActsForPerson`) is approved with
+  edited arguments only by that person; anyone else approves or denies it as
+  asked.
 - **A run never waits for another run in its turn.** With
   `runtime.WithChildRuns` a delegation parks the parent on the child's ending;
   a blocking wait holds a worker and N of them deadlock N workers.
@@ -147,12 +155,33 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 - **Tenant is never read from a request body.** fiber has no transport; a
   program that accepts tags from callers (warp) sets the tenant from the
   caller's credential and overwrites whatever the client sent.
-  `App.Invoke` trusts the tag it is handed.
+  `App.Invoke` and `App.ToolsFor` trust the tag they are handed.
 - **Neither is the actor.** A tag's actor is the credential's subject unless
   the credential is marked `ActAs`, which is what a surface that authenticated
   the person itself holds. Authorship and approvals are decided on it. The
   same holds for every actor field, `user` (the host's account id) included:
   a credential without `ActAs` cannot set any of them.
+- **A shared credential is never a fallback.** A person-scoped MCP provider
+  is reached only with the credential of the person the run acts for, on a
+  session of that person's own; it names no shared credential (the store
+  refuses one), `mcptools.Connect` never reads one for it, and a person with
+  none gets no tools and a note saying so. Never widen this to "try the
+  shared one", to another person's session, or to a credential read from
+  anything but the resolver. Changes need tests proving each person reaches
+  the server with their own, a person with none reaches it with nothing, and
+  every credential stays redacted.
+- **Who a turn acts for comes from the run's record.** The runtime puts the
+  accepted tag's actor on the turn's context and the sandbox carries it to the
+  task in process; it is never read from a `Request`, the task input, trigger
+  metadata or anything a model produced, and a turn for nobody acts for
+  nobody.
+- **The command is a program on the library.** `cmd/fiber` composes
+  `fiber.New` through exported API only, reads no file but the spec it is
+  given and no environment variable of its own (the model providers read
+  their vendors' keys, as in any program), listens on nothing and keeps
+  nothing. What it needs from fiber is library API that any program could
+  call, as `App.ToolsFor` is; it never reaches past that, and nothing in the
+  module imports it.
 - This is a v0 alpha: keep the surface small and document limitations honestly
   rather than papering over them.
 

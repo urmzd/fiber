@@ -65,6 +65,11 @@ func TestAProviderGrantExpandsToItsAcceptedToolsUnderItsClass(t *testing.T) {
 		if got := names(tools); !slices.Equal(got, tc.want) {
 			t.Errorf("Expand(%q) = %v, want %v", tc.grant, got, tc.want)
 		}
+		for _, tool := range tools {
+			if p, ok := tool.(interface{ ActsForPerson() bool }); !ok || p.ActsForPerson() {
+				t.Errorf("%s of a shared provider says it acts as a person", tool.Definition().Name)
+			}
+		}
 	}
 
 	// Names that are not a store-backed grant are left to someone else: an

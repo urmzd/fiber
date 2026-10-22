@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -281,5 +282,60 @@ func restartHoldsBackDrift(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if !strings.Contains(logs.String(), "description changed") {
 		t.Errorf("the reworded description was not logged:\n%s", logs.String())
+	}
+}
+
+// A person-scoped provider has no credential of its own, so a start never
+// dials it, with anyone's: a declared tool carrying its whole form is
+// accepted as declared, one pinned by hash alone (or whose schema does not
+// match its pin) stays pending and is logged, and a repeated start mints
+// nothing. Changing the record's scope is an edit like any other.
+func TestAPersonScopedProviderIsSeededFromItsDeclarationWithoutDialling(t *testing.T) {
+	const tenant = "acme"
+	ctx := context.Background()
+	h := objectHash(t)
+	full := toolprovider.Tool{Name: "search", Description: "search", InputSchema: json.RawMessage(`{"type": "object"}`), SchemaHash: h, Class: toolprovider.ClassRead}
+	hashOnly := toolprovider.Tool{Name: "close_issue", SchemaHash: h}
+	wrong := toolprovider.Tool{Name: "reopen", Description: "reopen", InputSchema: json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}}}`), SchemaHash: h}
+	// Nothing listens here: a dial would fail, and the seed would log it.
+	person := toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP, Endpoint: "http://127.0.0.1:1/mcp", CredentialScope: toolprovider.ScopePerson}
+	dialled := 0
+	dial := func(context.Context, toolprovider.Provider) (*mcptools.Session, error) {
+		dialled++
+		return nil, errors.New("dialled")
+	}
+	store := toolprovider.NewMemory()
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	seeds := []toolProviderSeed{{Provider: person, Accept: []toolprovider.Tool{full, hashOnly, wrong}}}
+	for range 2 {
+		if err := seedToolProviders(ctx, store, tenant, seeds, dial, log); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if dialled != 0 {
+		t.Fatalf("a person-scoped provider was dialled %d times at startup", dialled)
+	}
+	snap, err := store.Snapshot(ctx, tenant, "issues", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Version != 1 || len(snap.Tools) != 1 || snap.Tools[0].Name != "search" || snap.Tools[0].Class != toolprovider.ClassRead || snap.Tools[0].Description != "search" {
+		t.Fatalf("snapshot = %+v, want version 1 with only the fully declared search, as read", snap)
+	}
+	for _, want := range []string{"tool=close_issue", "tool=reopen", "does not match its schema_hash"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the seed did not log %q:\n%s", want, logs.String())
+		}
+	}
+
+	// Moving it back to a shared credential is a new record version.
+	shared := person
+	shared.CredentialScope, shared.CredentialRef = toolprovider.ScopeShared, "env:ISSUES_TOKEN"
+	if err := seedToolProviders(ctx, store, tenant, []toolProviderSeed{{Provider: shared}}, dial, log); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := store.GetProvider(ctx, tenant, "issues"); p.Version != 2 || p.Scope() != toolprovider.ScopeShared {
+		t.Errorf("after moving back to shared the record is %+v", p)
 	}
 }

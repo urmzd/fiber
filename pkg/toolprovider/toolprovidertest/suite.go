@@ -1,8 +1,10 @@
 // Package toolprovidertest is the conformance suite every toolprovider.Store
 // must pass: versioned provider records with stale edits refused, tenant
-// isolation, validation, nothing accepted until an admin accepts it, and
-// numbered, immutable, pinnable snapshots whose schema hashes the store
-// recomputes. Memory and Postgres both run it; a new backend is a Factory.
+// isolation, validation, a credential scope that reads back as written (and a
+// person-scoped provider that can name no shared credential), nothing
+// accepted until an admin accepts it, and numbered, immutable, pinnable
+// snapshots whose schema hashes the store recomputes. Memory and Postgres
+// both run it; a new backend is a Factory.
 package toolprovidertest
 
 import (
@@ -146,6 +148,14 @@ func Run(t *testing.T, factory Factory) {
 			"non-http endpoint":            func(p *toolprovider.Provider) { p.Endpoint = "ftp://mcp.example.com" },
 			"args on http":                 func(p *toolprovider.Provider) { p.Args = []string{"x"} },
 			"stdio credential without env": func(p *toolprovider.Provider) { p.Transport, p.Endpoint = toolprovider.TransportStdio, "mcp-github" },
+			"unknown credential scope":     func(p *toolprovider.Provider) { p.CredentialScope = "team" },
+			"person scope with a shared credential": func(p *toolprovider.Provider) {
+				p.CredentialScope = toolprovider.ScopePerson
+			},
+			"person-scoped stdio without env": func(p *toolprovider.Provider) {
+				p.CredentialScope, p.CredentialRef = toolprovider.ScopePerson, ""
+				p.Transport, p.Endpoint = toolprovider.TransportStdio, "mcp-github"
+			},
 		}
 		for name, mutate := range cases {
 			t.Run(name, func(t *testing.T) {
@@ -159,6 +169,51 @@ func Run(t *testing.T, factory Factory) {
 					t.Fatalf("the refusal echoed the embedded secret: %v", err)
 				}
 			})
+		}
+	})
+
+	t.Run("ACredentialScopeReadsBackAsWrittenAndDefaultsToShared", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore(t)
+
+		shared := mustPut(t, s, github(tenantA))
+		if shared.CredentialScope != toolprovider.ScopeShared || shared.Scope() != toolprovider.ScopeShared {
+			t.Fatalf("a provider written with no scope = %q, want it recorded as shared", shared.CredentialScope)
+		}
+		person := toolprovider.Provider{
+			Tenant: tenantA, Name: "files", Transport: toolprovider.TransportStdio, Endpoint: "mcp-files",
+			CredentialScope: toolprovider.ScopePerson, CredentialEnv: "FILES_TOKEN", UpdatedBy: "admin",
+		}
+		person = mustPut(t, s, person)
+		if person.CredentialScope != toolprovider.ScopePerson {
+			t.Fatalf("person-scoped provider stored as %q", person.CredentialScope)
+		}
+		got, err := s.GetProvider(ctx, tenantA, "files")
+		if err != nil || !reflect.DeepEqual(got, person) {
+			t.Fatalf("GetProvider = %+v, %v; want %+v", got, err, person)
+		}
+
+		// Moving a provider to per-person credentials is an edit like any
+		// other, and it drops the shared credential with it: a record that
+		// kept one would be one edit away from a fallback.
+		moved := shared
+		moved.CredentialScope = toolprovider.ScopePerson
+		if _, err := s.PutProvider(ctx, moved); !errors.Is(err, toolprovider.ErrInvalid) {
+			t.Fatalf("person scope keeping the shared credential: %v, want ErrInvalid", err)
+		}
+		moved.CredentialRef = ""
+		moved = mustPut(t, s, moved)
+		if moved.Version != 2 || moved.Scope() != toolprovider.ScopePerson || moved.CredentialRef != "" {
+			t.Fatalf("moved to person scope = %+v", moved)
+		}
+		list, err := s.ListProviders(ctx, tenantA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range list {
+			if p.CredentialScope != toolprovider.ScopePerson {
+				t.Errorf("ListProviders: %q has scope %q, want person", p.Name, p.CredentialScope)
+			}
 		}
 	})
 

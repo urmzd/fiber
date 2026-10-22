@@ -70,6 +70,7 @@ type App struct {
 	sinks   *connector.Registry
 	deliver *router.Router
 	rt      *runtime.Runtime
+	exec    runtime.Executor
 	ledger  Ledger
 	queue   dqueue.Queue
 
@@ -153,11 +154,12 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 	if a.tools, err = newToolProviders(ctx, pool, o); err != nil {
 		return fail(err)
 	}
-	// Sessions are opened on first use and kept per provider record version.
-	// A credential reference resolves from this process's environment
-	// ("env:NAME") and never reaches a log or an error.
+	// Sessions are opened on first use and kept per provider record version,
+	// and for a person-scoped provider per person, with that person's own
+	// credential. A credential reference resolves from this process's
+	// environment ("env:NAME") and never reaches a log or an error.
 	dial := mcptools.Dialer(mcptools.WithResolver(mcptools.EnvResolver()), mcptools.WithLogger(a.log))
-	grants := mcptools.NewGrants(a.tools, dial)
+	grants := mcptools.NewGrants(a.tools, dial, mcptools.WithPersonResolver(o.Persons))
 	a.closers = append(a.closers, grants.Close)
 	if err := seedToolProviders(ctx, a.tools, o.Tenant, o.ToolProviders, dial, a.log); err != nil {
 		return fail(err)
@@ -185,9 +187,9 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 
 	// The agent side. A turn runs as a playscape task under the NGAC policy
 	// compiled from the pinned revision's Access grant.
-	exec := o.Executor
-	if exec == nil {
-		if exec, err = a.newExecutor(grants); err != nil {
+	a.exec = o.Executor
+	if a.exec == nil {
+		if a.exec, err = a.newExecutor(grants); err != nil {
 			return fail(err)
 		}
 	}
@@ -216,7 +218,7 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 		rtOpts = append(rtOpts, runtime.WithCompactRequests())
 	}
 	rtOpts = append(rtOpts, o.RuntimeOpts...)
-	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), registry.NewSpecs(a.store), a.broker, exec, rtOpts...); err != nil {
+	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), registry.NewSpecs(a.store), a.broker, a.exec, rtOpts...); err != nil {
 		return fail(fmt.Errorf("fiber: runtime: %w", err))
 	}
 	return a, nil
@@ -472,6 +474,47 @@ func (a *App) Invoke(ctx context.Context, tag envelope.Tag) (runtime.Acceptance,
 		return runtime.Acceptance{}, fmt.Errorf("fiber: register routes: %w", err)
 	}
 	return a.rt.Accept(ctx, tag)
+}
+
+// ToolsFor reports what a run of tag would be granted, without accepting
+// it: the tools the current revision of tag's agent in tag's tenant would
+// show its model, and the grants it would drop, each with its reason. The
+// tools are resolved as a turn of that run would resolve them, for its
+// tenant, its surface and its actor, so a person-scoped MCP grant expands
+// for tag's actor, and an MCP server may be reached to expand a group. No
+// tool is called and no model client is built, so it needs no model
+// credential. The tag is trusted as given, as Invoke trusts it, and needs
+// only Tenant and Agent.
+//
+// It asks the App's sandbox. An executor passed by WithExecutor is asked
+// too if it has a method ToolsFor(context.Context, runtime.Request)
+// (agentrt.Granted, error); otherwise the error is errors.ErrUnsupported.
+func (a *App) ToolsFor(ctx context.Context, tag envelope.Tag) (agentrt.Granted, error) {
+	lister, ok := a.exec.(interface {
+		ToolsFor(context.Context, runtime.Request) (agentrt.Granted, error)
+	})
+	if !ok {
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: the executor cannot report them: %w", tag.Agent, errors.ErrUnsupported)
+	}
+	rev, err := registry.NewSpecs(a.store).Latest(ctx, tag.Tenant, tag.Agent)
+	if err != nil {
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", tag.Agent, err)
+	}
+	req := runtime.Request{
+		RunID:    runtime.RunID(tag.Tenant, tag.ID),
+		Tenant:   tag.Tenant,
+		Attempt:  1,
+		Origin:   tag.Origin,
+		Source:   tag.Source.String(),
+		Text:     tag.Text,
+		Meta:     tag.Meta,
+		Revision: rev,
+	}
+	granted, err := lister.ToolsFor(envelope.WithActor(ctx, tag.Actor), req)
+	if err != nil {
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", tag.Agent, err)
+	}
+	return granted, nil
 }
 
 // Stop asks a run to stop. See runtime.Runtime.Stop for what a nil error does

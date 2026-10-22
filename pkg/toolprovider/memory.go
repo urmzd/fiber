@@ -46,7 +46,7 @@ func (m *Memory) PutProvider(ctx context.Context, p Provider) (Provider, error) 
 	case p.Version != 0 && cur.Version != p.Version:
 		return Provider{}, fmt.Errorf("%w: provider %q is at version %d, not %d", ErrConflict, p.Name, cur.Version, p.Version)
 	}
-	p = p.clone()
+	p = p.stored()
 	p.Version++
 	p.UpdatedAt = m.stamp()
 	m.providers[k] = p

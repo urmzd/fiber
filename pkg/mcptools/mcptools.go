@@ -40,6 +40,19 @@
 // A stdio server inherits only PATH and HOME from this process, not its
 // whole environment, so it cannot read credentials meant for something else.
 //
+// # Whose credential
+//
+// A shared provider (toolprovider.ScopeShared, the default) is reached with
+// its CredentialRef, for everyone. A person-scoped one (ScopePerson) is
+// reached with the credential of one person, and is never opened without it:
+// Connect refuses it with ErrNoPersonCredential unless it is given that
+// person's PersonCredential, and it never reads the record's CredentialRef,
+// which such a record cannot have. Grants finds each person's credential
+// through a PersonResolver, for the actor the run acts for, and keeps a
+// session per person; an admin reviews such a provider with a credential of
+// their own (WithPersonCredential). A person with none gets no tools, never
+// the shared credential and never anyone else's.
+//
 // # The seam with pkg/agentrt
 //
 // agentrt resolves a spec's tool names through its Tools interface,
@@ -61,9 +74,13 @@
 // A spec grants a whole provider as "mcp:<name>" (its read tools) or
 // "mcp:<name>:write" (read and write). Grants expands such a grant against
 // the store, for one tenant, into the members of that tool group, under the
-// grant's class, on a session kept per provider record version. pkg/runtime's
+// grant's class, on a session kept per provider record version, and for a
+// person-scoped provider per person as well. pkg/runtime's
 // WithToolGroupSource takes a *Grants and hands the members to pkg/agentrt
-// as an agentrt.ToolGroup, so this package stays independent of agentrt.
+// as an agentrt.ToolGroup, so this package stays independent of agentrt; the
+// person a turn acts for reaches it on the context (envelope.ActorFrom), and a
+// person with no credential is reported with a note agentrt shows the model
+// (agentrt.ModelNote, which this package satisfies by shape).
 package mcptools
 
 import (
@@ -121,6 +138,7 @@ type config struct {
 	httpClient *http.Client
 	transport  mcp.Transport
 	env        []string
+	person     *PersonCredential
 }
 
 // WithResolver sets how CredentialRef is resolved. Without one, a provider
@@ -141,7 +159,18 @@ func WithEnv(kv ...string) Option { return func(c *config) { c.env = append(c.en
 
 // WithTransport replaces the transport the provider record describes. It is
 // for tests and for embedding a server in process; no credential is applied.
+// A person-scoped provider still needs a person's credential to connect, and
+// its value is still redacted from everything the session returns.
 func WithTransport(t mcp.Transport) Option { return func(c *config) { c.transport = t } }
+
+// WithPersonCredential opens the session with one person's own credential,
+// which a person-scoped provider requires: it is how an admin reviews such a
+// provider's tools (Session.Diff) with a credential of their own. Grants
+// passes each person's for them. It is refused for a shared provider, whose
+// credential is its CredentialRef.
+func WithPersonCredential(cred PersonCredential) Option {
+	return func(c *config) { c.person = &cred }
+}
 
 // Session is a live connection to one provider.
 type Session struct {
@@ -149,9 +178,17 @@ type Session struct {
 	cs       *mcp.ClientSession
 	red      redactor
 	logger   *slog.Logger
+	// person is the credential a person-scoped session was opened with, as
+	// it was given: Grants checks it is the one it asked for.
+	person PersonCredential
 }
 
 // Connect resolves p's credential and opens an MCP session to it.
+//
+// For a person-scoped provider the credential is the person's: the one
+// WithPersonCredential gives, or the one Grants dials that person's session
+// with, through ctx (so a Dial must pass its ctx on). Without one Connect
+// opens nothing and reports ErrNoPersonCredential.
 func Connect(ctx context.Context, p toolprovider.Provider, opts ...Option) (*Session, error) {
 	if err := p.Validate(); err != nil {
 		return nil, fmt.Errorf("mcptools: %w", err)
@@ -160,19 +197,9 @@ func Connect(ctx context.Context, p toolprovider.Provider, opts ...Option) (*Ses
 	for _, o := range opts {
 		o(&c)
 	}
-	var secret Secret
-	if p.CredentialRef != "" && c.transport == nil {
-		if c.resolver == nil {
-			return nil, fmt.Errorf("%w: provider %q names %q and no resolver is configured", ErrCredential, p.Name, p.CredentialRef)
-		}
-		s, err := c.resolver.Resolve(ctx, p.CredentialRef)
-		if err != nil {
-			return nil, fmt.Errorf("%w: provider %q: resolve %q: %w", ErrCredential, p.Name, p.CredentialRef, err)
-		}
-		if s.Empty() {
-			return nil, fmt.Errorf("%w: provider %q: %q resolved to nothing", ErrCredential, p.Name, p.CredentialRef)
-		}
-		secret = s
+	secret, person, err := c.credential(ctx, p)
+	if err != nil {
+		return nil, err
 	}
 	red := redactor{secret: secret}
 	base := c.logger
@@ -181,7 +208,7 @@ func Connect(ctx context.Context, p toolprovider.Provider, opts ...Option) (*Ses
 	}
 	logger := slog.New(redactingHandler{next: base.Handler(), r: red}).With("provider", p.Name)
 
-	s := &Session{provider: p, red: red, logger: logger}
+	s := &Session{provider: p, red: red, logger: logger, person: person}
 	transport := c.transport
 	if transport == nil {
 		transport = buildTransport(p, secret, c)
@@ -194,6 +221,45 @@ func Connect(ctx context.Context, p toolprovider.Provider, opts ...Option) (*Ses
 	s.cs = cs
 	logger.Debug("mcptools: connected", "transport", string(p.Transport), "credential", secret)
 	return s, nil
+}
+
+// credential is the secret a session to p is opened with, and for a
+// person-scoped provider the person's credential it came from.
+func (c config) credential(ctx context.Context, p toolprovider.Provider) (Secret, PersonCredential, error) {
+	if p.Scope() == toolprovider.ScopePerson {
+		// The record's CredentialRef is never read here: Validate refuses
+		// one on a person-scoped provider, and a session opened with it
+		// would be the shared fallback this scope exists to rule out.
+		var cred PersonCredential
+		switch from, ok := personCredentialFrom(ctx); {
+		case c.person != nil:
+			cred = *c.person
+		case ok:
+			cred = from
+		}
+		secret, err := cred.resolve(ctx, c.resolver, p.Name)
+		if err != nil {
+			return Secret{}, PersonCredential{}, err
+		}
+		return secret, cred, nil
+	}
+	if c.person != nil {
+		return Secret{}, PersonCredential{}, fmt.Errorf("%w: provider %q is shared; a person's credential is for a person-scoped provider", ErrCredential, p.Name)
+	}
+	if p.CredentialRef == "" || c.transport != nil {
+		return Secret{}, PersonCredential{}, nil
+	}
+	if c.resolver == nil {
+		return Secret{}, PersonCredential{}, fmt.Errorf("%w: provider %q names %q and no resolver is configured", ErrCredential, p.Name, p.CredentialRef)
+	}
+	s, err := c.resolver.Resolve(ctx, p.CredentialRef)
+	if err != nil {
+		return Secret{}, PersonCredential{}, fmt.Errorf("%w: provider %q: resolve %q: %w", ErrCredential, p.Name, p.CredentialRef, err)
+	}
+	if s.Empty() {
+		return Secret{}, PersonCredential{}, fmt.Errorf("%w: provider %q: %q resolved to nothing", ErrCredential, p.Name, p.CredentialRef)
+	}
+	return s, PersonCredential{}, nil
 }
 
 func buildTransport(p toolprovider.Provider, secret Secret, c config) mcp.Transport {

@@ -29,12 +29,17 @@ import (
 // countingTool is a tool that counts its calls, safely across goroutines.
 type countingTool struct {
 	def saigetypes.ToolDef
+	// person makes it a tool that runs with the credential of the person
+	// the turn acts for (agentrt.PersonScoped).
+	person bool
 
 	mu   sync.Mutex
 	args []map[string]any
 }
 
 func (c *countingTool) Definition() saigetypes.ToolDef { return c.def }
+
+func (c *countingTool) ActsForPerson() bool { return c.person }
 
 func (c *countingTool) Execute(_ context.Context, args map[string]any) (string, error) {
 	c.mu.Lock()
@@ -789,6 +794,56 @@ func TestTheRequesterCannotApproveTheirOwnCallByDefault(t *testing.T) {
 	p.result(t, rt, runID)
 	if n := len(p.deploy.calls()); n != 1 {
 		t.Errorf("deploy ran %d times", n)
+	}
+}
+
+// A call that runs with the credential of the person the run acts for is
+// theirs to change. Another approver may approve it as asked, but not with
+// edited arguments, which would act as that person on something they did
+// not ask for; the person may, under the name the host knows them by.
+func TestOnlyThePersonACallActsAsMayEditIt(t *testing.T) {
+	approve := payload.Answer{Decision: payload.DecisionApprove}
+	staging := payload.Answer{Decision: payload.DecisionApprove, Arguments: json.RawMessage(`{"env":"staging"}`)}
+	for _, tc := range []struct {
+		name   string
+		actor  envelope.Actor
+		by     string
+		answer payload.Answer
+		env    string
+	}{
+		{"another approver, as asked", envelope.Actor{ID: "ana"}, "bob", approve, "prod"},
+		{"the requester, edited", envelope.Actor{ID: "ana"}, "ana", staging, "staging"},
+		{"the person a surface's run acts for, edited", envelope.Actor{ID: "U0ANA", User: "ana"}, "ana", staging, "staging"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newParkingWith(t, newWorld(t), func(s *agentrt.Spec) { s.SelfApproval = true },
+				call("c1", "deploy", map[string]any{"env": "prod"}), agenttest.TextResponse("Done."))
+			p.deploy.person = true
+			rt := p.rt(t)
+			p.workers(t, rt, 2, 0)
+			tg := tag("ops", "evt-1", "ship")
+			tg.Actor = tc.actor
+			runID := p.accept(t, rt, tg)
+			q := p.parkedOn(t, rt, runID)
+			if q.Tool == nil || !q.Tool.ActsForPerson {
+				t.Fatalf("the question does not say the call acts as the person: %+v", q.Tool)
+			}
+			for _, by := range []string{"bob", "carol", ""} {
+				if err := p.answerAs(rt, runID, q.ID, by, by, staging); !errors.Is(err, runtime.ErrNotAllowed) {
+					t.Errorf("%q edited the call: err = %v, want ErrNotAllowed", by, err)
+				}
+			}
+			if _, ok, _ := rt.PendingQuestion(context.Background(), "acme", runID); !ok {
+				t.Fatal("a refused edit resolved the question")
+			}
+			if err := p.answerAs(rt, runID, q.ID, tc.by, tc.by, tc.answer); err != nil {
+				t.Fatalf("%s: %v", tc.by, err)
+			}
+			p.result(t, rt, runID)
+			if calls := p.deploy.calls(); len(calls) != 1 || calls[0]["env"] != tc.env {
+				t.Errorf("deploy ran with %v, want env %s once", calls, tc.env)
+			}
+		})
 	}
 }
 

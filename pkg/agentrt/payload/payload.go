@@ -286,6 +286,13 @@ type QuestionTool struct {
 	// Schema is the tool's parameter schema, as JSON Schema. Edited
 	// arguments must satisfy it.
 	Schema json.RawMessage `json:"schema,omitempty"`
+	// ActsForPerson reports that the call runs with the credential of the
+	// person the run acts for, as a person-scoped tool provider's calls do
+	// (agentrt.PersonScoped). Anyone who may approve it may approve or
+	// deny it as asked, but only that person may approve it with edited
+	// arguments: anyone else's edit would act as them on something they
+	// did not ask for. A host offers no edit to anyone else.
+	ActsForPerson bool `json:"acts_for_person,omitempty"`
 }
 
 // Answer is a person's answer to a Question, or the question's default. It

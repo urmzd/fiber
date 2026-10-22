@@ -189,6 +189,11 @@ type Specs interface {
 //
 // emit is called on the caller's goroutine, in order. Returning an error from it
 // aborts the turn.
+//
+// ctx carries the actor the run acts for (envelope.ActorFrom), read from the
+// run's durable record. An executor that hands the turn to another goroutine
+// or process carries that actor across itself, as Sandbox does, and never
+// takes one from the turn's input.
 type Executor interface {
 	Execute(ctx context.Context, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error)
 }
@@ -959,6 +964,13 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	// its total read from there; see ReportChildUsage.
 	execCtx := context.WithValue(ctx, childUsageKey{}, r.childUsage(in.Tag.Tenant, req.RunID))
 	execCtx = context.WithValue(execCtx, childQuestionKey{}, r.childQuestion(in.Tag.Tenant, req.RunID))
+	// The turn acts for the actor on the run's record, read here and not
+	// from anything the turn produces, so a model cannot name someone else.
+	// It travels in the context rather than in the Request: an executor
+	// that acts for a person (a tool source opening a session with that
+	// person's own credential) reads envelope.ActorFrom, and the Request,
+	// which a sandbox serializes into its task, never carries it.
+	execCtx = envelope.WithActor(execCtx, in.Tag.Actor)
 	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
 		// A call is counted when it is reported, before it is published:
 		// the tokens were spent whether or not the bus takes the event.
