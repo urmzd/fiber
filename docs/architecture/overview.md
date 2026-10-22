@@ -986,3 +986,14 @@ for agents with `Access.Spawn`. The host tool must check the caller's pinned
 spawn grant. Without that option, fiber retains its existing per-target tools.
 The runtime still owns execution, streaming and sandboxing; the host owns its
 input references, output contracts and answer delivery policy.
+
+### Trigger metadata and the host's own keys
+
+A tag's `Meta` reaches the model as "Context from the trigger", one line per
+key in sorted order, ahead of the request. A key that starts with `_`
+(`envelope.PrivateMetaPrefix`) is the host's own: a decision it pinned on the
+run, such as which knowledge sources ground it. Such a key stays on the tag,
+in the ledger and in events, and is never written into anything a model is
+sent: not the turn's request, not the request a stopped turn records, and so
+not the thread journal later turns replay. A tag whose keys are all private
+sends no trigger context.

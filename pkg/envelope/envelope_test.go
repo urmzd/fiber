@@ -272,3 +272,12 @@ func TestARouteReceivesUsageOnlyWhenItAsksForIt(t *testing.T) {
 		}
 	}
 }
+
+// A key is the host's only when it starts with the private prefix.
+func TestAPrivateMetaKeyStartsWithTheUnderscore(t *testing.T) {
+	for key, want := range map[string]bool{"_warp.sources": true, "_": true, "issue": false, "warp._x": false, "": false} {
+		if got := envelope.PrivateMeta(key); got != want {
+			t.Errorf("PrivateMeta(%q) = %v, want %v", key, got, want)
+		}
+	}
+}

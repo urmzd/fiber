@@ -25,6 +25,7 @@ package envelope
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
@@ -238,7 +239,9 @@ type Tag struct {
 	Deliver []Route `json:"deliver,omitempty"`
 
 	// Meta carries trigger-specific context the agent's tools may need: a
-	// pull request number, an issue title, a Jira status.
+	// pull request number, an issue title, a Jira status. Each key is shown
+	// to the model as context from the trigger, except a private one
+	// (PrivateMeta), which only the host reads.
 	Meta map[string]string `json:"meta,omitempty"`
 
 	// Attachments are the files that arrived with the tag, as references
@@ -384,3 +387,12 @@ func (s Subscription) Accepts(e Event) bool {
 	}
 	return s.Filter.Allows(e)
 }
+
+// PrivateMetaPrefix starts a Meta key that belongs to the host, not to the
+// model: a decision the host pinned on the run, such as which sources ground
+// it. It is kept wherever the tag is (the ledger, events, the run's record)
+// and is never written into anything a model is sent.
+const PrivateMetaPrefix = "_"
+
+// PrivateMeta reports whether a Meta key is the host's own (PrivateMetaPrefix).
+func PrivateMeta(key string) bool { return strings.HasPrefix(key, PrivateMetaPrefix) }

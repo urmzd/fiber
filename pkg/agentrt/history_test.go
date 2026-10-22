@@ -240,3 +240,40 @@ func TestAHistoryThatCannotBeRenderedFailsTheTurn(t *testing.T) {
 		}
 	}
 }
+
+// A private meta key is the host's: it is not sent to the model, in the turn
+// or in what the turn records as its request, and a tag whose keys are all
+// private sends no trigger context at all.
+func TestAPrivateMetaKeyIsNeverSentToTheModel(t *testing.T) {
+	t.Parallel()
+
+	model, res := threadRun(t, nil, agentrt.Turn{Text: "why did it fail?", Meta: map[string]string{"issue": "42", "_host.sources": "playbook"}}, 0)
+	last := wireMessages(t, model[0].Messages[len(model[0].Messages)-1:])
+	if bytes.Contains(last, []byte("_host.sources")) || bytes.Contains(last, []byte("playbook")) {
+		t.Errorf("the request message carries a private key: %s", last)
+	}
+	if !bytes.Contains(last, []byte("issue: 42")) {
+		t.Errorf("the request message lost the trigger's context: %s", last)
+	}
+	if strings.Contains(res.Prompt, "playbook") {
+		t.Errorf("Result.Prompt carries a private key: %q", res.Prompt)
+	}
+
+	only, _ := threadRun(t, nil, agentrt.Turn{Text: "why did it fail?", Meta: map[string]string{"_host.sources": "playbook"}}, 0)
+	if last := wireMessages(t, only[0].Messages[len(only[0].Messages)-1:]); bytes.Contains(last, []byte("Context from the trigger")) {
+		t.Errorf("a tag with only private keys sent trigger context: %s", last)
+	}
+
+	for _, c := range []struct {
+		meta map[string]string
+		want string
+	}{
+		{map[string]string{"channel": "ops", "_pinned": "x"}, "Context from the trigger:\n- channel: ops\n\nhi"},
+		{map[string]string{"_pinned": "x"}, "hi"},
+		{nil, "hi"},
+	} {
+		if got := agentrt.RequestText("hi", c.meta); got != c.want {
+			t.Errorf("RequestText(%v) = %q, want %q", c.meta, got, c.want)
+		}
+	}
+}
