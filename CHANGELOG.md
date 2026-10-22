@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.1 (2026-10-22)
+
+### Bug Fixes
+
+- **deps**: anchor v0.5.1, so a stop mid-claim never leases a run to nobody (#41) ([1132e20](https://github.com/urmzd/fiber/commit/1132e207d9528f79623404a26c7e0b4568e385a4))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.22.0...v0.22.1)
+
+
 ## 0.22.0 (2026-10-22)
 
 ### Features
