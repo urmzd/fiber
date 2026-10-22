@@ -31,5 +31,11 @@ it raises nothing. The app's mention is taken out of the text in both cases.
 Anything else raises nothing, so a busy repository wakes no agent on every
 comment, and a bot's comment raises nothing whatever it mentions.
 
+A login in `Bots` names its agent wherever it is mentioned, the app's own
+too. So when `Bots` maps the app's login, its mention is a tag for that agent,
+and `DefaultAgent` is not asked: `@warp what changed?` and `@warp @docs-bot
+summarize` both ask the agent `Bots` maps the app to, since the first agent
+the text names answers.
+
 A host that decides who answers once a tag reaches it, such as warp, gives a
 name of its own as `DefaultAgent` and resolves it before the run is accepted.

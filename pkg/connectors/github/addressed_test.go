@@ -166,3 +166,23 @@ func TestALoginOrDefaultThatCannotBeUsedIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A login in Bots names its agent wherever it is mentioned, the app's own
+// too. So when Bots maps the app's login, its mention is a tag for that agent
+// and DefaultAgent is not asked, also when another agent is named after it:
+// the first agent the text names answers.
+func TestTheAppsLoginInBotsIsATagForItsAgent(t *testing.T) {
+	c, tags := start(t, github.Config{
+		Agents: mention.NewNames("docs-bot"), Bots: map[string]string{"fiber[bot]": "ops"},
+		Login: "fiber[bot]", DefaultAgent: "triage",
+	})
+	for delivery, body := range map[string]string{
+		"d-alone":  "@fiber what changed?",
+		"d-before": "@fiber @docs-bot summarize",
+	} {
+		serve(t, c, "issue_comment", delivery, comment(body))
+		if tag := receive(t, tags); tag.Agent != "ops" || strings.Contains(tag.Text, "@fiber") {
+			t.Fatalf("%q raised %q with %q, want ops without the app's mention", body, tag.Agent, tag.Text)
+		}
+	}
+}

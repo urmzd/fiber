@@ -110,7 +110,8 @@ type Config struct {
 	// "warp[bot]", or "warp". A comment that mentions it is addressed to the
 	// app, the way Slack delivers only messages that mention the app, and the
 	// mention is taken out of the text the agent reads. Empty means nothing is
-	// addressed to the app alone.
+	// addressed to the app alone. When Bots maps the app's login, its mention
+	// names that agent instead, as any login in Bots does.
 	Login string
 
 	// DefaultAgent answers a comment addressed to the app (Login) that names
