@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.24.0 (2026-10-22)
+
+### Features
+
+- **envelope**: a meta key starting with _ is the host's and is never sent to the model (#43) ([20d3a27](https://github.com/urmzd/fiber/commit/20d3a27bd75070773e9d665b34e8d93f1ff7dd76))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.23.0...v0.24.0)
+
+
 ## 0.23.0 (2026-10-22)
 
 ### Features
