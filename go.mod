@@ -6,8 +6,8 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/redis/go-redis/v9 v9.21.0
-	github.com/urmzd/anchor v0.4.0
-	github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261021192137-078fd82554ea
+	github.com/urmzd/anchor v0.5.1
+	github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261022071835-c4ab25200213
 	github.com/urmzd/playscape v0.7.0
 	github.com/urmzd/saige v0.41.0
 )
