@@ -151,7 +151,9 @@ type subject struct {
 // The events that raise tags are the ones where a human named an agent
 // (issue_comment, issues, pull_request opened, a review or review comment) and
 // the one where GitHub names it structurally (pull_request review_requested).
-// Explicit repository label mappings also raise tags on labeled events.
+// The same human events raise a tag for DefaultAgent when they mention the app
+// and name no agent (asked). Explicit repository label mappings also raise
+// tags on labeled events.
 // Everything else, including unconfigured label changes, is acknowledged and
 // dropped, because a mesh that ran an agent on every repository event would be a
 // denial of service with a bill attached.
@@ -189,7 +191,7 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		}
 		subj = subjectOf(h)
 		commentID = h.Comment.ID
-		if agent, text, ok = mention.Find(h.Comment.Body, c.agents()); !ok {
+		if agent, text, ok = c.asked(h.Comment.Body); !ok {
 			return envelope.Tag{}, false
 		}
 
@@ -199,7 +201,7 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		}
 		subj = subjectOf(h)
 		commentID = h.Comment.ID
-		if agent, text, ok = mention.Find(h.Comment.Body, c.agents()); !ok {
+		if agent, text, ok = c.asked(h.Comment.Body); !ok {
 			return envelope.Tag{}, false
 		}
 
@@ -209,7 +211,7 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		}
 		subj = subjectOf(h)
 		commentID = h.Review.ID
-		if agent, text, ok = mention.Find(h.Review.Body, c.agents()); !ok {
+		if agent, text, ok = c.asked(h.Review.Body); !ok {
 			return envelope.Tag{}, false
 		}
 
@@ -222,7 +224,7 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		case "labeled":
 			agent, text, ok = c.automation(h)
 		case "opened":
-			agent, text, ok = mention.Find(h.Issue.Title+"\n\n"+h.Issue.Body, c.agents())
+			agent, text, ok = c.asked(h.Issue.Title + "\n\n" + h.Issue.Body)
 		}
 		if !ok {
 			return envelope.Tag{}, false
@@ -263,7 +265,7 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 			text = strings.TrimSpace(subj.title + "\n\n" + subj.body)
 			text = mention.Strip(text, agent)
 		case "opened", "ready_for_review":
-			if agent, text, ok = mention.Find(subj.title+"\n\n"+subj.body, c.agents()); !ok {
+			if agent, text, ok = c.asked(subj.title + "\n\n" + subj.body); !ok {
 				return envelope.Tag{}, false
 			}
 		default:
@@ -324,6 +326,25 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 		tag.Meta["github_review_root_id"] = strconv.FormatInt(root, 10)
 	}
 	return tag, true
+}
+
+// asked is who a human's text asks: the first agent it names, or else
+// DefaultAgent when it mentions the app itself (Config.Login). Text that does
+// neither asks no one. The app's own mention is taken out of the text either
+// way, so "@warp @docs-bot summarize" asks docs-bot to "summarize".
+func (c *Connector) asked(text string) (agent, stripped string, ok bool) {
+	agent, stripped, ok = mention.Find(text, c.agents())
+	toApp := false
+	if c.app != nil {
+		_, stripped, toApp = mention.Find(stripped, c.app)
+	}
+	switch {
+	case ok:
+		return agent, stripped, true
+	case toApp && c.cfg.DefaultAgent != "":
+		return c.cfg.DefaultAgent, stripped, true
+	}
+	return "", "", false
 }
 
 func (c *Connector) automation(h hook) (string, string, bool) {

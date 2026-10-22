@@ -43,6 +43,9 @@ type GitHub struct {
 	ReadRepositories     []string
 	Bots                 map[string]string
 	Checks               bool
+	// Login is the app's own login. A comment that mentions it and names no
+	// agent is answered by DefaultAgent, and with none it raises nothing.
+	Login, DefaultAgent string
 }
 
 // Jira configures the built-in Jira connector (WithJira). Sites (short key

@@ -15,6 +15,11 @@
 // a review from it — the case with no message at all, where the pull request
 // itself is the request.
 //
+// In the same five, a human may address the app instead (Config.Login) and
+// name no agent: "@warp what changed?". Config.DefaultAgent answers that, and
+// with none it raises nothing. Text that names no agent and does not mention
+// the app raises nothing at all.
+//
 // Application automation callbacks can raise tags for labels and new commits.
 // Everything else is acknowledged and dropped, and an event whose sender is a Bot
 // is dropped except for a labeled PR's synchronize event: this connector's own comment arrives back as an
@@ -101,6 +106,22 @@ type Config struct {
 	// every time one human tagged another.
 	Agents mention.Set
 
+	// Login is the app's own login, which it comments as and is mentioned by:
+	// "warp[bot]", or "warp". A comment that mentions it is addressed to the
+	// app, the way Slack delivers only messages that mention the app, and the
+	// mention is taken out of the text the agent reads. Empty means nothing is
+	// addressed to the app alone. When Bots maps the app's login, its mention
+	// names that agent instead, as any login in Bots does.
+	Login string
+
+	// DefaultAgent answers a comment addressed to the app (Login) that names
+	// no agent. Empty means such a comment raises no tag. A host that decides
+	// who answers once the tag reaches it gives a name it resolves before the
+	// run is accepted. A comment that names no agent and does not mention the
+	// app raises nothing either way, so a busy repository wakes no agent on
+	// every comment.
+	DefaultAgent string
+
 	// Automation chooses the agent for labeled/synchronize events. Nil is off.
 	// It runs only after signature and repository validation.
 	Automation func(Hook) (agent, text string, ok bool)
@@ -143,8 +164,10 @@ type Config struct {
 
 // Connector is the GitHub peer.
 type Connector struct {
-	cfg       Config
-	bots      map[string]string
+	cfg  Config
+	bots map[string]string
+	// app is the app's own mention (Config.Login), nil when it has none.
+	app       mention.Set
 	owners    map[string]bool
 	gate      inbound.Gate
 	pipe      inbound.Pipe
@@ -189,6 +212,17 @@ func New(cfg Config) (*Connector, error) {
 		// A GitHub App's login carries a "[bot]" suffix in payloads but not in a
 		// mention, so both spellings resolve without the operator listing each.
 		c.bots[strings.ToLower(strings.TrimSuffix(login, "[bot]"))] = agent
+	}
+	if cfg.Login != "" {
+		// The app is mentioned without the "[bot]" suffix its payloads carry.
+		handle := strings.TrimSuffix(cfg.Login, "[bot]")
+		if !mention.Valid(handle) || address.ValidWorkspace(handle) != nil {
+			return nil, fmt.Errorf("github: login %q is not a GitHub login", cfg.Login)
+		}
+		c.app = mention.NewNames(handle)
+	}
+	if cfg.DefaultAgent != "" && !mention.Valid(cfg.DefaultAgent) {
+		return nil, fmt.Errorf("github: default agent %q is not a usable agent name", cfg.DefaultAgent)
 	}
 	if len(cfg.Owners) > 0 {
 		c.owners = make(map[string]bool, len(cfg.Owners))

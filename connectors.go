@@ -131,6 +131,8 @@ func newGitHub(cfg options, agents mention.Set, files connectors.Files) (connect
 		Agents:           agents,
 		Checks:           gc.Checks,
 		ReadRepositories: gc.ReadRepositories,
+		Login:            gc.Login,
+		DefaultAgent:     gc.DefaultAgent,
 		Tenant:           cfg.Tenant,
 		Files:            files,
 	})
