@@ -17,5 +17,19 @@ Evidence-backed Markdown presentation lives in warp's `go/github` package.
 For the product setup use `WARP_GITHUB_*` with `warp serve`.
 `fiber.WithGitHub` takes only transport configuration, as a `fiber.GitHub`
 value: the token, the webhook secret, owners, bot mappings, read
-repositories and whether to publish checks. Auto labels, guides and
-mutation grants are warp's.
+repositories, whether to publish checks, and the app's login with the agent
+that answers it. Auto labels, guides and mutation grants are warp's.
+
+## Who a comment asks
+
+A comment, a review, a review comment, or a new issue or pull request that
+names an agent raises a tag for the first agent it names. One that names no
+agent but mentions the app's own login (`Config.Login`, such as `warp[bot]`,
+mentioned as `@warp`) is addressed to the app, the way Slack delivers only
+messages that mention the app. `Config.DefaultAgent` answers it, and with none
+it raises nothing. The app's mention is taken out of the text in both cases.
+Anything else raises nothing, so a busy repository wakes no agent on every
+comment, and a bot's comment raises nothing whatever it mentions.
+
+A host that decides who answers once a tag reaches it, such as warp, gives a
+name of its own as `DefaultAgent` and resolves it before the run is accepted.

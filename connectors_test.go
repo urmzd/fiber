@@ -31,3 +31,22 @@ func TestEveryConnectorThatCanListAThreadIsWiredAsAReconciler(t *testing.T) {
 		t.Fatalf("reconcilers for %q, want %q", got, want)
 	}
 }
+
+// WithGitHub hands the connector the login the app is mentioned by and the
+// agent that answers it, so a login the connector cannot use fails New.
+func TestWithGitHubHandsTheConnectorItsLoginAndDefault(t *testing.T) {
+	build := func(g GitHub) error {
+		g.Token, g.WebhookSecret = "ghs_test", "secret"
+		_, err := buildConnectors(apply([]Option{WithTenant("acme"), WithGitHub(g)}), registry.NewMemory(), blob.NewMemory())
+		return err
+	}
+	if err := build(GitHub{Login: "fiber[bot]", DefaultAgent: "triage"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := build(GitHub{Login: "fiber bot"}); err == nil {
+		t.Fatal("a login with a space was accepted")
+	}
+	if err := build(GitHub{Login: "fiber", DefaultAgent: "docs bot"}); err == nil {
+		t.Fatal("a default that is no agent name was accepted")
+	}
+}
