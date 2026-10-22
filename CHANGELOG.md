@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.23.0 (2026-10-22)
+
+### Features
+
+- **github**: raise a comment addressed to the app for its default agent (#42) ([804e2f5](https://github.com/urmzd/fiber/commit/804e2f5909a21fd7e7c88bef5070fbc33ee7352a))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.22.1...v0.23.0)
+
+
 ## 0.22.1 (2026-10-22)
 
 ### Bug Fixes
