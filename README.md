@@ -54,7 +54,7 @@ file and no environment variable. `fiber.New` composes the packages under
 not passed is the in-memory implementation. One small command, `fiber run`,
 runs a spec once on that in-memory composition so you can check it locally
 ([Validate a spec locally](#validate-a-spec-locally)).
-[warp](https://github.com/urmzd/warp) is the platform built on it.
+[Humagen](https://github.com/urmzd/humagen) is the platform built on it.
 
 **Where a tag is raised and where its answer lands are independent.** A GitHub
 request can stream into Slack while a webhook receives only its completion
@@ -301,15 +301,19 @@ API reference: [pkg.go.dev/github.com/urmzd/fiber](https://pkg.go.dev/github.com
 
 ## Where this sits
 
-fiber is layer four of five: **warp > fiber > saige > playscape > anchor**.
+fiber is layer four of five: **Humagen > fiber > saige > playscape > anchor**.
 It builds on [saige](https://github.com/urmzd/saige)'s agent loop,
 [playscape](https://github.com/urmzd/playscape)'s sandbox and
 [anchor](https://github.com/urmzd/anchor)'s durability, and adds addressing,
 distribution, connectors and the control plane.
-[warp](https://github.com/urmzd/warp) is the only thing that configures or
+[Humagen](https://github.com/urmzd/humagen) is the only thing that configures or
 serves it: fiber is composed in Go and reads no configuration of its own. See
-[the ecosystem guide](https://github.com/urmzd/warp/blob/main/docs/ecosystem.md)
+[the ecosystem guide](https://github.com/urmzd/humagen/blob/main/docs/ecosystem.md)
 for who owns what and the limitations that span the stack.
+
+For existing Warp deployments of [Humagen](https://github.com/urmzd/humagen),
+see the [upgrade guide](https://github.com/urmzd/humagen/blob/main/docs/upgrading-from-warp.md).
+
 
 ## Architecture
 
@@ -330,7 +334,7 @@ authorization, and replay guarantees.
 
 Every choice is an option to `fiber.New`. Configuration from files or the
 environment belongs to the program composing fiber
-([warp](https://github.com/urmzd/warp) is one), which turns it into these.
+([Humagen](https://github.com/urmzd/humagen) is one), which turns it into these.
 
 | Option | Chooses | Default |
 |--------|---------|---------|

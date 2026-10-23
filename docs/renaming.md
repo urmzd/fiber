@@ -1,11 +1,12 @@
 # Ecosystem naming
 
-The rename is complete. Every component uses its current name in code,
-docs and persisted identifiers.
+Humagen is the platform formerly named Warp. The library names are unchanged.
+See the [Humagen upgrade guide](https://github.com/urmzd/humagen/blob/main/docs/upgrading-from-warp.md)
+for accepted old names and identifiers kept for stored data.
 
 | Previous | Current | Responsibility |
 |----------|---------|----------------|
-| Collegium and Vultus | Warp | Shared human-and-agent workspace, API and presentation |
+| Collegium, Vultus and Warp | [Humagen](https://github.com/urmzd/humagen) | Shared human-and-agent workspace, API and presentation |
 | Mandatum | Fiber | Agent library: bus, connectors, routing, durable runs |
 | Legatus | Playscape | Governed execution environments and workspace isolation |
 | Duraturo | Anchor | Durable execution, replay and recovery |

@@ -19,7 +19,7 @@
 // which calls no model, so a spec can be checked with no key at all.
 //
 // It is for local test, not for serving: a program that serves agents
-// composes fiber.New itself (warp is one), with its own backends,
+// composes fiber.New itself (Humagen is one), with its own backends,
 // connectors and credentials.
 package main
 

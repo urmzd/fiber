@@ -331,7 +331,7 @@ func (c *Connector) tagFrom(event, delivery string, h hook) (envelope.Tag, bool)
 // asked is who a human's text asks: the first agent it names, or else
 // DefaultAgent when it mentions the app itself (Config.Login). Text that does
 // neither asks no one. The app's own mention is taken out of the text either
-// way, so "@warp @docs-bot summarize" asks docs-bot to "summarize".
+// way, so "@humagen @docs-bot summarize" asks docs-bot to "summarize".
 func (c *Connector) asked(text string) (agent, stripped string, ok bool) {
 	agent, stripped, ok = mention.Find(text, c.agents())
 	toApp := false
