@@ -805,7 +805,7 @@ fiber serves nothing. A program composing fiber calls `App.Invoke`,
 `App.Bus().Subscribe`, and mounts `App.WebhookHandler()` (or the handlers in
 `App.Webhooks()`) wherever it serves HTTP; each webhook connector verifies its
 own signature. Authentication, and stamping the tenant and actor on what it
-accepts, belong to that program. warp is one.
+accepts, belong to that program. Humagen is one.
 
 ## Security boundaries
 

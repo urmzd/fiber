@@ -24,7 +24,7 @@
 //
 // Code-shaped extensions are options too: a model provider, a tool source, a
 // connector, an MCP tool provider. Configuration from files or the
-// environment belongs to the program embedding fiber (warp is one), which
+// environment belongs to the program embedding fiber (Humagen is one), which
 // turns it into these options.
 //
 // # Where it sits

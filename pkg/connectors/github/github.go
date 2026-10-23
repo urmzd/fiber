@@ -16,7 +16,7 @@
 // itself is the request.
 //
 // In the same five, a human may address the app instead (Config.Login) and
-// name no agent: "@warp what changed?". Config.DefaultAgent answers that, and
+// name no agent: "@humagen what changed?". Config.DefaultAgent answers that, and
 // with none it raises nothing. Text that names no agent and does not mention
 // the app raises nothing at all.
 //
@@ -107,7 +107,7 @@ type Config struct {
 	Agents mention.Set
 
 	// Login is the app's own login, which it comments as and is mentioned by:
-	// "warp[bot]", or "warp". A comment that mentions it is addressed to the
+	// "humagen[bot]", or "humagen". A comment that mentions it is addressed to the
 	// app, the way Slack delivers only messages that mention the app, and the
 	// mention is taken out of the text the agent reads. Empty means nothing is
 	// addressed to the app alone. When Bots maps the app's login, its mention

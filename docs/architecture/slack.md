@@ -12,11 +12,11 @@ is acknowledged without invoking application policy or raising a tag.
 
 Session lifecycle policy, command discovery, refusal logging, app manifests,
 and installation configuration live in
-[warp](https://github.com/urmzd/warp/blob/main/docs/slack.md).
-Use `WARP_SLACK_*` with `warp serve` for that experience.
+[Humagen](https://github.com/urmzd/humagen/blob/main/docs/slack.md).
+Use `HUMAGEN_SLACK_*` with `humagen serve` for that experience.
 `fiber.WithSlack` supports the token, signing secret, team,
 bot mapping and default agent; it does not enable product session or command
-policy; that is warp's.
+policy; that is Humagen's.
 
 ## Stopping a session
 

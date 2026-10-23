@@ -4,7 +4,7 @@ Agent library and low-latency pub/sub bus. Tag an agent from anywhere, stream
 its events to anyone, deliver them anywhere. Go module
 `github.com/urmzd/fiber`. It is a library first, composed in Go: no
 service, no configuration files, no environment variables. The root package
-`fiber` is the composition root (`fiber.New(ctx, ...Option)`); warp is the
+`fiber` is the composition root (`fiber.New(ctx, ...Option)`); Humagen is the
 platform built on it, owns all configuration, and imports only `pkg/`. The
 module's one command, `cmd/fiber` (`fiber run`), is a program on the library
 for validating a spec locally, not a way to serve one.
@@ -153,7 +153,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 - **Sinks must be idempotent.** Delivery is at-least-once. Render one message
   per run and edit it; never post per delta.
 - **Tenant is never read from a request body.** fiber has no transport; a
-  program that accepts tags from callers (warp) sets the tenant from the
+  program that accepts tags from callers (Humagen) sets the tenant from the
   caller's credential and overwrites whatever the client sent.
   `App.Invoke` and `App.ToolsFor` trust the tag they are handed.
 - **Neither is the actor.** A tag's actor is the credential's subject unless

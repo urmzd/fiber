@@ -63,7 +63,7 @@ spawn gating, and prohibition override. Default is always deny.
 Tenant is an authorization scope, and fiber authenticates nothing: it has no
 transport and no notion of a caller. `App.Invoke`, `Stop`, `Answer` and
 `Status` trust the tenant and actor they are handed. A program that accepts
-tags or requests from callers (warp is one) sets `Tag.Tenant`, `Tag.Actor`
+tags or requests from callers (Humagen is one) sets `Tag.Tenant`, `Tag.Actor`
 and `Actor.User` from its own credential and overwrites whatever a client
 sent; that check lives in that program, not here.
 
