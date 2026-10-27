@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.24.1 (2026-10-27)
+
+### Performance
+
+- **bus**: wake only the Postgres readers a publish concerns (#45) ([b6ec42a](https://github.com/urmzd/fiber/commit/b6ec42aefc91e4d9775ebaf69aaf59fea228fa7f))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.24.0...v0.24.1)
+
+
 ## 0.24.0 (2026-10-22)
 
 ### Features
