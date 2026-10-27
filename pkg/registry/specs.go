@@ -56,6 +56,7 @@ func toRuntimeRevision(r agentspec.Revision) agentrt.Revision {
 		Approvers:    r.Spec.Approvers,
 		SelfApproval: r.Spec.SelfApproval,
 		Answerers:    r.Spec.Answerers,
+		TaggedOnly:   r.Spec.TaggedOnly,
 		FallbackOn:   r.Spec.FallbackOn,
 		Access: agentrt.Access{
 			Spawn:          r.Spec.Access.Spawn,

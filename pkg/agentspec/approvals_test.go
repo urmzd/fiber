@@ -87,3 +87,21 @@ func TestWhoMayAnswerIsPartOfTheRevision(t *testing.T) {
 		t.Errorf("answerers without approvals are for ask_person: %v", err)
 	}
 }
+
+// Tagged-only is part of what a revision is: it is hashed and survives
+// Normalize when set, and a spec without it hashes as before.
+func TestTaggedOnlyIsPartOfTheRevision(t *testing.T) {
+	t.Parallel()
+	base := valid()
+	s := base
+	s.TaggedOnly = true
+	if s.Hash() == base.Hash() {
+		t.Error("a tagged-only spec hashes like one without it")
+	}
+	if !s.Normalize().TaggedOnly {
+		t.Error("Normalize dropped tagged_only")
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("tagged-only: %v", err)
+	}
+}

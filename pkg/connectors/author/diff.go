@@ -92,6 +92,9 @@ func renderSpec(s agentspec.AgentSpec) []string {
 	for _, t := range s.Answerers {
 		lines = append(lines, "answerer: "+t)
 	}
+	if s.TaggedOnly {
+		lines = append(lines, "tagged_only: true")
+	}
 	for _, t := range s.Access.Spawn {
 		lines = append(lines, "spawn: "+t)
 	}

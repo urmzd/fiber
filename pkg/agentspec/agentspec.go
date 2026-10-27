@@ -209,6 +209,11 @@ type AgentSpec struct {
 	// a reply the agent asks with ask_person, named as Approvers are. Empty
 	// lets anyone in the tenant answer, the requester included.
 	Answerers []string `json:"answerers,omitempty"`
+	// TaggedOnly keeps the agent out of messages that do not name it: a
+	// host that lets agents decide for themselves whether to take an
+	// untagged message never asks this one, so it runs only when a person,
+	// a default or another agent names it. Off by default.
+	TaggedOnly bool `json:"tagged_only,omitempty"`
 }
 
 // ModelRef names one model behind one provider: a fallback for the agent's
@@ -361,6 +366,7 @@ func (s AgentSpec) Normalize() AgentSpec {
 		Approvers:    normalizeSet(s.Approvers, false),
 		SelfApproval: s.SelfApproval,
 		Answerers:    normalizeSet(s.Answerers, false),
+		TaggedOnly:   s.TaggedOnly,
 		Access: Access{
 			Spawn:          normalizeSet(s.Access.Spawn, true),
 			WorkspaceAreas: normalizeSet(s.Access.WorkspaceAreas, false),
