@@ -107,9 +107,9 @@ const listeningPollFactor = 20
 //
 // Readers are one goroutine per subscription, like Redis's. Each scans the
 // events table by id, from the start of what is retained, filtering on the
-// subscription's topic and From, then waits for a NOTIFY (one LISTEN
-// connection per bus, held while anything is subscribed) or the poll
-// interval. A reader holds a pooled connection only while it queries. A full
+// subscription's topic and From, then waits for a NOTIFY on its own topic
+// (one LISTEN connection per bus, held while anything is subscribed, which
+// wakes only the readers a publish concerns) or the poll interval. A reader holds a pooled connection only while it queries. A full
 // buffer stops the reader, which is backpressure onto the table: like Redis,
 // a consumer slow enough to fall behind retention loses events to the trim
 // rather than being terminated.
@@ -231,7 +231,7 @@ func (p *Postgres) Subscribe(ctx context.Context, sub envelope.Subscription) (St
 		closed: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
-	wake, unsubscribe := p.hub.subscribe()
+	wake, unsubscribe := p.hub.subscribe(sub.Topic.String())
 	go s.read(readCtx, wake, unsubscribe)
 	if done := ctx.Done(); done != nil {
 		go func() {
@@ -424,8 +424,11 @@ func decodeRow(name string, seq int64, body string) (envelope.Event, error) {
 }
 
 // pgHub multiplexes one LISTEN connection across every live reader of a bus.
-// It listens only while something is subscribed, and every (re)connect wakes
-// every reader, so a notification lost in a gap costs one extra query.
+// It listens only while something is subscribed. A notification's payload is
+// the run topic that was published to, so it wakes only the readers whose
+// subscription covers that run: the run's own, its agent's, and the root's.
+// Every (re)connect wakes every reader, so a notification lost in a gap costs
+// one extra query.
 type pgHub struct {
 	pool  *pgxpool.Pool
 	retry time.Duration
@@ -433,18 +436,25 @@ type pgHub struct {
 	listening atomic.Bool
 
 	mu     sync.Mutex
-	subs   map[chan struct{}]struct{}
+	subs   map[string]map[chan struct{}]struct{}
+	count  int
 	cancel context.CancelFunc
 }
 
-func (h *pgHub) subscribe() (<-chan struct{}, func()) {
+// subscribe registers a reader under key, the subscription's topic as a
+// string, and returns its wake channel and the function that removes it.
+func (h *pgHub) subscribe(key string) (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	h.mu.Lock()
 	if h.subs == nil {
-		h.subs = map[chan struct{}]struct{}{}
+		h.subs = map[string]map[chan struct{}]struct{}{}
 	}
-	h.subs[ch] = struct{}{}
-	if len(h.subs) == 1 {
+	if h.subs[key] == nil {
+		h.subs[key] = map[chan struct{}]struct{}{}
+	}
+	h.subs[key][ch] = struct{}{}
+	h.count++
+	if h.count == 1 {
 		ctx, cancel := context.WithCancel(context.Background())
 		h.cancel = cancel
 		go h.listen(ctx)
@@ -456,8 +466,12 @@ func (h *pgHub) subscribe() (<-chan struct{}, func()) {
 		once.Do(func() {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			delete(h.subs, ch)
-			if len(h.subs) == 0 && h.cancel != nil {
+			delete(h.subs[key], ch)
+			if len(h.subs[key]) == 0 {
+				delete(h.subs, key)
+			}
+			h.count--
+			if h.count == 0 && h.cancel != nil {
 				h.cancel()
 				h.cancel = nil
 			}
@@ -465,14 +479,51 @@ func (h *pgHub) subscribe() (<-chan struct{}, func()) {
 	}
 }
 
+// wakeKeys returns the subscription keys a publish to payload concerns. A
+// payload that does not parse wakes everyone: correctness never rests on
+// the payload, only the number of queries does.
+func wakeKeys(payload string) []string {
+	t, err := topic.Parse(payload)
+	if err != nil || t.RunID() == "" {
+		return nil
+	}
+	keys := []string{t.String(), topic.All().String()}
+	if a, err := topic.Agent(t.Name()); err == nil {
+		keys = append(keys, a.String())
+	}
+	return keys
+}
+
+// wake signals the readers a publish to payload concerns.
+func (h *pgHub) wake(payload string) {
+	keys := wakeKeys(payload)
+	if keys == nil {
+		h.wakeAll()
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, k := range keys {
+		for ch := range h.subs[k] {
+			signal(ch)
+		}
+	}
+}
+
 func (h *pgHub) wakeAll() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for ch := range h.subs {
-		select {
-		case ch <- struct{}{}:
-		default:
+	for _, set := range h.subs {
+		for ch := range set {
+			signal(ch)
 		}
+	}
+}
+
+func signal(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
 	}
 }
 
@@ -506,9 +557,10 @@ func (h *pgHub) session(ctx context.Context) {
 	h.listening.Store(true)
 	h.wakeAll()
 	for {
-		if _, err := conn.WaitForNotification(ctx); err != nil {
+		n, err := conn.WaitForNotification(ctx)
+		if err != nil {
 			return
 		}
-		h.wakeAll()
+		h.wake(n.Payload)
 	}
 }
