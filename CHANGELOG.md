@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.25.0 (2026-10-27)
+
+### Features
+
+- **agentspec**: add tagged_only so hosts can keep an agent out of untagged messages (#46) ([eb7a9db](https://github.com/urmzd/fiber/commit/eb7a9db3c56f7ab6b1b3c34424a8dbe3b03685f9))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.24.1...v0.25.0)
+
+
 ## 0.24.1 (2026-10-27)
 
 ### Performance
