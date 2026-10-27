@@ -3,6 +3,8 @@
   <p align="center">
     Define agents, run them durably, and stream answers across your tools.
     <br /><br />
+    <a href="#installation">Install</a>
+    &middot;
     <a href="https://github.com/urmzd/fiber/issues">Report Bug</a>
     &middot;
     <a href="https://pkg.go.dev/github.com/urmzd/fiber">Go Docs</a>
@@ -10,8 +12,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/urmzd/fiber/releases"><img src="https://img.shields.io/github/v/release/urmzd/fiber" alt="Release"></a>
-  &nbsp;
   <a href="https://github.com/urmzd/fiber/actions/workflows/ci.yml"><img src="https://github.com/urmzd/fiber/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   &nbsp;
   <a href="https://pkg.go.dev/github.com/urmzd/fiber"><img src="https://pkg.go.dev/badge/github.com/urmzd/fiber.svg" alt="Go Reference"></a>
@@ -24,53 +24,41 @@
 </p>
 <p align="center"><em>Real output from the offline example. The model and destination services are simulated.</em></p>
 
-> ## Status
->
-> **fiber is v0 alpha software. It is pre-1.0 and not recommended for
-> production.**
->
-> Interfaces are still moving and may change between minor versions, and a minor
-> release may require code changes on your side.
->
-> What that means concretely today:
->
-> - **Works and is tested.** The in-process composition (`fiber.New`) on the
->   in-memory backends, the topic and delivery model, durable runs with
->   replay, and the Slack, GitHub, Jira, cron and webhook connectors.
-> - **New and lightly exercised.** The Postgres backends for every store and
->   for the bus, the knowledge layer, the built-in `author` agent, and history
->   compaction. Each backend passes the same conformance suite as its
->   in-memory counterpart in CI's integration job; none of it has seen
->   production load.
->
-> See [Limitations](#limitations) for the full list.
-
 fiber is a Go library for agents and a low-latency pub/sub bus. Define an agent
 with a spec, tag it from Slack, GitHub, Jira or a schedule, and its events
 stream to any subscriber while being delivered to any destination you name.
-It is a library you compose in Go: there is no service, no configuration
-file and no environment variable. `fiber.New` composes the packages under
-`pkg/`, every backend is a constructed value passed as an option, and anything
-not passed is the in-memory implementation. One small command, `fiber run`,
-runs a spec once on that in-memory composition so you can check it locally
-([Validate a spec locally](#validate-a-spec-locally)).
-[Humagen](https://github.com/urmzd/humagen) is the platform built on it.
+You compose it in Go: there is no service, no configuration file and no
+environment variable. Every backend is a value passed to `fiber.New`, and
+anything you do not pass is the in-memory implementation.
 
 **Where a tag is raised and where its answer lands are independent.** A GitHub
 request can stream into Slack while a webhook receives only its completion
 event. Each run pins an agent revision, so retries use the same definition.
 
+## Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Examples](#examples)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [API](#api)
+- [Development](#development)
+- [Documentation](#documentation)
+- [License](#license)
+
 ## Features
 
-- **Agents are documents.** Create one by submitting a spec. No redeploy, no code, no restart.
-- **Subscribe once.** `agent:docs-bot` receives current and future runs of that agent through one topic.
-- **Route by event.** Send one run to multiple destinations; each chooses text, citations, lifecycle events, or all of them.
-- **Connectors act, not just talk.** The `Actor` face contributes native verbs (transition a Jira ticket, request a review) as agent tools, sandboxed by NGAC, each emitting an auditable `action.taken` event.
-- **Backends are values.** `fiber.WithPostgres(pool)` puts the registry, run ledger and queue, knowledge, thread journals and tool providers on one pool; `fiber.WithBus` takes the in-memory, Redis Streams or Postgres bus. Anything not given is memory, which is a complete implementation, not a stub.
-- **Revisions are pinned per run.** A run accepted under revision 6 executes as revision 6 forever, even after a revise, because replay demands it.
+- **Agents are documents.** Create one by submitting a spec. No redeploy, no code, no restart. A run accepted under revision 6 executes as revision 6 forever, even after a revise.
+- **Subscribe once, route by event.** `agent:docs-bot` receives every current and future run of that agent. Each run goes to multiple destinations, and each picks text, citations, lifecycle events, or all of them.
+- **Connectors act, not just talk.** Connectors contribute native verbs (transition a Jira ticket, request a review) as sandboxed agent tools, each emitting an auditable `action.taken` event.
+- **Backends are values.** `fiber.WithPostgres(pool)` puts every store on one pool; `fiber.WithBus` takes the in-memory, Redis Streams or Postgres bus. Memory is a complete implementation, not a stub.
 - **Citations are first-class events**, carrying the exact quoted source and resolvable provenance.
-- **Every run reports what it spent.** Each model call is a `usage.call` event (tokens, cache share, model, context window, and cost where saige's price catalog has the model), and the run's total, delegations included and each call counted once, is on its terminal event and `App.Status`.
-- **A run can wait for a person.** A tool listed in a spec's `approvals`, or the built-in `ask_person` tool, parks the run on a question (approve or deny a call, pick an option, or reply). The run frees its worker, survives restarts, publishes the question on `lifecycle.parked`, and resumes with the first answer (`App.Answer`). An unanswered question takes its default when it expires.
+- **Every run reports what it spent.** Each model call is a `usage.call` event (tokens, cache share, model, context window, and cost for priced models), and the run's total is on its terminal event and `App.Status`.
+- **A run can wait for a person.** A tool listed in a spec's `approvals`, or the built-in `ask_person` tool, parks the run on a question. The run frees its worker, survives restarts, and resumes with the first answer (`App.Answer`) or takes its default when the question expires.
+
+**Early development:** v0 alpha, pre-1.0, not recommended for production. Interfaces may change between minor versions. The in-memory composition, durable replay and the Slack, GitHub, Jira, cron and webhook connectors are tested; the Postgres backends, knowledge layer, built-in `author` agent and history compaction pass CI's conformance suites but have not seen production load. See [Limitations](#limitations).
 
 ## Installation
 
@@ -129,26 +117,34 @@ acc, err := app.Invoke(ctx, envelope.Tag{
 })
 ```
 
-`App.Bus().Subscribe` streams any topic (`agent:docs-bot` sees every run of
-that agent); `App.Status`, `Stop`, `Compact` and `Answer` act on a run;
-`App.ToolsFor` lists what a run of a tag would be granted, without running it;
-`App.WebhookHandler()` is an `http.Handler` for the connectors that receive
-webhooks, for your program to mount.
 [`examples/downstream`](examples/downstream/main.go) is a complete program.
+
+## Examples
+
+| Example | Description |
+|---------|-------------|
+| [`local`](examples/local/) | Offline agent revisions, selective delivery, citations, and replay, composed by `fiber.New` |
+| [`downstream`](examples/downstream/) | A program composing fiber with its own model provider and tool |
+
+See [`examples/`](examples/README.md) for all runnable examples.
+
+## Usage
 
 ### Use a model
 
-Set `ANTHROPIC_API_KEY` for `"provider": "anthropic"`. To use OpenAI, or any server that speaks its Chat Completions API (vLLM,
-LM Studio, llama.cpp, OpenRouter, Groq), set `"provider": "openai"` and the
-model that server hosts. For a local server, point fiber at it instead of
-setting a key:
+Set `ANTHROPIC_API_KEY` for `"provider": "anthropic"`. To use OpenAI, or any
+server that speaks its Chat Completions API (vLLM, LM Studio, llama.cpp,
+OpenRouter, Groq), set `"provider": "openai"` and the model that server hosts.
+For a local server, point fiber at it instead of setting a key:
 
 ```sh
 export OPENAI_BASE_URL="http://localhost:8000/v1"   # omit for OpenAI itself
 export OPENAI_API_KEY="your-api-key"                # optional for a local server
 ```
 
-Models saige's catalog does not know report their token usage and no cost.
+Models the price catalog does not know report their token usage and no cost.
+
+### Fall back to other models
 
 An agent can name fallback models, tried in order when a call to its primary
 model fails with an error another model could fix (an outage, a rate limit, a
@@ -176,6 +172,8 @@ fallback is built with the agent, so one whose provider is not configured
 call is priced on the rate card of the model that answered it. Order is part
 of the revision: reordering fallbacks is an edit. A spec without fallbacks
 hashes exactly as it did before they existed.
+
+### Grant MCP tools
 
 An agent can be granted an MCP provider's tools as one name:
 `"tools": ["mcp:urmzd"]` grants the tools an admin accepted on the provider
@@ -215,15 +213,14 @@ fiber.WithPersonCredentials(mcptools.PersonResolverFunc(
     }))
 ```
 
-## Validate a spec locally
+### Validate a spec locally
 
 `fiber run` runs one agent spec once, in process, and prints what the run
-does. It is `cmd/fiber`, a program built on the library like any other: it
-composes `fiber.New` with the in-memory backends and a temporary workspace,
-registers the spec, raises one tag with your message, and prints the run's
-events as they stream. It listens on nothing, reads no configuration file and
-no environment variable of its own, and keeps nothing once it exits. It is
-not the server binary earlier releases had (see [Upgrading](#upgrading)).
+does. It composes `fiber.New` with the in-memory backends and a temporary
+workspace, registers the spec, raises one tag with your message, and prints
+the run's events as they stream. It listens on nothing, reads no
+configuration file and no environment variable of its own, and keeps nothing
+once it exits.
 
 Releases publish the Go module, not a prebuilt binary. Install the command at
 the version of fiber you build against, or run it from a checkout with
@@ -278,89 +275,10 @@ The knowledge store is empty, so `sources` retrieve nothing. To list what a
 run would be granted in your own composition, call `App.ToolsFor(ctx, tag)`
 there.
 
-## Examples
+### Extend fiber
 
-| Example | What it demonstrates |
-|---------|----------------------|
-| [`local`](examples/local/) | Offline agent revisions, selective delivery, citations, and replay, composed by `fiber.New` |
-| [`downstream`](examples/downstream/) | A program composing fiber with its own model provider and tool |
-
-See [the example index](examples/README.md) for more.
-
-## Documentation
-
-| Document | Covers |
-|----------|--------|
-| [docs/architecture/overview.md](docs/architecture/overview.md) | Topics, connector faces, N:M delivery, revision pinning, package DAG, limitations |
-| [AGENTS.md](AGENTS.md) | AI-facing conventions, commands, rules, extension guide |
-| [examples/README.md](examples/README.md) | Runnable example index |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and commit convention |
-| [SECURITY.md](SECURITY.md) | Security boundaries and reporting |
-
-API reference: [pkg.go.dev/github.com/urmzd/fiber](https://pkg.go.dev/github.com/urmzd/fiber)
-
-## Where this sits
-
-fiber is layer four of five: **Humagen > fiber > saige > playscape > anchor**.
-It builds on [saige](https://github.com/urmzd/saige)'s agent loop,
-[playscape](https://github.com/urmzd/playscape)'s sandbox and
-[anchor](https://github.com/urmzd/anchor)'s durability, and adds addressing,
-distribution, connectors and the control plane.
-[Humagen](https://github.com/urmzd/humagen) is the only thing that configures or
-serves it: fiber is composed in Go and reads no configuration of its own. See
-[the ecosystem guide](https://github.com/urmzd/humagen/blob/main/docs/ecosystem.md)
-for who owns what and the limitations that span the stack.
-
-For existing Warp deployments of [Humagen](https://github.com/urmzd/humagen),
-see the [upgrade guide](https://github.com/urmzd/humagen/blob/main/docs/upgrading-from-warp.md).
-
-
-## Architecture
-
-fiber builds on three libraries and adds addressing, distribution and the
-control plane:
-
-| Concern | Owner |
-|---------|-------|
-| Agent loop, typed deltas, RAG, citations | [saige](https://github.com/urmzd/saige) |
-| Durability, replay, per-run journal | [anchor](https://github.com/urmzd/anchor) |
-| Sandboxed execution nodes, NGAC | [playscape](https://github.com/urmzd/playscape) |
-| Topics, bus, routing, connectors, specs | fiber |
-
-See the [architecture guide](docs/architecture/overview.md) for delivery,
-authorization, and replay guarantees.
-
-## Composition
-
-Every choice is an option to `fiber.New`. Configuration from files or the
-environment belongs to the program composing fiber
-([Humagen](https://github.com/urmzd/humagen) is one), which turns it into these.
-
-| Option | Chooses | Default |
-|--------|---------|---------|
-| `WithPostgres(pool)` | Registry, run ledger and queue, knowledge, threads, tool providers on one pool | memory |
-| `WithBus(b)` | `bus.NewMemory`, `bus.NewRedis(client)`, `bus.NewPostgres(pool)` | memory |
-| `WithRegistry`, `WithDurable(ledger, queue)`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders` | One store, built by the caller | memory, or the `WithPostgres` one |
-| `WithEmbedder(e)` | The embedder of the knowledge store New builds | offline hashing |
-| `WithExecutor`, `WithRuntimeOptions`, `WithWorkerOptions` | The sandbox, and options for the runtime and worker | playscape sandbox |
-| `WithWorkspace(dir)` | Where the sandbox writes agent artifacts | a temporary directory |
-| `WithTenant`, `WithConcurrency`, `WithCompaction`, `WithAuthor`, `WithLogger`, `WithMetrics` | Deployment | none, one, off, offline, discard, none |
-| `WithSlack`, `WithGitHub`, `WithJira`, `WithWebhooks`, `WithSchedules` | Built-in connectors, typed Go values | off |
-| `WithModelProvider`, `WithOpenAICompatible`, `WithTools`, `WithToolSource`, `WithConnector`, `WithToolProvider` | Extensions | none |
-| `WithPersonCredentials` | Each person's own credential for person-scoped MCP providers | none, so those providers offer no tools |
-
-Model providers read their own credentials when an agent is built:
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`, `OLLAMA_HOST`,
-and the variable an `OpenAICompatible.KeyEnv` names. An MCP provider's
-`env:NAME` credential reference resolves the same way, as does a reference a
-`WithPersonCredentials` resolver returns for a person. Connector setup is
-covered in the [GitHub](docs/architecture/github.md) and
-[Slack](docs/architecture/slack.md) guides.
-
-## Extending fiber
-
-`WithModelProvider`, `WithOpenAICompatible`, `WithTools`, `WithToolSource`,
-`WithConnector` and `WithToolProvider` add to the composition:
+Add your own model providers, tools, connectors and MCP tool providers as
+options to `fiber.New`:
 
 ```go
 app, err := fiber.New(ctx,
@@ -386,16 +304,16 @@ server offers, and is accepted in that form when its `SchemaHash` matches.
 Review one with a credential of your own
 (`mcptools.Connect(ctx, p, mcptools.WithPersonCredential(mine))`).
 
-A new backend implements the package's interface and passes its conformance
+To add a backend, implement the package's interface and pass its conformance
 suite: `bustest`, `registrytest`, `knowledgetest`, `threadtest`,
 `toolprovidertest`, `blobtest`.
 
-## Upgrading
+### Upgrade from the server binary
 
-**fiber is a library from this release.** The `fiber` binary, its commands,
-the HTTP and Connect API and its protobuf contract, `registry.ServerStore`,
-the providers file and every `FIBER_*` variable are gone. Compose
-`fiber.New` with options instead: `FIBER_POSTGRES_URL` is
+**fiber is a library from this release.** The `fiber` server binary, its
+commands, the HTTP and Connect API and its protobuf contract,
+`registry.ServerStore`, the providers file and every `FIBER_*` variable are
+gone. Compose `fiber.New` with options instead: `FIBER_POSTGRES_URL` is
 `WithPostgres(pool)`, `FIBER_REDIS_URL` is `WithBus(bus.NewRedis(client))`
 (size the client with `bus.RedisPoolSize`), a providers file's entries are
 `WithOpenAICompatible` and `WithToolProvider`, and the connector variables are
@@ -411,7 +329,7 @@ are `ErrConfig` without a tenant. The binary also kept files on disk under
 its workspace; the library keeps them in memory unless you pass
 `WithBlobs(blob.NewFS(dir))`.
 
-**Persisted names moved to `fiber`.** Postgres objects, Redis keys, anchor
+**Persisted names moved to `fiber`.** Postgres objects, Redis keys, durable
 activity and record names and the agent-spec hash domain no longer use the
 old name. Drain runs before upgrading, including runs parked on a question,
 which wait until they are answered, stopped or expire: a run still pending
@@ -420,17 +338,16 @@ it, and is not resumed. Stop every old process before the first new one
 starts. Postgres migrates itself and keeps its rows. See
 [docs/renaming.md](docs/renaming.md).
 
-## Limitations
+### Limitations
 
 - The bus is chosen independently of the stores: `WithPostgres` does not move the bus, `WithBus` does.
 - The Postgres bus serializes publishes on one advisory lock per schema, so its throughput is one short transaction per event; Redis is the better bus for a chatty deployment.
 - The Postgres bus stores every event it carries, body included, as a row in the `fiber_bus_events` table of the database it is given. A row stays until its run's retention trim drops it or a sweep finds it older than `bus.WithIndexTTL` (24 hours by default; the sweep runs from publishes, so with none nothing is removed). Those rows reach that database's WAL, replicas and backups like any other, and tool events carry their call's arguments. Where arguments can hold secrets, scrub them with `agentrt.WithToolArguments`, shorten the TTL, or use the Redis bus.
-- Every store is in memory unless `WithPostgres` or its own option is given. On Postgres they survive a restart, but the run queue fiber builds has no `DeltaLog`, so anchor's per-run delta journal is not written; the bus still carries every event.
+- Every store is in memory unless `WithPostgres` or its own option is given. On Postgres they survive a restart, but the run queue fiber builds has no `DeltaLog`, so the per-run delta journal is not written; the bus still carries every event.
 - Files (`blob`) are in memory unless `WithBlobs(blob.NewFS(dir))` puts them on disk; there is no Postgres blob store.
 - fiber authenticates nothing. An embedding program that accepts tags or stop and answer requests from callers sets the tenant and actor from the caller's credential.
-- playscape's queue is at-most-once in beta, so durability comes from anchor rather than from playscape.
-- Citations are derived from RAG context blocks. saige's `CitationDelta`, which reports what a model or tool cited, is not translated into events yet.
-- The bus is at-least-once with no consumer groups. If durable competing consumers become a requirement, NATS JetStream behind the `Bus` interface is a better answer than growing a broker here.
+- Citations are derived from RAG context blocks. Citations a model or tool reports itself are not translated into events yet.
+- The bus is at-least-once with no consumer groups.
 - Agent specs load from JSON, not YAML.
 - `App.Status` reports a stopped run as `stopped`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
 - A request to compact a running turn (`App.Compact`) is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
@@ -440,9 +357,59 @@ starts. Postgres migrates itself and keeps its rows. See
 - A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
 - A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
-- Cost is reported only for models saige's price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to routes that select `usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
+- Cost is reported only for models the price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to routes that select `usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
 
-## Reproduce the Screenshot
+## Configuration
+
+Pass every choice as an option to `fiber.New`. Read files or the environment
+in your own program and turn them into these options; fiber reads neither.
+
+| Option | Chooses | Default |
+|--------|---------|---------|
+| `WithPostgres(pool)` | Registry, run ledger and queue, knowledge, threads, tool providers on one pool | memory |
+| `WithBus(b)` | `bus.NewMemory`, `bus.NewRedis(client)`, `bus.NewPostgres(pool)` | memory |
+| `WithRegistry`, `WithDurable(ledger, queue)`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders` | One store, built by the caller | memory, or the `WithPostgres` one |
+| `WithEmbedder(e)` | The embedder of the knowledge store New builds | offline hashing |
+| `WithExecutor`, `WithRuntimeOptions`, `WithWorkerOptions` | The sandbox, and options for the runtime and worker | built-in sandbox |
+| `WithWorkspace(dir)` | Where the sandbox writes agent artifacts | a temporary directory |
+| `WithTenant`, `WithConcurrency`, `WithCompaction`, `WithAuthor`, `WithLogger`, `WithMetrics` | Deployment | none, one, off, offline, discard, none |
+| `WithSlack`, `WithGitHub`, `WithJira`, `WithWebhooks`, `WithSchedules` | Built-in connectors, typed Go values | off |
+| `WithModelProvider`, `WithOpenAICompatible`, `WithTools`, `WithToolSource`, `WithConnector`, `WithToolProvider` | Extensions | none |
+| `WithPersonCredentials` | Each person's own credential for person-scoped MCP providers | none, so those providers offer no tools |
+
+Model providers read their own credentials when an agent is built:
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`, `OLLAMA_HOST`,
+and the variable an `OpenAICompatible.KeyEnv` names. An MCP provider's
+`env:NAME` credential reference resolves the same way, as does a reference a
+`WithPersonCredentials` resolver returns for a person. Set up connectors with
+the [GitHub](docs/architecture/github.md) and [Slack](docs/architecture/slack.md)
+guides.
+
+## API
+
+| Method | Does |
+|--------|------|
+| `App.Invoke` | Raises a tag and returns the accepted run |
+| `App.Bus().Subscribe` | Streams any topic (`agent:docs-bot` sees every run of that agent) |
+| `App.Status`, `App.Stop`, `App.Compact`, `App.Answer` | Act on a run |
+| `App.ToolsFor` | Lists what a run of a tag would be granted, without running it |
+| `App.WebhookHandler()` | An `http.Handler` for the connectors that receive webhooks, for your program to mount |
+
+Full reference: [pkg.go.dev/github.com/urmzd/fiber](https://pkg.go.dev/github.com/urmzd/fiber)
+
+## Development
+
+| Action | Command |
+|--------|---------|
+| Set up | `make init` |
+| Build | `make build` |
+| Test | `go test ./...` (`-race` for the race detector) |
+| Lint | `golangci-lint run` |
+| Quality gate | `make check` |
+| Start Postgres and Redis | `make up` (stop with `make down`) |
+| Run the suites on real backends | `make integration` |
+
+### Reproduce the screenshot
 
 Install [teasr](https://github.com/urmzd/teasr), then run from this checkout:
 
@@ -453,6 +420,19 @@ teasr run --config teasr.toml
 
 The first run warms Go's build cache. The capture runs the real demo and writes
 [`showcase/durable-replay.png`](showcase/durable-replay.png).
+
+## Documentation
+
+| Document | Covers |
+|----------|--------|
+| [docs/architecture/overview.md](docs/architecture/overview.md) | Topics, connector faces, delivery, revision pinning, design |
+| [docs/architecture/github.md](docs/architecture/github.md) | GitHub connector setup |
+| [docs/architecture/slack.md](docs/architecture/slack.md) | Slack connector setup |
+| [docs/renaming.md](docs/renaming.md) | Upgrading persisted data across the rename |
+| [examples/README.md](examples/README.md) | Runnable example index |
+| [AGENTS.md](AGENTS.md) | AI-facing conventions, commands, rules, extension guide |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and commit convention |
+| [SECURITY.md](SECURITY.md) | Security boundaries and reporting |
 
 ## License
 
