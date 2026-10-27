@@ -47,6 +47,9 @@ type Spec struct {
 	Approvers    []string `json:"approvers,omitempty"`
 	SelfApproval bool     `json:"self_approval,omitempty"`
 	Answerers    []string `json:"answerers,omitempty"`
+	// TaggedOnly mirrors agentspec.AgentSpec.TaggedOnly: the agent runs only
+	// when a message names it.
+	TaggedOnly bool `json:"tagged_only,omitempty"`
 }
 
 // ModelRef names one model behind one provider: one of a spec's fallbacks.

@@ -103,6 +103,9 @@ func (s AgentSpec) HashIn(domain string) string {
 		writeString(h, "answerers")
 		writeStrings(h, c.Answerers)
 	}
+	if c.TaggedOnly {
+		writeString(h, "tagged_only")
+	}
 	// Fallbacks are hashed the same way, and in their own order: it is the
 	// order they are tried in, so reordering them is an edit.
 	if len(c.Fallbacks) > 0 {
