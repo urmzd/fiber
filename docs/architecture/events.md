@@ -272,7 +272,9 @@ and `run.delta` does not match `run.deltas.v1`. Channel segments split on
   writes in its own band, so ordering inside a run survives retries.
 - **Membership.** An agent is woken only by channels it is a member of
   (`pkg/membership`), for the type prefixes its membership `Rule` names, and
-  by default only when the event names it. Membership is default deny.
+  by default only when the event names it. A direct message that names
+  agents wakes only those; one that names no agent wakes every member.
+  Membership is default deny.
 
 ## 7. Definitions
 

@@ -78,6 +78,10 @@ func TestRuleMatches(t *testing.T) {
 	rule := membership.Rule{Types: []string{"message", "github", "jira"}}
 	dm := posted("hi")
 	dm.Data = event.MessagePosted{Request: event.Request{Text: "hi"}, Slack: &event.SlackRef{ChannelType: "im"}}
+	dmToOther := posted("my salary review", "hr")
+	dmToOther.Data = event.MessagePosted{Request: event.Request{Text: "my salary review", Mentions: []string{"hr"}}, Slack: &event.SlackRef{ChannelType: "im"}}
+	dmToMe := dmToOther
+	dmToMe.Data = event.MessagePosted{Request: event.Request{Text: "hi", Mentions: []string{"docs-bot"}}, Slack: &event.SlackRef{ChannelType: "im"}}
 	review := event.Envelope{ID: "e2", Source: "github://o/r", Type: event.TypeGitHubReviewRequested, Channel: "github://o/r",
 		Time: time.Unix(1, 0), Data: event.GitHubReviewRequested{Reviewer: "docs-bot"}}
 	assigned := event.Envelope{ID: "e3", Source: "jira://s/P-1", Type: event.TypeJiraIssueAssigned, Channel: "jira://s/P-1",
@@ -92,6 +96,8 @@ func TestRuleMatches(t *testing.T) {
 		{"someone else mentioned", rule, posted("hi", "other"), false},
 		{"nobody mentioned", rule, posted("hi"), false},
 		{"direct message", rule, dm, true},
+		{"direct message naming another agent", rule, dmToOther, false},
+		{"direct message naming this agent", rule, dmToMe, true},
 		{"review requested", rule, review, true},
 		{"assigned", rule, assigned, true},
 		{"ambient", rule.Ambient(), posted("hi"), true},

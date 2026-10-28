@@ -38,8 +38,8 @@ type Rule struct {
 	// Types are type prefixes (event.Selects). Empty matches nothing.
 	Types []string `json:"types,omitempty"`
 	// Addressed, when true or unset, wakes the member only for an event that
-	// names it (event.Addressees) or arrives as a direct message. Set it to
-	// false to wake on every matching event in the channel.
+	// names it (event.Addressees), or for a direct message that names no
+	// agent. Set it to false to wake on every matching event in the channel.
 	Addressed *bool `json:"addressed,omitempty"`
 }
 
@@ -63,7 +63,12 @@ func (r Rule) Matches(agent string, e event.Envelope) bool {
 	if !r.IsAddressed() {
 		return true
 	}
-	return event.DirectMessage(e.Data) || slices.Contains(event.Addressees(e.Data), agent)
+	// A direct message that names agents wakes only those it names. One that
+	// names no one wakes every member, as there is no one else to ask.
+	if a := event.Addressees(e.Data); len(a) > 0 {
+		return slices.Contains(a, agent)
+	}
+	return event.DirectMessage(e.Data)
 }
 
 // Validate checks the rule can be stored.

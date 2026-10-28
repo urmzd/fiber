@@ -89,7 +89,7 @@ An agent is woken only by channels it is a member of. `pkg/membership` records
 `(tenant, channel prefix, agent, Rule)`; a `Rule` lists the type prefixes the
 member wakes for and, by default, wakes it only when the event names it (a
 mention, a review requested from it, an issue assigned to it, a direct
-message). A store with no rows wakes nobody.
+message that names no other agent). A store with no rows wakes nobody.
 
 `pkg/dispatch` listens to the tenant's ingress events and starts one run per
 matching member. It drops the event for the subscriber that produced it, so an
