@@ -44,13 +44,13 @@ func samples() []event.Body {
 	cost := &event.Cost{Micros: 1_250, Currency: "USD", AsOf: "2026-07-24"}
 	usage := event.Usage{ModelCalls: 2, Requests: 2, PromptTokens: 900, CachedPromptTokens: 400, CompletionTokens: 120, Cost: cost}
 	bodies := []event.Body{
-		event.Accepted{Attempt: 1, Rev: 3},
-		event.Started{Attempt: 1, Rev: 3},
-		event.Parked{Attempt: 1, Rev: 3, Reason: "waiting on a person", Question: &q},
-		event.Resumed{Attempt: 2, Rev: 3, Answer: &event.Answer{QuestionID: "q1", Decision: event.DecisionApprove, Note: "go", By: "ana", At: at}},
-		event.Completed{Attempt: 2, Rev: 3, Text: "Deployed.", Usage: &event.RunUsage{Own: usage, Total: usage, Context: &event.ContextUsage{Model: "m", Window: 200000, Tokens: 900}}},
-		event.Failed{Attempt: 1, Rev: 3, Error: "provider unavailable", Terminal: true},
-		event.Stopped{Attempt: 1, Rev: 3, Reason: "wrong repo", By: "ana", Text: "I was", Usage: &event.RunUsage{Own: usage, Total: usage}},
+		event.Accepted{Attempt: 1},
+		event.Started{Attempt: 1},
+		event.Parked{Attempt: 1, Reason: "waiting on a person", Question: &q},
+		event.Resumed{Attempt: 2, Answer: &event.Answer{QuestionID: "q1", Decision: event.DecisionApprove, Note: "go", By: "ana", At: at}},
+		event.Completed{Attempt: 2, Text: "Deployed.", Usage: &event.RunUsage{Own: usage, Total: usage, Context: &event.ContextUsage{Model: "m", Window: 200000, Tokens: 900}}},
+		event.Failed{Attempt: 1, Error: "provider unavailable", Terminal: true},
+		event.Stopped{Attempt: 1, Reason: "wrong repo", By: "ana", Text: "I was", Usage: &event.RunUsage{Own: usage, Total: usage}},
 		event.ChildParked{RunID: "r2", Agent: "deployer", Question: q},
 		event.Text{Text: "Hello"},
 		event.Thinking{Text: "Consider the plan"},

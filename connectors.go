@@ -16,7 +16,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/connectors/slack"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/signature"
 	"github.com/urmzd/fiber/pkg/thread"
 )
@@ -43,7 +43,7 @@ func listers(reg *connector.Registry) thread.Listers {
 // sink, one that implements Ingest is a trigger, and the registry works that
 // out from the types. So this function only has to construct; nothing here says
 // what any connector is for.
-func buildConnectors(cfg options, store registry.Store, blobs blob.Store) (*connector.Registry, error) {
+func buildConnectors(cfg options, store definition.Source, blobs blob.Store) (*connector.Registry, error) {
 	reg := connector.NewRegistry()
 	// Agent names come from the control plane, which is the only place that
 	// knows them. Without a name set, "@urmzd" and "@docs-bot" are the same
@@ -260,7 +260,7 @@ func (s jiraSecret) Verify(h http.Header, _ []byte) error {
 // an agent that has not been created cannot be mentioned into existence, which
 // is the property that keeps a mention of a colleague from starting a run.
 type agentNames struct {
-	store  registry.Store
+	store  definition.Source
 	tenant string
 }
 
@@ -268,9 +268,9 @@ func (a agentNames) Lookup(token string) (string, bool) {
 	if !mention.Valid(token) {
 		return "", false
 	}
-	rev, err := a.store.Get(context.Background(), a.tenant, token, 0)
+	rec, err := a.store.Latest(context.Background(), a.tenant, definition.NormalizeName(token))
 	if err != nil {
 		return "", false
 	}
-	return rev.Spec.Name, true
+	return rec.Name, true
 }

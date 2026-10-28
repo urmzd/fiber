@@ -554,7 +554,7 @@ func TestAStoppedRunKeepsItsPartialAnswerAndTheNextTurnIsShownIt(t *testing.T) {
 		t.Errorf("lifecycle.stopped usage = %+v, want the one call that was cut short", body.Usage)
 	}
 	body.Usage = nil
-	want := payload.Stopped{Attempt: 1, Rev: 1, Reason: "Stopped by a user", By: "slack:U1", Text: "The deploy failed because"}
+	want := payload.Stopped{Attempt: 1, Reason: "Stopped by a user", By: "slack:U1", Text: "The deploy failed because"}
 	if body != want {
 		t.Errorf("lifecycle.stopped = %+v, want %+v", body, want)
 	}
@@ -968,16 +968,11 @@ func TestATurnThatIgnoresAStopIsCancelledAndTheRunStillEndsStopped(t *testing.T)
 func TestStoppingAParentCancelsTheSubTaskItIsWaitingOn(t *testing.T) {
 	w := newWorld(t)
 	w.specs.revise("helper", "Help.")
-	// The spawn grant is on the stored revision, so the pinned lookup sees it.
-	w.specs.mu.Lock()
-	w.specs.revs["lead"] = []agentrt.Revision{{
-		Rev: 1, Hash: "sha256:lead@1",
-		Spec: agentrt.Spec{
-			Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
-			Access: agentrt.Access{Spawn: []string{"helper"}},
-		},
-	}}
-	w.specs.mu.Unlock()
+	// The spawn grant is on the stored version, so the pinned lookup sees it.
+	w.specs.set(agentrt.Spec{
+		Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
+		Access: agentrt.Access{Spawn: []string{"helper"}},
+	})
 
 	helper := newHeldModel("Counting")
 	lead := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
@@ -1084,9 +1079,9 @@ func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testin
 
 // The control namespace is not an agent. A tag addressed to it is refused,
 // because a run by that name would publish into the stream requests travel on.
+// No definition can take the name either: it breaks the name rule.
 func TestATagForTheControlNamespaceIsRefused(t *testing.T) {
 	w := newWorld(t)
-	w.specs.revise("_control", "impostor")
 	rt := w.runtime(t, newPatient())
 	if _, err := rt.Accept(context.Background(), tag("_control", "evt-1", "hello")); !errors.Is(err, runtime.ErrInvalid) {
 		t.Fatalf("Accept for the control namespace = %v, want ErrInvalid", err)

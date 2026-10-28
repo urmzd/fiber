@@ -13,7 +13,6 @@
   "digest": "sha256:abc",
   "data": {
     "attempt": 1,
-    "rev": 3,
     "error": "provider unavailable",
     "terminal": true
   }

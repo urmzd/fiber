@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -19,8 +20,13 @@ import (
 )
 
 func offlineRevision(rev int, prompt string) agentrt.Revision {
+	version := ""
+	if rev > 0 {
+		version = fmt.Sprintf("%d.0.0", rev)
+	}
 	return agentrt.Revision{
-		Rev: rev,
+		Name:    "docs-bot",
+		Version: version,
 		Spec: agentrt.Spec{
 			Name:         "docs-bot",
 			Provider:     agentrt.ProviderOffline,
@@ -87,8 +93,8 @@ func TestRunnerExecutesThePinnedRevisionsPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if got := r.Revision().Rev; got != 6 {
-		t.Fatalf("Revision().Rev is %d, want 6", got)
+	if got := r.Revision().Version; got != "6.0.0" {
+		t.Fatalf("Revision().Version is %s, want 6.0.0", got)
 	}
 	if got := r.SystemPrompt(); got != "revision six instructions" {
 		t.Fatalf("SystemPrompt() is %q, want revision six's", got)
@@ -298,7 +304,7 @@ func TestConstructionRefusesWhatItCannotRun(t *testing.T) {
 		},
 		{
 			name: "a provider this process does not have",
-			rev: agentrt.Revision{Rev: 1, Spec: agentrt.Spec{
+			rev: agentrt.Revision{Name: "docs-bot", Version: "1.0.0", Spec: agentrt.Spec{
 				Name: "docs-bot", Provider: "gpt-9", Model: "x",
 			}},
 		},

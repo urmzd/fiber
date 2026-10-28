@@ -31,11 +31,10 @@ sandboxing and access control.
 | `pkg/address` | Mesh endpoint URIs: `github://urmzd/fiber/issues/42`, `slack://T01/C02?thread=...`. Leaf. |
 | `pkg/envelope` | Wire contract: `Tag`, `Event`, `Kind`, `Route`, `Filter`, `Subscription`, and the actor a context acts for (`WithActor`, `ActorFrom`). Leaf. |
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
-| `pkg/agentspec` | Immutable agent specs, content-addressed revisions. Leaf. |
 | `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
-| `pkg/registry` | Agent store and revision history. `Memory` and `Postgres`, `registrytest` conformance suite, and `Specs`, the resolver `pkg/runtime` reads pinned revisions through. |
+| `pkg/definition` | Agents as saige `.agent.md` definitions plus a fiber `Policy` sidecar. The insert-only `Source` (`Memory` and `Postgres`, `definitiontest` conformance suite), the `Resolver` that pins a version tree and `Verify`s it on replay (fail closed), fiber's validation, MCP grants, and `FromAgentSpec` for the old spec shape. |
 | `pkg/durable` | The Postgres schema for anchor's ledger and queue adapters, and `Open`, which builds both on it. |
-| `pkg/internal/pgrename` | The one migration step every Postgres store runs first: renames objects a database created before fiber's rename still carries, refuses (naming both) when an old table was created again beside its new one, and the registry re-addresses revisions hashed under the old domain. It also names the pre-rename turn, which `pkg/runtime` registers only to fail such a run with a reason. The only code that knows the old names. |
+| `pkg/internal/pgrename` | The one migration step every Postgres store runs first: renames objects a database created before fiber's rename still carries, and refuses (naming both) when an old table was created again beside its new one. It also names the pre-rename turn, which `pkg/runtime` registers only to fail such a run with a reason. The only code that knows the old names. |
 | `pkg/thread` | The per-thread conversation journal a run continues: append-only, pinned at accept, with a reconciliation seam for surfaces. `Memory` and `Postgres`; `threadtest.Run` is its conformance suite. |
 | `pkg/blob` | Content-addressed, tenant-scoped file store. `Memory` and filesystem; `blobtest`. |
 | `pkg/attachment` | The file reference a tag carries. Leaf. `intake/` stores and fetches files (SSRF-guarded); `resolve/` turns a file into model input by kind. |
@@ -92,7 +91,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   compiles into playscape's policy graph with default deny. Changes need tests
   proving spawn gating and workspace confinement still hold.
 - **Preserve the DAG.** Leaves (`topic`, `address`, `envelope`, `signature`,
-  `agentspec`, `attachment`) stay stdlib-only. Nothing under `pkg/` imports `internal/`.
+  `attachment`) stay stdlib-only. Nothing under `pkg/` imports `internal/`.
 - **History pinning is load-bearing too.** A run pins "thread history up to
   sequence N" at accept, next to its revision, and every attempt loads exactly
   that. The journal only appends, and what it replays is byte-identical from

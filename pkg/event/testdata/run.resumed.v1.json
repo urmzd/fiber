@@ -13,7 +13,6 @@
   "digest": "sha256:abc",
   "data": {
     "attempt": 2,
-    "rev": 3,
     "answer": {
       "question_id": "q1",
       "decision": "approve",

@@ -141,7 +141,7 @@ func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (co
 	if !r.compactRequests || r.control == nil {
 		return ctx, func() {}
 	}
-	ch, err := CompactChannel(in.Tag.Tenant, runID)
+	ch, err := CompactChannel(in.Trigger.Tenant, runID)
 	if err != nil {
 		r.logger.Error("fiber/runtime: compact channel is invalid", "run_id", runID, "error", err)
 		return ctx, func() {}
@@ -154,7 +154,7 @@ func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (co
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sub := bus.Subscription{Tenant: busTenant(in.Tag.Tenant), Channels: []string{ch}, Types: []string{event.TypeCompact}}
+		sub := bus.Subscription{Tenant: busTenant(in.Trigger.Tenant), Channels: []string{ch}, Types: []string{event.TypeCompact}}
 		// A resubscription reads the retained requests again, and the ids
 		// already relayed are skipped: each request would cost a summary.
 		seen := map[string]bool{}

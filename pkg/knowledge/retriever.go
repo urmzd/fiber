@@ -25,7 +25,7 @@ import (
 // name. It also means a Retriever is built per run, from the run's tenant and
 // its revision's Sources, and never shared across tenants.
 //
-// An agentspec.Source is matched to a corpus by its Name: documents indexed
+// A policy corpus (definition.Corpus) is matched to a corpus by its Name: documents indexed
 // with Document.Source equal to that name are what the agent may read. The
 // source's URI and Options describe where the corpus is ingested from and are
 // not interpreted here.

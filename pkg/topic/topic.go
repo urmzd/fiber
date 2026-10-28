@@ -137,7 +137,7 @@ func oneSegment(what, s string) error {
 // stop knows which run, and need not know which agent it belongs to.
 //
 // The leading underscore keeps it visibly apart from agent names, and
-// pkg/agentspec refuses it as one.
+// no definition can take it as a name.
 const ControlName = "_control"
 
 // Control returns the topic that carries requests of one verb for one run,

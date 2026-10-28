@@ -65,7 +65,7 @@ func (s *compatServer) only(t *testing.T) compatRequest {
 }
 
 func openaiRevision(model string) agentrt.Revision {
-	return agentrt.Revision{Rev: 1, Spec: agentrt.Spec{
+	return agentrt.Revision{Name: "docs-bot", Version: "1.0.0", Spec: agentrt.Spec{
 		Name: "docs-bot", Provider: agentrt.ProviderOpenAI, Model: model, SystemPrompt: "You document things.",
 	}}
 }

@@ -90,6 +90,3 @@ func eventUsage(u *payload.RunUsage) *event.RunUsage {
 	}
 	return &out
 }
-
-// version is a revision number as a definition version.
-func version(rev int) string { return strconv.Itoa(rev) }

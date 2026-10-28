@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
@@ -30,7 +30,10 @@ func Dialer(opts ...Option) Dial {
 
 // Grants expands an agent's MCP group grants against a toolprovider.Store. A
 // grant is "mcp:<provider>" (read tools) or "mcp:<provider>:write" (read and
-// write tools), parsed by agentspec.ParseMCPGrant. It expands, in one tenant,
+// write tools), parsed by definition.ParseMCPGrant. A definition lists the
+// server under tools.mcp and its pinned Policy decides the class
+// (Policy.MCPWrite); definition.Parse compiles the two into the grant, so the
+// write class reaches here from the policy and from nothing else. It expands, in one tenant,
 // to the tools of the provider's current accepted snapshot that the server
 // still offers unchanged and the grant's class permits, each named by
 // toolprovider.QualifiedName. Held-back tools never appear, and every member
@@ -166,7 +169,7 @@ func (g *Grants) personFor(ctx context.Context, p toolprovider.Provider) (*perso
 // expanded right now (no such provider in this tenant, the server
 // unreachable).
 func (g *Grants) Expand(ctx context.Context, tenant, grant string) (tools []saigetypes.Tool, ok bool, err error) {
-	parsed, ok, err := agentspec.ParseMCPGrant(grant)
+	parsed, ok, err := definition.ParseMCPGrant(grant)
 	if !ok || err != nil || !toolprovider.ValidName(parsed.Provider) {
 		return nil, false, nil
 	}

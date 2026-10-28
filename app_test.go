@@ -18,14 +18,13 @@ import (
 	"github.com/urmzd/anchor/pkg/ledger"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
-	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -163,7 +162,7 @@ func awaitEnded(t *testing.T, app *App, tenant, runID string) Run {
 	}
 }
 
-var offline = agentspec.AgentSpec{Name: "docs-bot", Model: "m", Provider: agentspec.ProviderOffline, SystemPrompt: "Answer."}
+var offline = definition.AgentSpec{Name: "docs-bot", Model: "m", Provider: definition.ProviderOffline, SystemPrompt: "Answer."}
 
 // A tag id is whatever the caller sent, so two tenants can send the same one.
 // Routes are registered and runs are started under an identity that includes
@@ -177,7 +176,7 @@ func TestATenantReusingAnotherTenantsTagIDCannotJoinOrRerouteItsRun(t *testing.T
 	ctx := context.Background()
 
 	for _, tenant := range []string{"acme", "globex"} {
-		if _, err := app.Registry().Create(ctx, tenant, offline, "test"); err != nil {
+		if _, err := createAgent(app.Definitions(), ctx, tenant, offline, "test"); err != nil {
 			t.Fatalf("create agent for %s: %v", tenant, err)
 		}
 	}
@@ -227,7 +226,7 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.RunDelivery)
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
+	if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
 		t.Fatal(err)
 	}
 	target := address.MustParse("inbox://acme/out")
@@ -286,7 +285,7 @@ func TestStatusReadsTheUsageTheRunRecorded(t *testing.T) {
 	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.Run)
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
+	if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
 		t.Fatal(err)
 	}
 	target := address.MustParse("inbox://acme/out")
@@ -324,7 +323,7 @@ func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T)
 		app := newApp(t, WithTenant("acme"))
 		for name, ok := range map[string]bool{
 			"bus":           isType[*bus.Memory](app.Bus()),
-			"registry":      isType[*registry.Memory](app.Registry()),
+			"definitions":   isType[*definition.Memory](app.Definitions()),
 			"knowledge":     isType[*knowledge.Memory](app.Knowledge()),
 			"threads":       isType[*thread.Memory](app.Threads()),
 			"tool provider": isType[*toolprovider.Memory](app.ToolProviders()),
@@ -345,7 +344,7 @@ func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T)
 		app := newApp(t, WithTenant("acme"), WithPostgres(pool), WithBus(pg), WithConnector(box))
 		for name, ok := range map[string]bool{
 			"bus":           isType[*bus.Postgres](app.Bus()),
-			"registry":      isType[*registry.Postgres](app.Registry()),
+			"definitions":   isType[*definition.Postgres](app.Definitions()),
 			"knowledge":     isType[*knowledge.Postgres](app.Knowledge()),
 			"threads":       isType[*thread.Postgres](app.Threads()),
 			"tool provider": isType[*toolprovider.Postgres](app.ToolProviders()),
@@ -357,7 +356,7 @@ func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T)
 		// And a run goes end to end on it.
 		start(t, app.Run)
 		ctx := context.Background()
-		if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
+		if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
 			t.Fatal(err)
 		}
 		target := address.MustParse("inbox://acme/pg")

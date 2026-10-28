@@ -12,7 +12,7 @@ import (
 
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
@@ -189,24 +189,29 @@ type listedTool struct {
 
 type listing struct {
 	Agent       string                    `json:"agent"`
-	Rev         int                       `json:"rev"`
+	Version     string                    `json:"version"`
 	Tools       []listedTool              `json:"tools"`
 	Unavailable []agentrt.UnavailableTool `json:"unavailable,omitempty"`
 }
 
 // listTools prints what a run of tag would be granted, as this composition
 // resolves it, and runs nothing.
-func listTools(ctx context.Context, app *fiber.App, tag envelope.Tag, rev agentspec.Revision, asJSON bool, stdout, stderr io.Writer) int {
+func listTools(ctx context.Context, app *fiber.App, tag envelope.Tag, rec definition.Record, asJSON bool, stdout, stderr io.Writer) int {
 	granted, err := app.ToolsFor(ctx, tag)
 	if err != nil {
 		fmt.Fprintf(stderr, "fiber run: %v\n", err)
 		return exitFailed
 	}
-	l := listing{Agent: rev.Spec.Name, Rev: rev.Rev, Tools: []listedTool{}, Unavailable: granted.Unavailable}
+	agent, err := definition.Parse(rec.Content, rec.Policy, definition.Checks{Providers: app.Providers()})
+	if err != nil {
+		fmt.Fprintf(stderr, "fiber run: %v\n", err)
+		return exitFailed
+	}
+	l := listing{Agent: rec.Name, Version: rec.Version, Tools: []listedTool{}, Unavailable: granted.Unavailable}
 	for _, d := range granted.Tools {
 		l.Tools = append(l.Tools, listedTool{
 			Name: d.Name, Description: d.Description, Parameters: d.Parameters,
-			Approval: slices.Contains(rev.Spec.Approvals, d.Name),
+			Approval: slices.Contains(agent.Spec.Approvals, d.Name),
 		})
 	}
 	if asJSON {
@@ -216,7 +221,7 @@ func listTools(ctx context.Context, app *fiber.App, tag envelope.Tag, rev agents
 		}
 		return exitCompleted
 	}
-	fmt.Fprintf(stdout, "%s revision %d would be granted %s:\n", l.Agent, l.Rev, count(len(l.Tools), "tool", "tools"))
+	fmt.Fprintf(stdout, "%s %s would be granted %s:\n", l.Agent, l.Version, count(len(l.Tools), "tool", "tools"))
 	width := 0
 	for _, t := range l.Tools {
 		width = max(width, utf8.RuneCountInString(t.Name))

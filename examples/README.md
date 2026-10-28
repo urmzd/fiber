@@ -61,7 +61,7 @@ paths.
 
 | Concern | The example runs | A deployment runs |
 | --- | --- | --- |
-| Control plane | `pkg/registry.Memory` (`fiber.WithRegistry`) | `registry.Postgres` (`fiber.WithPostgres`) |
+| Control plane | `definition.Memory` (`fiber.WithDefinitions`), agents read from `agents/*.agent.md` | `definition.Postgres` (`fiber.WithPostgres`) |
 | Bus | `pkg/bus.Memory` (`fiber.WithBus`) | `bus.NewRedis` or `bus.NewPostgres` (`fiber.WithBus`) |
 | Ledger and queue | anchor `ledger.Memory`, `queue.Memory` | anchor's Postgres ledger and queue (`fiber.WithPostgres`) |
 | Model | saige `agenttest.ScriptedProvider`, via the spec's `offline` provider | `anthropic`, `openai` (or any OpenAI-compatible server) or `ollama`, by changing two fields on the spec |

@@ -26,17 +26,16 @@ import (
 
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/attachment/resolve"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/author"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/durable"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
-	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/router"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
@@ -46,12 +45,12 @@ import (
 // App is fiber assembled: every long-lived component a process owns, in the
 // order data flows through them.
 //
-//	registry  →  runtime  →  bus  →  router  →  connector sinks
-//	                ↑                              ↓
-//	            anchor worker              a surface somewhere
+//	definitions  →  runtime  →  bus  →  router  →  connector sinks
+//	                   ↑                              ↓
+//	               anchor worker              a surface somewhere
 //
 // Nothing here is a stub standing in for a deployment. The in-memory
-// registry, bus, ledger and queue are complete implementations of the same
+// definitions, bus, ledger and queue are complete implementations of the same
 // interfaces the shared backends implement; which one runs is an Option that
 // passes a constructed value, never a change to anything below it.
 //
@@ -61,7 +60,8 @@ type App struct {
 	opt options
 	log *slog.Logger
 
-	store   registry.Store
+	store   definition.Source
+	defs    *definition.Resolver
 	docs    knowledge.Store
 	threads thread.Store
 	tools   toolprovider.Store
@@ -133,9 +133,10 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 	// The control plane: append-only agent definitions, scoped by tenant.
 	// Its provider table includes the options', so an agent naming one can
 	// be stored as well as run.
-	if a.store, err = newRegistry(ctx, pool, o); err != nil {
+	if a.store, err = newDefinitions(ctx, pool, o); err != nil {
 		return fail(err)
 	}
+	a.defs = definition.NewResolver(a.store, o.checks())
 	// What agents know: the corpus a revision's sources are retrieved from.
 	if a.docs, err = newKnowledge(ctx, pool, o); err != nil {
 		return fail(err)
@@ -218,7 +219,7 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 		rtOpts = append(rtOpts, runtime.WithCompactRequests())
 	}
 	rtOpts = append(rtOpts, o.RuntimeOpts...)
-	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), registry.NewSpecs(a.store), a.broker, a.exec, rtOpts...); err != nil {
+	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), a.defs, a.broker, a.exec, rtOpts...); err != nil {
 		return fail(fmt.Errorf("fiber: runtime: %w", err))
 	}
 	return a, nil
@@ -253,21 +254,21 @@ func migrateErr(what string, err error) error {
 	return fmt.Errorf("%w: %s: %w", ErrUnavailable, what, err)
 }
 
-// newRegistry picks the control plane's store: the one passed, Postgres on
-// the pool, or memory. The Postgres schema is migrated here because a
+// newDefinitions picks the control plane's store: the one passed, Postgres
+// on the pool, or memory. The Postgres schema is migrated here because a
 // deployment against an unmigrated database has nothing useful to do but
 // report that.
-func newRegistry(ctx context.Context, pool *pgxpool.Pool, o options) (registry.Store, error) {
-	if o.Registry != nil {
-		return o.Registry, nil
+func newDefinitions(ctx context.Context, pool *pgxpool.Pool, o options) (definition.Source, error) {
+	if o.Definitions != nil {
+		return o.Definitions, nil
 	}
-	providers := registry.WithProviders(o.providerNames()...)
+	checks := definition.WithChecks(o.checks())
 	if pool == nil {
-		return registry.NewMemory(providers), nil
+		return definition.NewMemory(checks), nil
 	}
-	store := registry.NewPostgres(pool, providers)
+	store := definition.NewPostgres(pool, checks)
 	if err := store.Migrate(ctx); err != nil {
-		return nil, migrateErr("registry", err)
+		return nil, migrateErr("definitions", err)
 	}
 	return store, nil
 }
@@ -380,7 +381,7 @@ func (a *App) newExecutor(groups runtime.ToolGroupSource) (runtime.Executor, err
 	if c := a.opt.Compaction; c.MaxInputTokens > 0 || c.OnRequest {
 		agentOpts = append(agentOpts, agentrt.WithCompaction(c))
 	}
-	exec, err := runtime.NewSandbox(plane, tools, registry.NewSpecs(a.store),
+	exec, err := runtime.NewSandbox(plane, tools, a.defs,
 		runtime.WithAgentOptions(agentOpts...),
 		// A spec's tool names resolve against the actions every registered
 		// connector advertises, then against the tool sources options added.
@@ -402,8 +403,8 @@ func (a *App) newExecutor(groups runtime.ToolGroupSource) (runtime.Executor, err
 // alone.
 func (a *App) addAuthor(ctx context.Context) error {
 	au, err := author.New(author.Config{
-		Store:      a.store,
-		Providers:  a.opt.providerNames(),
+		Source:     a.store,
+		Checks:     a.opt.checks(),
 		Principals: author.PrincipalFunc(a.principal),
 		Catalog: func() []string {
 			var names []string
@@ -424,7 +425,7 @@ func (a *App) addAuthor(ctx context.Context) error {
 	}
 	provider, model := a.opt.AuthorProvider, a.opt.AuthorModel
 	if provider == "" {
-		provider = agentspec.ProviderOffline
+		provider = definition.ProviderOffline
 	}
 	if model == "" {
 		model = "claude-sonnet-5-5"
@@ -451,9 +452,10 @@ func (a *App) principal(ctx context.Context, runID string) (author.Principal, er
 	if err := json.Unmarshal(rec.Input, &in); err != nil {
 		return author.Principal{}, fmt.Errorf("fiber: decode run %q input: %w", runID, err)
 	}
-	p := author.Principal{Tenant: in.Tag.Tenant}
-	if in.Tag.Actor.ID != "" {
-		p.Actor = in.Tag.Origin + ":" + in.Tag.Actor.ID
+	tag := in.Tag()
+	p := author.Principal{Tenant: tag.Tenant}
+	if tag.Actor.ID != "" {
+		p.Actor = tag.Origin + ":" + tag.Actor.ID
 	}
 	return p, nil
 }
@@ -496,19 +498,27 @@ func (a *App) ToolsFor(ctx context.Context, tag envelope.Tag) (agentrt.Granted, 
 	if !ok {
 		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: the executor cannot report them: %w", tag.Agent, errors.ErrUnsupported)
 	}
-	rev, err := registry.NewSpecs(a.store).Latest(ctx, tag.Tenant, tag.Agent)
+	pin, err := a.defs.Resolve(ctx, tag.Tenant, tag.Agent)
+	if err != nil {
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", tag.Agent, err)
+	}
+	loaded, err := a.defs.Verify(ctx, tag.Tenant, pin)
 	if err != nil {
 		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", tag.Agent, err)
 	}
 	req := runtime.Request{
-		RunID:    runtime.RunID(tag.Tenant, tag.ID),
-		Tenant:   tag.Tenant,
-		Attempt:  1,
-		Origin:   tag.Origin,
-		Source:   tag.Source.String(),
-		Text:     tag.Text,
-		Meta:     tag.Meta,
-		Revision: rev,
+		RunID:   runtime.RunID(tag.Tenant, tag.ID),
+		Tenant:  tag.Tenant,
+		Attempt: 1,
+		Origin:  tag.Origin,
+		Source:  tag.Source.String(),
+		Text:    tag.Text,
+		Meta:    tag.Meta,
+		Definition: agentrt.Revision{
+			Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec,
+		},
+		Pin:    pin,
+		Policy: loaded.Agent.Policy,
 	}
 	granted, err := lister.ToolsFor(envelope.WithActor(ctx, tag.Actor), req)
 	if err != nil {
@@ -614,7 +624,7 @@ func (a *App) startExecution(ctx context.Context, g *group) {
 					a.log.Error("fiber: accept tag", "tag", tag.ID, "agent", tag.Agent, "error", err)
 					continue
 				}
-				a.log.Info("fiber: accepted", "run", acc.RunID, "agent", tag.Agent, "origin", tag.Origin, "rev", acc.Rev)
+				a.log.Info("fiber: accepted", "run", acc.RunID, "agent", tag.Agent, "origin", tag.Origin, "version", acc.Version)
 			}
 		}
 	})
@@ -640,8 +650,8 @@ func (a *App) WebhookHandler() http.Handler {
 // Accessors. They return the live components, for a program that adds its
 // own transport, tooling or tests on top.
 
-// Registry is the agent store.
-func (a *App) Registry() registry.Store { return a.store }
+// Definitions is the agent store.
+func (a *App) Definitions() definition.Source { return a.store }
 
 // Bus is the broker runs publish to.
 func (a *App) Bus() bus.Bus { return a.broker }

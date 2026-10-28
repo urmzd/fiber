@@ -7,10 +7,24 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/connectors/author"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/turn"
 )
+
+// parsed compiles every scaffolded draft.
+func parsed(t *testing.T, drafts []author.Draft) []definition.Agent {
+	t.Helper()
+	out := make([]definition.Agent, 0, len(drafts))
+	for _, d := range drafts {
+		a, err := definition.Parse(d.Definition, d.Policy, definition.Checks{})
+		if err != nil {
+			t.Fatalf("a scaffolded draft does not parse: %v\n%s", err, d.Definition)
+		}
+		out = append(out, a)
+	}
+	return out
+}
 
 func system() author.System {
 	return author.System{
@@ -21,7 +35,7 @@ func system() author.System {
 			{Name: "docs", Role: "Answers how-to questions from the documentation."},
 		},
 		Model:    "offline",
-		Provider: agentspec.ProviderOffline,
+		Provider: definition.ProviderOffline,
 	}
 }
 
@@ -29,65 +43,78 @@ func system() author.System {
 // specialists and nothing else, and no specialist reaches anything.
 func TestAScaffoldGrantsTheRouterItsSpecialistsAndNothingElse(t *testing.T) {
 	t.Parallel()
-	specs, err := author.Scaffold(system())
+	drafts, err := author.Scaffold(system())
 	if err != nil {
 		t.Fatalf("Scaffold: %v", err)
 	}
-	if len(specs) != 4 {
-		t.Fatalf("%d definitions, want 3 specialists and a router", len(specs))
+	if len(drafts) != 4 {
+		t.Fatalf("%d drafts, want 3 specialists and a router", len(drafts))
 	}
-	router := specs[len(specs)-1]
+	agents := parsed(t, drafts)
+	router := agents[len(agents)-1].Spec
 	if router.Name != "front-desk" {
 		t.Fatalf("the router is not last, or not canonical: %q", router.Name)
 	}
 	if want := []string{"docs", "support", "triage"}; !reflect.DeepEqual(router.Access.Spawn, want) {
-		t.Errorf("router may spawn %v, want exactly %v", router.Access.Spawn, want)
+		t.Errorf("router may delegate to %v, want exactly %v", router.Access.Spawn, want)
 	}
 	if len(router.Access.WorkspaceAreas) != 0 || len(router.Tools) != 0 {
 		t.Errorf("router was granted more than delegation: %+v tools %v", router.Access, router.Tools)
 	}
-	for _, s := range specs[:3] {
-		if !reflect.DeepEqual(s.Access, agentspec.Access{}) {
-			t.Errorf("specialist %s was granted access %+v, want none", s.Name, s.Access)
+	for i, a := range agents[:3] {
+		if !reflect.DeepEqual(a.Spec.Access, turn.Policy{}) || !reflect.DeepEqual(a.Policy, definition.Policy{}) {
+			t.Errorf("specialist %s was granted access %+v policy %+v, want none", a.Spec.Name, a.Spec.Access, a.Policy)
 		}
-		if !strings.Contains(router.SystemPrompt, "tag_"+s.Name) {
-			t.Errorf("the router's prompt never says how to reach %s", s.Name)
+		if !strings.Contains(router.SystemPrompt, "tag_"+a.Spec.Name) {
+			t.Errorf("the router's prompt never says how to reach %s", a.Spec.Name)
+		}
+		if a.Definition.Version != "1.0.0" || !strings.Contains(drafts[i].Definition, "apiVersion") {
+			t.Errorf("specialist %s is not a 1.0.0 definition file", a.Spec.Name)
 		}
 	}
-	if got := specs[0].Tools; !reflect.DeepEqual(got, []string{"jira_comment"}) {
+	if got := agents[0].Spec.Tools; !reflect.DeepEqual(got, []string{"jira_comment"}) {
 		t.Errorf("support's tools = %v, want what was asked for", got)
 	}
 }
 
-// A scaffold that returns can be stored, in the order returned, and reviews
-// clean once it is.
-func TestAScaffoldIsAcceptedByTheRegistryAndPassesReview(t *testing.T) {
+// A scaffold that returns can be stored, in the order returned, resolves, and
+// reviews clean once it is.
+func TestAScaffoldIsAcceptedByTheSourceAndPassesReview(t *testing.T) {
 	t.Parallel()
-	specs, err := author.Scaffold(system())
+	drafts, err := author.Scaffold(system())
 	if err != nil {
 		t.Fatalf("Scaffold: %v", err)
 	}
-	store := registry.NewMemory()
-	for _, s := range specs {
+	ctx := context.Background()
+	store := definition.NewMemory()
+	for i, d := range drafts {
 		// Stored before review, so a router is reviewed against specialists
 		// that exist: the order Scaffold returns is the order that works.
-		rev, err := store.Create(context.Background(), "acme", s, "test")
+		rec, err := store.Put(ctx, definition.Record{Tenant: "acme", Content: d.Definition, Policy: d.Policy, CreatedBy: "test"})
 		if err != nil {
-			t.Fatalf("the registry refused %s: %v", s.Name, err)
+			t.Fatalf("the source refused draft %d: %v", i, err)
 		}
-		if rev.Hash != s.Hash() {
-			t.Errorf("%s was not canonical: the registry stored different content", s.Name)
+		if _, err := definition.NewResolver(store, definition.Checks{}).Resolve(ctx, "acme", rec.Name); err != nil {
+			t.Fatalf("%s does not resolve: %v", rec.Name, err)
 		}
-		revs, _, err := store.List(context.Background(), "acme", registry.Page{})
+		recs, _, err := store.List(ctx, "acme", definition.Page{})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
 		world := author.World{}
-		for _, r := range revs {
-			world.Agents = append(world.Agents, r.Spec)
+		var self turn.Spec
+		for _, r := range recs {
+			a, err := definition.Parse(r.Content, r.Policy, definition.Checks{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			world.Agents = append(world.Agents, a.Spec)
+			if r.Name == rec.Name {
+				self = a.Spec
+			}
 		}
-		if got := author.Review(s, world); len(got) != 0 {
-			t.Errorf("%s has findings: %+v", s.Name, got)
+		if got := author.Review(self, world); len(got) != 0 {
+			t.Errorf("%s has findings: %+v", rec.Name, got)
 		}
 	}
 }
@@ -112,14 +139,14 @@ func TestAScaffoldThatCannotBeStoredIsRefused(t *testing.T) {
 			t.Parallel()
 			sys := system()
 			tc.edit(&sys)
-			if specs, err := author.Scaffold(sys); !errors.Is(err, author.ErrInvalid) || specs != nil {
-				t.Fatalf("Scaffold = %v, %v; want nothing and ErrInvalid", specs, err)
+			if drafts, err := author.Scaffold(sys); !errors.Is(err, author.ErrInvalid) || drafts != nil {
+				t.Fatalf("Scaffold = %v, %v; want nothing and ErrInvalid", drafts, err)
 			}
 		})
 	}
 	sys := system()
 	sys.Provider = "in-house"
-	if _, err := author.ScaffoldWith(sys, []string{"in-house"}); err != nil {
+	if _, err := author.ScaffoldWith(sys, definition.Checks{Providers: []string{"in-house"}}); err != nil {
 		t.Errorf("ScaffoldWith the deployment's own provider table: %v", err)
 	}
 }

@@ -18,7 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -137,9 +137,9 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	}
 
 	start(t, c.Run)
-	spec := agentspec.AgentSpec{Name: "triage", Model: "m", Provider: agentspec.ProviderOpenAI,
+	spec := definition.AgentSpec{Name: "triage", Model: "m", Provider: definition.ProviderOpenAI,
 		SystemPrompt: "Triage.", Tools: []string{"mcp:issues"}}
-	if _, err := c.Registry().Create(ctx, tenant, spec, "test"); err != nil {
+	if _, err := createAgent(c.Definitions(), ctx, tenant, spec, "test"); err != nil {
 		t.Fatal(err)
 	}
 	people3 := []envelope.Actor{{ID: "U-ana", User: "u-ana"}, {ID: "U-bob", User: "u-bob"}, {ID: "U-carol", User: "u-carol"}}

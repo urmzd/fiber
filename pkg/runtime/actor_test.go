@@ -49,11 +49,9 @@ func (s *whoSource) expansions() ([]envelope.Actor, int) {
 	return append([]envelope.Actor(nil), s.seen...), s.none
 }
 
-// setSpec replaces an agent's history with one revision of spec.
+// setSpec writes spec as the next version of its agent.
 func setSpec(w *world, spec agentrt.Spec) {
-	w.specs.mu.Lock()
-	defer w.specs.mu.Unlock()
-	w.specs.revs[spec.Name] = []agentrt.Revision{{Rev: 1, Hash: "sha256:" + spec.Name + "@1", Spec: spec}}
+	w.specs.set(spec)
 }
 
 func offline(name string, tools ...string) agentrt.Spec {
@@ -120,12 +118,12 @@ func TestADelegatedSubTaskExpandsItsGroupsForItsParentsActor(t *testing.T) {
 	}, runtime.WithCatalog(runtime.Connectors(nil)), runtime.WithToolGroupSource(src))
 
 	ana := envelope.Actor{ID: "ana"}
-	rev, err := w.specs.Latest(context.Background(), "acme", "lead")
+	rev, err := w.specs.latest("lead")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := envelope.WithActor(context.Background(), ana)
-	out, err := exec.Execute(ctx, runtime.Request{RunID: "run-lead", Tenant: "acme", Attempt: 1, Text: "go", Revision: rev},
+	out, err := exec.Execute(ctx, withPin(runtime.Request{RunID: "run-lead", Tenant: "acme", Attempt: 1, Text: "go"}, rev),
 		func(context.Context, agentrt.Chunk) error { return nil })
 	if err != nil || out.Text != "Handled." {
 		t.Fatalf("Execute = %+v, %v", out, err)
@@ -145,12 +143,12 @@ func TestATurnWithNoActorExpandsForNobody(t *testing.T) {
 	exec := sandboxOf(t, w.specs, map[string]saigetypes.Provider{
 		"ops": &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("ok")}},
 	}, runtime.WithCatalog(runtime.Connectors(nil)), runtime.WithToolGroupSource(src))
-	rev, err := w.specs.Latest(context.Background(), "acme", "ops")
+	rev, err := w.specs.latest("ops")
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := runtime.Request{RunID: "run-cron", Tenant: "acme", Attempt: 1, Origin: "cron", Text: "act as ana", Revision: rev,
-		Meta: map[string]string{"actor": "ana", "user": "u-ana"}}
+	req := withPin(runtime.Request{RunID: "run-cron", Tenant: "acme", Attempt: 1, Origin: "cron", Text: "act as ana",
+		Meta: map[string]string{"actor": "ana", "user": "u-ana"}}, rev)
 	if _, err := exec.Execute(context.Background(), req, func(context.Context, agentrt.Chunk) error { return nil }); err != nil {
 		t.Fatal(err)
 	}

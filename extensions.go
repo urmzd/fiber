@@ -14,15 +14,14 @@ import (
 
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/cron"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
-	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -52,7 +51,7 @@ type options struct {
 
 	// Backends. Nil is memory, except where Postgres fills them.
 	Bus         bus.Bus
-	Registry    registry.Store
+	Definitions definition.Source
 	Ledger      Ledger
 	Queue       dqueue.Queue
 	Threads     thread.Store
@@ -94,7 +93,7 @@ type toolProviderSeed struct {
 // providerNames is the provider table definitions are validated against: the
 // built-in names plus every extension's, sorted.
 func (e options) providerNames() []string {
-	names := agentspec.KnownProviders()
+	names := definition.KnownProviders()
 	for name := range e.Providers {
 		if !slices.Contains(names, name) {
 			names = append(names, name)
@@ -102,6 +101,11 @@ func (e options) providerNames() []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// checks are the deployment facts definitions are validated against.
+func (e options) checks() definition.Checks {
+	return definition.Checks{Providers: e.providerNames()}
 }
 
 // catalog chains the connectors' actions with the extensions' catalogs. A

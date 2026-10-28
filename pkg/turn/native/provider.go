@@ -239,7 +239,7 @@ func openaiFromEnv(spec Spec) (saigetypes.Provider, error) {
 	return e.Provider()(spec)
 }
 
-// Conditions a spec's FallbackOn may name. They mirror agentspec's, and each
+// Conditions a spec's FallbackOn may name. They mirror the policy's (definition.FallbackConditions), and each
 // is one of saige's error classifications. Whatever is named, an error no
 // other model can fix never falls through: see fallbackRule.
 const (
@@ -352,11 +352,11 @@ func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Pro
 		newProvider, ok := c.providers[ref.Provider]
 		if !ok || newProvider == nil {
 			if i == 0 {
-				return nil, nil, fmt.Errorf("%w: agent %q revision %d names provider %q; this deployment has %v",
-					ErrInvalid, rev.Spec.Name, rev.Rev, ref.Provider, providerNames(c.providers))
+				return nil, nil, fmt.Errorf("%w: agent %q version %s names provider %q; this deployment has %v",
+					ErrInvalid, rev.Spec.Name, rev.Version, ref.Provider, providerNames(c.providers))
 			}
-			return nil, nil, fmt.Errorf("%w: agent %q revision %d fallback %d names provider %q; this deployment has %v",
-				ErrInvalid, rev.Spec.Name, rev.Rev, i, ref.Provider, providerNames(c.providers))
+			return nil, nil, fmt.Errorf("%w: agent %q version %s fallback %d names provider %q; this deployment has %v",
+				ErrInvalid, rev.Spec.Name, rev.Version, i, ref.Provider, providerNames(c.providers))
 		}
 		spec := rev.Spec
 		spec.Provider, spec.Model, spec.Fallbacks, spec.FallbackOn = ref.Provider, ref.Model, nil, nil
@@ -365,11 +365,11 @@ func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Pro
 			if i == 0 {
 				return nil, nil, err
 			}
-			return nil, nil, fmt.Errorf("native: agent %q revision %d fallback %d (%s %q): %w",
-				rev.Spec.Name, rev.Rev, i, ref.Provider, ref.Model, err)
+			return nil, nil, fmt.Errorf("native: agent %q version %s fallback %d (%s %q): %w",
+				rev.Spec.Name, rev.Version, i, ref.Provider, ref.Model, err)
 		}
 		if p == nil {
-			return nil, nil, fmt.Errorf("%w: agent %q revision %d: provider %q built no model", ErrInvalid, rev.Spec.Name, rev.Rev, ref.Provider)
+			return nil, nil, fmt.Errorf("%w: agent %q version %s: provider %q built no model", ErrInvalid, rev.Spec.Name, rev.Version, ref.Provider)
 		}
 		members = append(members, p)
 	}
@@ -378,7 +378,7 @@ func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Pro
 	}
 	chain, err := fallback.New(fallback.Config{Providers: members}, fallback.WithFallbackOn(rule))
 	if err != nil {
-		return nil, nil, fmt.Errorf("native: agent %q revision %d: fallback: %w", rev.Spec.Name, rev.Rev, err)
+		return nil, nil, fmt.Errorf("native: agent %q version %s: fallback: %w", rev.Spec.Name, rev.Version, err)
 	}
 	return chain, members, nil
 }

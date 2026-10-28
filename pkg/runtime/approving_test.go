@@ -29,8 +29,9 @@ func (g guardedCalls) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalRe
 	return agentrt.ApprovalRequest{Prompt: "Allow ops to call guarded?", Approvers: g.approvers, SelfApproval: g.self}, true
 }
 
-// newGuarded is a parking world whose agent delegates through guardedCalls
-// and whose spec names approvers of its own, which the call's must replace.
+// newGuarded is a parking world whose agent delegates through guardedCalls.
+// A definition names approvers only alongside approval.ask, so this one names
+// none, and only the call's approvers may answer.
 func newGuarded(t *testing.T, approvers []string, self bool) (*parking, guardedCalls) {
 	t.Helper()
 	w := newWorld(t)
@@ -40,13 +41,10 @@ func newGuarded(t *testing.T, approvers []string, self bool) (*parking, guardedC
 	p := &parking{world: w, deploy: tool.countingTool, model: &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 		call("c1", "call_agent", map[string]any{"agent": "guarded"}), agenttest.TextResponse("Done."),
 	}}}
-	rev := agentrt.Revision{Rev: 1, Hash: "sha256:ops@1", Spec: agentrt.Spec{
+	w.specs.set(agentrt.Spec{
 		Name: "ops", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "You delegate.",
-		Tools: []string{"call_agent"}, Approvers: []string{"spec-approver"},
-	}}
-	w.specs.mu.Lock()
-	w.specs.revs["ops"] = []agentrt.Revision{rev}
-	w.specs.mu.Unlock()
+		Tools: []string{"call_agent"},
+	})
 	p.exec = sandboxOf(t, w.specs, map[string]saigetypes.Provider{"ops": p.model, "docs-bot": bystander()},
 		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
 			return agentrt.StaticTools(tool), nil

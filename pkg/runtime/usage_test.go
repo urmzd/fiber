@@ -369,10 +369,8 @@ func chain(sp *specs) {
 	for _, agent := range []string{"assistant", "helper", "lead"} {
 		sp.revise(agent, agent+".")
 	}
-	sp.mu.Lock()
-	defer sp.mu.Unlock()
-	sp.revs["lead"][0].Spec.Access.Spawn = []string{"helper"}
-	sp.revs["helper"][0].Spec.Access.Spawn = []string{"assistant"}
+	sp.edit("helper", func(s *agentrt.Spec) { s.Access.Spawn = []string{"assistant"} })
+	sp.edit("lead", func(s *agentrt.Spec) { s.Access.Spawn = []string{"helper"} })
 }
 
 // chainModels gives each agent a model that delegates to the next agent once
@@ -600,9 +598,7 @@ func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
 	w.concurrency = 4
 	w.specs.revise("lead", "Lead.")
 	w.specs.revise("helper", "Help.")
-	w.specs.mu.Lock()
-	w.specs.revs["lead"][0].Spec.Access.Spawn = []string{"helper"}
-	w.specs.mu.Unlock()
+	w.specs.edit("lead", func(s *agentrt.Spec) { s.Access.Spawn = []string{"helper"} })
 
 	var rt *runtime.Runtime
 	refusals := map[string]error{}

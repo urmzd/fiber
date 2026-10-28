@@ -8,10 +8,10 @@
 //     no key and no network; a real one returns the team's own
 //     saige Provider.
 //   - an OpenAI-compatible endpoint named "fireworks", selected by the same
-//     spec field, with its key read from $FIREWORKS_API_KEY at run time.
+//     model.use field, with its key read from $FIREWORKS_API_KEY at run time.
 //   - a tool, "lookup_runbook", that any agent can be granted by name.
 //
-// It creates an agent on the house provider, raises one tag in process and
+// It stores the agent agents/oncall.agent.md defines, on the house provider, raises one tag in process and
 // prints the answer:
 //
 //	go run ./examples/downstream
@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -27,15 +28,19 @@ import (
 
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
-	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
+
+// oncall is the agent, as a saige definition file.
+//
+//go:embed agents/oncall.agent.md
+var oncall string
 
 func main() {
 	if err := run(); err != nil {
@@ -70,10 +75,10 @@ func run() error {
 	done := make(chan error, 1)
 	go func() { done <- app.Run(ctx) }()
 
-	if _, err := app.Registry().Create(ctx, tenant, agentspec.AgentSpec{
-		Name: "oncall", Provider: "house", Model: "house-1",
-		SystemPrompt: "Help the on-call engineer.", Tools: []string{"lookup_runbook"},
-	}, "downstream"); err != nil && !errors.Is(err, registry.ErrExists) {
+	// Put is insert-only: storing the same file again is a no-op.
+	if _, err := app.Definitions().Put(ctx, definition.Record{
+		Tenant: tenant, Content: oncall, CreatedBy: "downstream",
+	}); err != nil && !errors.Is(err, definition.ErrExists) {
 		return err
 	}
 
@@ -115,7 +120,7 @@ func run() error {
 	}
 }
 
-// houseProvider builds the model client for one agent revision. It receives
+// houseProvider builds the model client for one agent version. It receives
 // the whole spec, so it can key on the model name or the agent.
 func houseProvider(spec agentrt.Spec) (saigetypes.Provider, error) {
 	return &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{

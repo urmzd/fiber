@@ -18,9 +18,10 @@
 //
 // # Pinning, and why it is the most important line in this package
 //
-// Accept resolves the agent's current revision ONCE and writes its number into
-// the run's input. Every execution of that run, forever, resolves that number.
-// Nothing inside the workflow body ever asks for "latest".
+// Accept resolves the agent's latest definition ONCE and writes its pin
+// (pkg/definition.Pin) into the run's input. Every execution of that run,
+// forever, verifies that pin. Nothing inside the workflow body ever asks for
+// "latest".
 //
 // This is not a nicety. anchor replays a workflow from the top: on the second
 // attempt the body re-executes and its recorded calls are matched by name and
@@ -31,16 +32,16 @@
 // somehow proceed, half a conversation would be answered by one definition and
 // half by another, and the transcript would be a lie.
 //
-// The pinned revision's content hash travels with it, so a revision whose
-// content changed under a pinned number fails loudly instead of executing
-// something the run never agreed to.
+// The pin carries saige's resolved digest, the exact sub-agent versions and
+// the policy hash, so a definition whose content moved under its version
+// fails terminally instead of executing something the run never agreed to.
 //
 // # History is pinned the same way, for the same reason
 //
 // With a thread store (WithThreads) a run continues the conversation of the
 // thread its tag belongs to (see thread.KeyOf). The journal of that thread
 // keeps growing while a run waits in the queue and between its attempts, so
-// "the history" is exactly as unstable as "the latest revision", and it gets
+// "the history" is exactly as unstable as "the latest version", and it gets
 // exactly the same treatment: Accept reads the journal's head ONCE and writes
 // that sequence number into the run's input, and every execution loads the
 // entries at or below it. Nothing inside the workflow body ever asks the
@@ -49,7 +50,7 @@
 // made a day later asks the model what the first attempt asked.
 //
 // A journal that no longer holds what a run pinned fails the run terminally,
-// as a revision whose hash moved does. The alternative is an agent that
+// as a definition whose digest moved does. The alternative is an agent that
 // silently forgot half a conversation.
 //
 // A completed run appends its exchange to the journal: the request as the
@@ -132,6 +133,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/event/legacy"
@@ -147,17 +149,25 @@ import (
 // name, never a redefinition of an existing one.
 const (
 	// ActivityTurn is the run's entry point: one durable turn.
-	ActivityTurn = "fiber.turn"
+	ActivityTurn = "fiber.turn.v2"
 	// ActivityAgent is the nested activity that executes the agent. It is
 	// separate from the turn so that its result is memoized on its own: a
 	// replay of the turn re-publishes lifecycle events but must never pay for
 	// the model a second time.
-	ActivityAgent = "fiber.turn.agent"
+	ActivityAgent = "fiber.turn.agent.v2"
 	// ActivityResume continues a turn that parked on a question, with the
 	// answer. It is its own activity because its input is not Input: it
 	// carries the parked turn and the answer, both read from records, so a
 	// replay hashes the same input and reads the same result.
-	ActivityResume = "fiber.turn.resume"
+	ActivityResume = "fiber.turn.resume.v2"
+)
+
+// The activity names before the event union. A run recorded under one is
+// failed terminally (legacy.go): its input is a tag, not an event.
+const (
+	ActivityTurnV1   = "fiber.turn"
+	ActivityAgentV1  = "fiber.turn.agent"
+	ActivityResumeV1 = "fiber.turn.resume"
 )
 
 // ErrInvalid reports a tag or configuration this package cannot run.
@@ -170,23 +180,24 @@ type Bus interface {
 	Publish(ctx context.Context, e event.Envelope) error
 }
 
-// Specs resolves agent definitions. The control plane implements it.
+// Definitions pins agent definitions and loads them back. A
+// *definition.Resolver implements it.
 //
-// The two methods exist for the two moments that matter. Latest is called once,
-// at accept time, and is the only place "current" is ever asked for. At is called
-// on every execution of a run with the number that was pinned, and must return
-// the same immutable revision forever — including after the agent has been
-// revised past it, and including after it has been deleted, or a run in flight
-// would be unable to finish.
-type Specs interface {
-	Latest(ctx context.Context, tenant, agent string) (agentrt.Revision, error)
-	At(ctx context.Context, tenant, agent string, rev int) (agentrt.Revision, error)
+// Resolve is called once, at accept time, and is the only place "latest" is
+// ever asked for. ResolveAt pins one exact version, for a delegation that
+// runs the sub-agent version its parent pinned. Verify is called on every
+// execution of a run with the pin it accepted; it reloads exactly that and
+// fails terminally when it no longer holds.
+type Definitions interface {
+	Resolve(ctx context.Context, tenant, name string) (definition.Pin, error)
+	ResolveAt(ctx context.Context, tenant, name, version string) (definition.Pin, error)
+	Verify(ctx context.Context, tenant string, pin definition.Pin) (definition.Loaded, error)
 }
 
 // Executor runs one turn in isolation and streams what it produces.
 //
 // It is an interface because isolation is a deployment decision: Sandbox runs
-// the turn as a playscape task under the pinned revision's NGAC policy, and that
+// the turn as a playscape task under the pinned definition's NGAC policy, and that
 // is the implementation a deployment should use. A caller that has already
 // isolated its process differently can supply another.
 //
@@ -201,7 +212,8 @@ type Executor interface {
 	Execute(ctx context.Context, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error)
 }
 
-// Input is a run's durable input: the tag, plus the revision pinned to it.
+// Input is a run's durable input: the event that triggered it, the agent it
+// runs for, and the definition pinned to it.
 //
 // It must be byte-identical on every attempt, because anchor hashes it to
 // match a replayed call against its record. Nothing derived from the moment of
@@ -209,14 +221,12 @@ type Executor interface {
 // sequence number. The attempt-varying values a turn needs are read from the
 // replay frame instead (see anchor.FromContext).
 type Input struct {
-	// Tag is the request as the trigger raised it.
-	Tag envelope.Tag `json:"tag"`
-	// Rev is the revision pinned at accept time. It never changes.
-	Rev int `json:"rev"`
-	// Hash is the pinned revision's content hash, or empty if the control
-	// plane does not compute one. When present, it is verified before the
-	// agent runs.
-	Hash string `json:"hash,omitempty"`
+	// Trigger is the event the run answers, tenant set by the host.
+	Trigger event.Envelope `json:"trigger"`
+	// Subscriber is the agent the run is for.
+	Subscriber string `json:"subscriber"`
+	// Pin is the definition pinned at accept time. It never changes.
+	Pin definition.Pin `json:"pin"`
 	// HistorySeq is the head of the tag's thread journal, pinned at accept
 	// time: the run is shown the entries with a sequence at or below it and
 	// nothing newer, on every attempt. Zero means no history, which is also
@@ -240,8 +250,9 @@ type ParentRef struct {
 
 // Output is a run's durable result.
 type Output struct {
-	// Rev is the revision that executed, which is always Input.Rev.
-	Rev int `json:"rev"`
+	// Version is the definition version that executed, which is always
+	// Input.Pin.Version.
+	Version string `json:"version"`
 	// Text is the agent's final answer.
 	Text string `json:"text"`
 	// LastSeq is the sequence of the run's completed event: the cursor a
@@ -267,10 +278,10 @@ type Output struct {
 	Usage *payload.RunUsage `json:"usage,omitempty"`
 }
 
-// Request is one turn handed to an Executor: the tag's content, plus the exact
-// definition to run it with.
+// Request is one turn handed to an Executor: the trigger's content, plus the
+// exact definition to run it with.
 //
-// Revision is a resolved, pinned value rather than a name and a number. An
+// Definition is a resolved, pinned value rather than a name and a version. An
 // executor must not re-resolve it: it may be running in a sandbox, in another
 // process, or on another machine, and "the definition to run" is not a question
 // it is allowed to answer.
@@ -296,15 +307,20 @@ type Request struct {
 	// Meta is trigger context.
 	Meta map[string]string `json:"meta,omitempty"`
 	// History is the thread's conversation so far, oldest first, as pinned at
-	// accept time. Like Revision it is a resolved value: an executor replays
+	// accept time. Like Definition it is a resolved value: an executor replays
 	// it and must not go looking for a newer one.
 	History []agentrt.Message `json:"history,omitempty"`
 
 	// Attachments are the files that arrived with the tag, as references. A
 	// delegated sub-task inherits its parent's, under the same tenant.
 	Attachments []attachment.Attachment `json:"attachments,omitempty"`
-	// Revision is the pinned definition to execute.
-	Revision agentrt.Revision `json:"revision"`
+	// Definition is the pinned definition to execute, compiled for a turn.
+	Definition agentrt.Revision `json:"definition"`
+	// Pin is what Definition was verified against.
+	Pin definition.Pin `json:"pin"`
+	// Policy is the pinned definition's policy: the sandbox's NGAC grants
+	// and who may answer its questions are read from it.
+	Policy definition.Policy `json:"policy"`
 	// Service is set by the Sandbox: the playscape deployment this turn runs
 	// in, so a delegated sub-task can be awaited in the right place.
 	Service string `json:"service,omitempty"`
@@ -321,7 +337,7 @@ type Request struct {
 	// QuestionTTL is how long a question waits for an answer.
 	QuestionTTL time.Duration `json:"question_ttl,omitempty"`
 	// Resume continues a turn that parked, with the answers its pending tool
-	// calls have. Like Revision and History it is a resolved value, read
+	// calls have. Like Definition and History it is a resolved value, read
 	// from the run's records.
 	Resume *agentrt.Parked `json:"resume,omitempty"`
 	// ChildRuns makes a delegation a child run the turn parks on, rather
@@ -331,10 +347,10 @@ type Request struct {
 }
 
 // Agent returns the agent name.
-func (r Request) Agent() string { return r.Revision.Spec.Name }
+func (r Request) Agent() string { return r.Definition.Spec.Name }
 
-// Rev returns the pinned revision number.
-func (r Request) Rev() int { return r.Revision.Rev }
+// Version returns the pinned definition version.
+func (r Request) Version() string { return r.Definition.Version }
 
 // Outcome is what an Executor produced.
 type Outcome struct {
@@ -354,7 +370,7 @@ type Outcome struct {
 	// Stored is the workspace key the answer was written to.
 	Stored string `json:"stored,omitempty"`
 	// StoreError explains why the answer was not stored. A policy denial here
-	// is not a turn failure: it means the pinned revision was not granted that
+	// is not a turn failure: it means the pinned definition was not granted that
 	// workspace area, which is the sandbox working as defined.
 	StoreError string `json:"store_error,omitempty"`
 	// Stopped is set when the turn ended because it was asked to stop. Text
@@ -385,14 +401,13 @@ type Outcome struct {
 // tenant and channel the run publishes on, so the caller never derives them.
 type Acceptance struct {
 	RunID string
-	// Rev is the revision this call resolved. For the delivery that created
-	// the run it is the pinned revision. For a redelivery it is whatever is
-	// current now, which may be higher than what the run actually pinned:
-	// Accept must announce before it submits (see below), so at the moment it
-	// resolves it cannot yet know the run already exists. The run's own events
-	// always carry the pinned revision — read Rev off the stream, or off the
-	// run record, if the distinction matters.
-	Rev int
+	// Version is the definition version this call resolved. For the
+	// delivery that created the run it is the pinned version. For a
+	// redelivery it is whatever is latest now, which may be newer than what
+	// the run actually pinned: Accept must announce before it submits (see
+	// below), so at the moment it resolves it cannot yet know the run
+	// already exists. The run's own events always carry the pinned version.
+	Version string
 	// Tenant and Channel are where the run's events are published.
 	Tenant     string
 	Channel    string
@@ -423,7 +438,7 @@ func DecodeEntry(raw []byte) (event.Envelope, error) {
 // Runtime accepts tags and runs them durably.
 type Runtime struct {
 	client *anchor.Client
-	specs  Specs
+	defs   Definitions
 	bus    Bus
 	exec   Executor
 	stride uint64
@@ -535,12 +550,12 @@ func WithMessageID(fn func(envelope.Tag) string) Option {
 // a fleet serving two tenants' agents with different executors) would otherwise
 // panic on a duplicate activity name at construction. Pass Registry() to the
 // worker that consumes these runs.
-func New(client *anchor.Client, specs Specs, b Bus, exec Executor, opts ...Option) (*Runtime, error) {
+func New(client *anchor.Client, defs Definitions, b Bus, exec Executor, opts ...Option) (*Runtime, error) {
 	switch {
 	case client == nil:
 		return nil, fmt.Errorf("%w: no anchor client", ErrInvalid)
-	case specs == nil:
-		return nil, fmt.Errorf("%w: no spec source; a run cannot pin a revision it cannot resolve", ErrInvalid)
+	case defs == nil:
+		return nil, fmt.Errorf("%w: no definitions; a run cannot pin a definition it cannot resolve", ErrInvalid)
 	case b == nil:
 		return nil, fmt.Errorf("%w: no bus; a run whose events nobody can see has not done its job", ErrInvalid)
 	case exec == nil:
@@ -548,7 +563,7 @@ func New(client *anchor.Client, specs Specs, b Bus, exec Executor, opts ...Optio
 	}
 	r := &Runtime{
 		client:   client,
-		specs:    specs,
+		defs:     defs,
 		bus:      b,
 		exec:     exec,
 		stride:   DefaultStride,
@@ -577,8 +592,14 @@ func New(client *anchor.Client, specs Specs, b Bus, exec Executor, opts ...Optio
 	r.turn = anchor.ActivityIn(r.registry, ActivityTurn, r.runTurn)
 	r.agent = anchor.ActivityIn(r.registry, ActivityAgent, r.runAgent)
 	r.resume = anchor.ActivityIn(r.registry, ActivityResume, r.runResume)
-	// A run accepted before the rename is ended with a reason (legacy.go).
-	anchor.ActivityIn(r.registry, pgrename.LegacyActivityTurn, r.failRunFromBeforeRename)
+	// A run accepted before the event union, or before the rename, is ended
+	// with a reason (legacy.go).
+	for _, name := range []string{ActivityTurnV1, pgrename.LegacyActivityTurn} {
+		anchor.ActivityIn(r.registry, name, r.failRunFromBeforeUnion)
+	}
+	for _, name := range []string{ActivityAgentV1, ActivityResumeV1} {
+		anchor.ActivityIn(r.registry, name, r.failActivityFromBeforeUnion)
+	}
 	return r, nil
 }
 
@@ -588,34 +609,37 @@ func New(client *anchor.Client, specs Specs, b Bus, exec Executor, opts ...Optio
 //	w := worker.New(ledger, queue, worker.WithRegistry(rt.Registry()))
 func (r *Runtime) Registry() *run.Registry { return r.registry }
 
-// Accept pins a revision to the tag and durably submits the run.
+// Accept pins a definition to the tag and durably submits the run.
 //
-// Order matters, and it is not the obvious one. The revision is resolved first,
-// so a tag naming an unknown agent is refused rather than accepted and then
-// failed. The accepted event is published SECOND, before the run is submitted,
-// because submitting makes the run claimable and a fast worker would otherwise
-// publish started first — and the bus treats a sequence at or below a run's
-// high-water mark as an already-seen event, so an accepted event that lost that
-// race would be dropped rather than delivered late. Events must reach the bus in
-// ascending sequence order, and sequence 1 belongs to accepted.
+// Order matters, and it is not the obvious one. The definition is resolved
+// first, so a tag naming an unknown agent is refused rather than accepted and
+// then failed. The accepted event is published SECOND, before the run is
+// submitted, because submitting makes the run claimable and a fast worker
+// would otherwise publish started first — and the bus treats a sequence at or
+// below a run's high-water mark as an already-seen event, so an accepted event
+// that lost that race would be dropped rather than delivered late. Events must
+// reach the bus in ascending sequence order, and sequence 1 belongs to
+// accepted.
 //
 // The cost of that order is a tag that is announced and then fails to submit. It
 // is the cheaper failure: the caller gets the error synchronously and retries the
 // same tag, which lands on the same run id and the same sequence 1, so the
 // announcement it already made is the announcement it makes again.
 //
-// Accept is idempotent on Tag.ID: a redelivery cannot change what the run pinned,
-// because anchor returns the existing run untouched and the bus keeps the first
-// write of sequence 1. (A redelivery does re-resolve the current revision for its
-// own accepted event, which the bus then discards. The run's own events all
-// report the pinned revision, which is the one that matters.) The same holds for
-// the history pin: a redelivery reads a newer head and anchor discards it.
+// Accept is idempotent on Tag.ID: a redelivery cannot change what the run
+// pinned, because anchor returns the existing run untouched and the bus keeps
+// the first write of sequence 1. The same holds for the history pin: a
+// redelivery reads a newer head and anchor discards it.
+//
+// The tag is read as its trigger event (TriggerOf) before anything is pinned:
+// the run's input holds the event, never the tag.
 func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
-	return r.accept(ctx, tag, nil)
+	return r.accept(ctx, tag, nil, "")
 }
 
-// accept is Accept for a run that may be another run's child.
-func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRef) (Acceptance, error) {
+// accept is Accept for a run that may be another run's child. A child runs
+// the version its parent pinned for it.
+func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRef, version string) (Acceptance, error) {
 	if err := tag.Validate(); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept: %w", err)
 	}
@@ -626,25 +650,30 @@ func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRe
 	if _, err := topic.Run(tag.Agent, runID); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
 	}
-	rev, err := r.specs.Latest(ctx, tag.Tenant, tag.Agent)
+	var (
+		pin definition.Pin
+		err error
+	)
+	if version != "" {
+		pin, err = r.defs.ResolveAt(ctx, tag.Tenant, tag.Agent, version)
+	} else {
+		pin, err = r.defs.Resolve(ctx, tag.Tenant, tag.Agent)
+	}
 	if err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: resolve agent %q: %w", tag.ID, tag.Agent, err)
 	}
-	if err := rev.Validate(); err != nil {
-		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
-	}
 
-	// The second pin. It is taken here, next to the revision's, because it is
-	// the same kind of fact: something that keeps moving, read once.
+	// The second pin. It is taken here, next to the definition's, because it
+	// is the same kind of fact: something that keeps moving, read once.
 	seq, err := r.pinHistory(ctx, tag)
 	if err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
 	}
 
-	in := Input{Tag: tag, Rev: rev.Rev, Hash: rev.Hash, HistorySeq: seq, Parent: parent}
-	acc := Acceptance{RunID: runID, Rev: rev.Rev, Tenant: TenantOf(tag), Channel: ChannelOf(tag), AcceptedAt: r.now().UTC()}
+	in := Input{Trigger: TriggerOf(tag), Subscriber: tag.Agent, Pin: pin, HistorySeq: seq, Parent: parent}
+	acc := Acceptance{RunID: runID, Version: pin.Version, Tenant: TenantOf(tag), Channel: ChannelOf(tag), AcceptedAt: r.now().UTC()}
 
-	e := r.event(in, SeqAccepted, event.Accepted{Rev: rev.Rev})
+	e := r.event(in, SeqAccepted, event.Accepted{})
 	if err := r.bus.Publish(ctx, e); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", tag.ID, err)
 	}
@@ -721,7 +750,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	case errors.Is(err, run.ErrParked):
 		// The run stopped at an event that has no record yet. It is not
 		// failed and it has not consumed retry budget; it waits.
-		at.report(ctx, event.Parked{Attempt: attempt, Rev: in.Rev, Reason: err.Error()})
+		at.report(ctx, event.Parked{Attempt: attempt, Reason: err.Error()})
 		return Output{}, err
 
 	case err != nil:
@@ -731,7 +760,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// later exhausts its budget has its last failure on the bus marked
 		// non-terminal; the ledger stays the authority on run status.
 		terminal := run.IsNonRetryable(err) || errors.Is(err, run.ErrNonDeterministic)
-		at.report(ctx, event.Failed{Attempt: attempt, Rev: in.Rev, Error: err.Error(), Terminal: terminal})
+		at.report(ctx, event.Failed{Attempt: attempt, Error: err.Error(), Terminal: terminal})
 		if terminal {
 			r.answerParent(ctx, in, "", nil, err)
 		}
@@ -747,7 +776,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	// run. A stopped run is remembered the same way, for the same reason: the
 	// reply to a stopped answer is the whole point of stopping gently.
 	if err := r.remember(ctx, in, out); err != nil {
-		at.report(ctx, event.Failed{Attempt: attempt, Rev: in.Rev, Error: err.Error()})
+		at.report(ctx, event.Failed{Attempt: attempt, Error: err.Error()})
 		return Output{}, err
 	}
 
@@ -764,26 +793,26 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// and never retries it. Everything here comes from the agent's
 		// recorded outcome, so a replay announces the same stop.
 		if err := at.publish(ctx, event.Stopped{
-			Attempt: attempt, Rev: in.Rev, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
+			Attempt: attempt, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
 			Usage: eventUsage(out.Usage),
 		}); err != nil {
 			return Output{}, err
 		}
 		r.answerParent(ctx, in, out.Text, out.Stopped, nil)
 		return Output{
-			Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
+			Version: in.Pin.Version, Text: out.Text, LastSeq: b.close, Attempt: attempt,
 			Events: events, Stopped: out.Stopped, Usage: out.Usage,
 		}, nil
 	}
 
 	if err := at.publish(ctx, event.Completed{
-		Attempt: attempt, Rev: in.Rev, Text: out.Text, Usage: eventUsage(out.Usage),
+		Attempt: attempt, Text: out.Text, Usage: eventUsage(out.Usage),
 	}); err != nil {
 		return Output{}, err
 	}
 	r.answerParent(ctx, in, out.Text, nil, nil)
 	return Output{
-		Rev: in.Rev, Text: out.Text, LastSeq: b.close, Attempt: attempt,
+		Version: in.Pin.Version, Text: out.Text, LastSeq: b.close, Attempt: attempt,
 		Events: events, Stored: out.Stored, Usage: out.Usage,
 	}, nil
 }
@@ -802,7 +831,7 @@ func (r *Runtime) claimStop(ctx context.Context, in Input) {
 	case err == nil, errors.Is(err, run.ErrParked):
 	default:
 		r.logger.Warn("fiber/runtime: could not claim the recorded stop request",
-			"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "error", err)
+			"run_id", in.runID(), "error", err)
 	}
 }
 
@@ -831,12 +860,12 @@ func (a *attemptLog) open(ctx context.Context) error {
 	if a.opened {
 		return nil
 	}
-	var body event.Body = event.Started{Attempt: a.attempt, Rev: a.in.Rev}
+	var body event.Body = event.Started{Attempt: a.attempt}
 	if a.attempt > 1 {
 		// Attempt 1 started the work; every later attempt resumed it, whether
 		// it was parked on a question or interrupted by a crash. The answer,
 		// when there is one, says which.
-		body = event.Resumed{Attempt: a.attempt, Rev: a.in.Rev, Answer: eventAnswer(a.answer)}
+		body = event.Resumed{Attempt: a.attempt, Answer: eventAnswer(a.answer)}
 	}
 	if err := a.r.publish(ctx, a.in, a.band.open, body); err != nil {
 		return err
@@ -860,13 +889,14 @@ func (a *attemptLog) publish(ctx context.Context, body event.Body) error {
 func (a *attemptLog) report(ctx context.Context, body event.Body) {
 	if err := a.publish(ctx, body); err != nil {
 		a.r.logger.Warn("fiber/runtime: could not publish lifecycle event",
-			"run_id", RunID(a.in.Tag.Tenant, a.in.Tag.ID), "type", body.Type(), "seq", a.band.close, "error", err)
+			"run_id", a.in.runID(), "type", body.Type(), "seq", a.band.close, "error", err)
 	}
 }
 
 // runAgent is the nested activity that executes the agent.
 //
-// It is where the pinned revision is resolved — by number, never by "latest" —
+// It is where the pinned definition is verified — by its pin, never by
+// "latest" —
 // and where the agent's events are published as they stream. Its result is
 // memoized, which is the whole reason it is a separate activity: a replay of the
 // turn must re-publish the run's lifecycle without paying for the model again.
@@ -888,10 +918,11 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 			return Outcome{}, err
 		}
 	}
-	rev, err := r.pinned(ctx, in)
+	loaded, err := r.pinned(ctx, in)
 	if err != nil {
 		return Outcome{}, err
 	}
+	rev := pinnedOf(loaded)
 	attempt := attemptOf(ctx)
 	b, err := newBand(r.stride, attempt)
 	if err != nil {
@@ -903,18 +934,21 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 		return Outcome{}, err
 	}
 
+	tag := in.Tag()
 	req := Request{
-		RunID:    RunID(in.Tag.Tenant, in.Tag.ID),
-		Tenant:   in.Tag.Tenant,
-		Attempt:  attempt,
-		Origin:   in.Tag.Origin,
-		Source:   in.Tag.Source.String(),
-		Text:     in.Tag.Text,
-		Meta:     in.Tag.Meta,
-		History:  history,
-		Revision: rev,
+		RunID:      in.runID(),
+		Tenant:     in.Trigger.Tenant,
+		Attempt:    attempt,
+		Origin:     tag.Origin,
+		Source:     tag.Source.String(),
+		Text:       tag.Text,
+		Meta:       tag.Meta,
+		History:    history,
+		Definition: rev,
+		Pin:        in.Pin,
+		Policy:     loaded.Agent.Policy,
 
-		Attachments: in.Tag.Attachments,
+		Attachments: tag.Attachments,
 
 		// A question can be parked on only where its answer can be
 		// recorded: in the ledger the run lives in.
@@ -932,15 +966,15 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 
 	// A Delegator's report of a child run is checked against the ledger and
 	// its total read from there; see ReportChildUsage.
-	execCtx := context.WithValue(ctx, childUsageKey{}, r.childUsage(in.Tag.Tenant, req.RunID))
-	execCtx = context.WithValue(execCtx, childQuestionKey{}, r.childQuestion(in.Tag.Tenant, req.RunID))
+	execCtx := context.WithValue(ctx, childUsageKey{}, r.childUsage(in.Trigger.Tenant, req.RunID))
+	execCtx = context.WithValue(execCtx, childQuestionKey{}, r.childQuestion(in.Trigger.Tenant, req.RunID))
 	// The turn acts for the actor on the run's record, read here and not
 	// from anything the turn produces, so a model cannot name someone else.
 	// It travels in the context rather than in the Request: an executor
 	// that acts for a person (a tool source opening a session with that
 	// person's own credential) reads envelope.ActorFrom, and the Request,
 	// which a sandbox serializes into its task, never carries it.
-	execCtx = envelope.WithActor(execCtx, in.Tag.Actor)
+	execCtx = envelope.WithActor(execCtx, tag.Actor)
 	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
 		body, err := agentrt.BodyOf(c)
 		if err != nil {
@@ -970,7 +1004,7 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	// that finally records an outcome reads these calls and counts them.
 	recorded := r.recordSpent(ctx, req.RunID, mine)
 	if err != nil {
-		return out, fmt.Errorf("runtime: run %s: agent %q revision %d: %w", req.RunID, rev.Spec.Name, rev.Rev, err)
+		return out, fmt.Errorf("runtime: run %s: agent %q version %s: %w", req.RunID, rev.Spec.Name, rev.Version, err)
 	}
 	var tally payload.Tally
 	for i := range prior {
@@ -989,32 +1023,29 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	return out, nil
 }
 
-// pinned resolves the run's pinned revision and refuses anything that is not it.
+// pinned verifies the run's pin and loads exactly what it names.
 //
-// The hash check is the second half of pinning. A revision is immutable by
-// contract, so a revision whose content hash no longer matches the one the run
-// pinned is either corruption or a control plane that mutated history. Executing
-// it would silently run a definition the run never agreed to, so it fails
-// terminally: replaying identical code against identical records cannot fix it.
-func (r *Runtime) pinned(ctx context.Context, in Input) (agentrt.Revision, error) {
-	rev, err := r.specs.At(ctx, in.Tag.Tenant, in.Tag.Agent, in.Rev)
+// The check is the second half of pinning. A version is immutable by
+// contract, so a definition whose digest, sub-agents or policy no longer match
+// the pin is either corruption or a store that mutated history. Executing it
+// would silently run a definition the run never agreed to, so it fails
+// terminally: replaying identical code against identical records cannot fix
+// it. There is no bypass for an empty digest: Verify refuses one.
+func (r *Runtime) pinned(ctx context.Context, in Input) (definition.Loaded, error) {
+	if in.Pin.Name != in.Subscriber {
+		return definition.Loaded{}, anchor.NonRetryable(fmt.Errorf(
+			"%w: run for agent %q pinned definition %q", ErrInvalid, in.Subscriber, in.Pin.Name))
+	}
+	loaded, err := r.defs.Verify(ctx, in.Trigger.Tenant, in.Pin)
 	if err != nil {
-		return agentrt.Revision{}, fmt.Errorf("runtime: resolve agent %q revision %d: %w", in.Tag.Agent, in.Rev, err)
+		return definition.Loaded{}, fmt.Errorf("runtime: agent %q version %s: %w", in.Subscriber, in.Pin.Version, err)
 	}
-	if err := rev.Validate(); err != nil {
-		return agentrt.Revision{}, anchor.NonRetryable(err)
-	}
-	if rev.Rev != in.Rev {
-		return agentrt.Revision{}, anchor.NonRetryable(fmt.Errorf(
-			"%w: run pinned agent %q revision %d but the control plane returned revision %d",
-			ErrInvalid, in.Tag.Agent, in.Rev, rev.Rev))
-	}
-	if in.Hash != "" && rev.Hash != "" && in.Hash != rev.Hash {
-		return agentrt.Revision{}, anchor.NonRetryable(fmt.Errorf(
-			"%w: agent %q revision %d hash is %s, but this run pinned %s; an immutable revision changed",
-			ErrInvalid, in.Tag.Agent, in.Rev, rev.Hash, in.Hash))
-	}
-	return rev, nil
+	return loaded, nil
+}
+
+// pinnedOf is a verified pin as the definition a turn runs.
+func pinnedOf(l definition.Loaded) agentrt.Revision {
+	return agentrt.Revision{Name: l.Pin.Name, Version: l.Pin.Version, Digest: l.Pin.Digest, Spec: l.Agent.Spec}
 }
 
 // pinHistory returns the sequence number a run of tag is pinned to: the head
@@ -1060,7 +1091,7 @@ func (r *Runtime) pinnedHistory(ctx context.Context, in Input) ([]agentrt.Messag
 	if in.HistorySeq == 0 {
 		return nil, nil
 	}
-	key := thread.KeyOf(in.Tag)
+	key := thread.KeyOf(in.Tag())
 	if r.threads == nil {
 		return nil, anchor.NonRetryable(fmt.Errorf(
 			"%w: run pinned %d entries of thread %s but this runtime has no thread store",
@@ -1123,16 +1154,17 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	if r.threads == nil {
 		return nil
 	}
-	runID := RunID(in.Tag.Tenant, in.Tag.ID)
+	runID := in.runID()
 	entries := make([]thread.Entry, 0, 2)
 	// The request's files are journaled with it, as the references the run
 	// was handed, so a later run in the thread is shown them where this run
 	// was: after the request's text.
-	if said := firstNonEmpty(out.Prompt, in.Tag.Text); strings.TrimSpace(said) != "" || len(in.Tag.Attachments) > 0 {
+	tag := in.Tag()
+	if said := firstNonEmpty(out.Prompt, tag.Text); strings.TrimSpace(said) != "" || len(tag.Attachments) > 0 {
 		entries = append(entries, thread.Entry{
-			Role: thread.RoleUser, Text: said, Actor: in.Tag.Actor,
-			RunID: runID, SurfaceID: r.surfaceID(in.Tag), At: in.Tag.At,
-			Attachments: in.Tag.Attachments,
+			Role: thread.RoleUser, Text: said, Actor: tag.Actor,
+			RunID: runID, SurfaceID: r.surfaceID(tag), At: tag.At,
+			Attachments: tag.Attachments,
 		})
 	}
 	answer := out.Text
@@ -1144,14 +1176,14 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	if strings.TrimSpace(answer) != "" {
 		entries = append(entries, thread.Entry{
 			Role: thread.RoleAssistant, Text: answer,
-			Actor: envelope.Actor{ID: in.Tag.Agent, Bot: true},
+			Actor: envelope.Actor{ID: in.Subscriber, Bot: true},
 			RunID: runID, At: r.now(),
 		})
 	}
 	if len(entries) == 0 {
 		return nil
 	}
-	key := thread.KeyOf(in.Tag)
+	key := thread.KeyOf(tag)
 	if _, err := r.threads.Append(ctx, key, entries...); err != nil {
 		return fmt.Errorf("runtime: run %s: record the exchange in thread %s: %w", runID, key, err)
 	}
@@ -1198,25 +1230,24 @@ func (r *Runtime) publish(ctx context.Context, in Input, seq uint64, body event.
 	return nil
 }
 
-// event builds one event of a run. Its channel is the channel of the tag that
-// triggered the run, its id is the run and sequence, and it carries the
-// pinned revision as the definition version and its hash as the digest. It is
-// one hop from the trigger.
+// event builds one event of a run. Its channel is the channel of the event
+// that triggered the run, its id is the run and sequence, and it carries the
+// pinned version and digest. It is one hop from the trigger.
 func (r *Runtime) event(in Input, seq uint64, body event.Body) event.Envelope {
-	runID := RunID(in.Tag.Tenant, in.Tag.ID)
+	runID := in.runID()
 	return event.Envelope{
 		ID:      runID + ":" + strconv.FormatUint(seq, 10),
 		Source:  "fiber://run/" + runID,
 		Type:    body.Type(),
-		Channel: ChannelOf(in.Tag),
+		Channel: in.Trigger.Channel,
 		Time:    r.now().UTC(),
-		Hops:    1,
-		Tenant:  TenantOf(in.Tag),
+		Hops:    in.Trigger.Hops + 1,
+		Tenant:  busTenant(in.Trigger.Tenant),
 		Run:     runID,
 		Seq:     seq,
-		Agent:   in.Tag.Agent,
-		Version: version(in.Rev),
-		Digest:  in.Hash,
+		Agent:   in.Subscriber,
+		Version: in.Pin.Version,
+		Digest:  in.Pin.Digest,
 		Data:    body,
 	}
 }

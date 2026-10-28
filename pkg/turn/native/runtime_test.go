@@ -89,17 +89,15 @@ func TestAnUnrenderableTriggerIsRefused(t *testing.T) {
 	}
 }
 
-// A definition whose version is not a revision number, or whose spec names
-// another agent, does not run.
+// A definition with no version, or whose spec names another agent, does not
+// run.
 func TestABadPinIsRefused(t *testing.T) {
 	t.Parallel()
-	notANumber := pinned()
-	notANumber.Version = "v1.2"
 	other := pinned()
 	other.Spec.Name = "other"
 	unpinned := pinned()
 	unpinned.Version = ""
-	for name, def := range map[string]turn.Pinned{"version": notANumber, "spec": other, "unpinned": unpinned} {
+	for name, def := range map[string]turn.Pinned{"spec": other, "unpinned": unpinned} {
 		_, err := offline("x").Turn(t.Context(), def, turn.Input{Trigger: posted("hi", nil)}, nil)
 		if !errors.Is(err, native.ErrInvalid) && !errors.Is(err, turn.ErrInvalid) {
 			t.Errorf("%s: err = %v, want an invalid pin", name, err)

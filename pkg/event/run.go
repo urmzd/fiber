@@ -64,19 +64,16 @@ const (
 // Accepted is the body of run.accepted.v1 (was lifecycle.accepted).
 type Accepted struct {
 	Attempt int `json:"attempt,omitempty"`
-	Rev     int `json:"rev,omitempty"`
 }
 
 // Started is the body of run.started.v1 (was lifecycle.started).
 type Started struct {
 	Attempt int `json:"attempt,omitempty"`
-	Rev     int `json:"rev,omitempty"`
 }
 
 // Parked is the body of run.parked.v1 (was lifecycle.parked).
 type Parked struct {
 	Attempt int `json:"attempt,omitempty"`
-	Rev     int `json:"rev,omitempty"`
 	// Reason explains the park, in the words of whatever the run waits for.
 	Reason string `json:"reason,omitempty"`
 	// Question is what the run waits on a person for, when it parked on one.
@@ -86,7 +83,6 @@ type Parked struct {
 // Resumed is the body of run.resumed.v1 (was lifecycle.resumed).
 type Resumed struct {
 	Attempt int `json:"attempt,omitempty"`
-	Rev     int `json:"rev,omitempty"`
 	// Answer is the answer the run resumed with, when it parked on a question.
 	Answer *Answer `json:"answer,omitempty"`
 }
@@ -94,7 +90,6 @@ type Resumed struct {
 // Completed is the body of run.completed.v1 (was lifecycle.completed).
 type Completed struct {
 	Attempt int `json:"attempt,omitempty"`
-	Rev     int `json:"rev,omitempty"`
 	// Text is the whole final answer.
 	Text string `json:"text,omitempty"`
 	// Usage is what the run spent, everything it delegated included.
@@ -105,7 +100,6 @@ type Completed struct {
 // reports that the run will not be retried; the ledger stays the authority.
 type Failed struct {
 	Attempt  int    `json:"attempt,omitempty"`
-	Rev      int    `json:"rev,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Terminal bool   `json:"terminal,omitempty"`
 }
@@ -114,7 +108,6 @@ type Failed struct {
 // to stop that wrapped its turn up.
 type Stopped struct {
 	Attempt int `json:"attempt,omitempty"`
-	Rev     int `json:"rev,omitempty"`
 	// Reason is why, in the words of whoever asked.
 	Reason string `json:"reason,omitempty"`
 	// By is who asked. Never shown to a model.

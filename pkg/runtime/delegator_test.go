@@ -46,8 +46,8 @@ func delegating(t *testing.T, opts ...runtime.SandboxOption) (*runtime.Sandbox, 
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
 	history.revise("helper", "Help.")
-	lead := history.revise("lead", "Lead.")
-	lead.Spec.Access.Spawn = []string{"helper"}
+	history.revise("lead", "Lead.")
+	lead := history.edit("lead", func(s *agentrt.Spec) { s.Access.Spawn = []string{"helper"} })
 
 	opts = append([]runtime.SandboxOption{runtime.WithAgentOptions(scripted(map[string][][]saigetypes.Delta{
 		"lead": {
@@ -66,7 +66,7 @@ func delegating(t *testing.T, opts ...runtime.SandboxOption) (*runtime.Sandbox, 
 func runLead(t *testing.T, s *runtime.Sandbox, lead agentrt.Revision) (runtime.Outcome, []agentrt.Chunk, error) {
 	t.Helper()
 	var chunks []agentrt.Chunk
-	out, err := s.Execute(context.Background(), runtime.Request{RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "How are the tests?", Revision: lead},
+	out, err := s.Execute(context.Background(), withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "How are the tests?"}, lead),
 		func(_ context.Context, c agentrt.Chunk) error {
 			chunks = append(chunks, c)
 			return nil

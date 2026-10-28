@@ -197,12 +197,12 @@ func oldCases() []oldCase {
 	}
 	wq := event.Question{ID: "q1", Kind: "approval", Prompt: "May I?", Options: []string{"yes", "no"}}
 	return []oldCase{
-		{envelope.KindAccepted, full, event.Accepted{Attempt: 2, Rev: 3}},
-		{envelope.KindStarted, full, event.Started{Attempt: 2, Rev: 3}},
-		{envelope.KindParked, full, event.Parked{Attempt: 2, Rev: 3, Reason: "waiting", Question: &wq}},
-		{envelope.KindResumed, full, event.Resumed{Attempt: 2, Rev: 3, Answer: &event.Answer{QuestionID: "q1", Decision: "approve"}}},
-		{envelope.KindCompleted, full, event.Completed{Attempt: 2, Rev: 3, Text: "done", Usage: wantUsage}},
-		{envelope.KindFailed, full, event.Failed{Attempt: 2, Rev: 3, Error: "boom", Terminal: true}},
+		{envelope.KindAccepted, full, event.Accepted{Attempt: 2}},
+		{envelope.KindStarted, full, event.Started{Attempt: 2}},
+		{envelope.KindParked, full, event.Parked{Attempt: 2, Reason: "waiting", Question: &wq}},
+		{envelope.KindResumed, full, event.Resumed{Attempt: 2, Answer: &event.Answer{QuestionID: "q1", Decision: "approve"}}},
+		{envelope.KindCompleted, full, event.Completed{Attempt: 2, Text: "done", Usage: wantUsage}},
+		{envelope.KindFailed, full, event.Failed{Attempt: 2, Error: "boom", Terminal: true}},
 		{envelope.KindStopped, payload.Stopped{Attempt: 1, Reason: "enough", By: "ana", Text: "so far"}, event.Stopped{Attempt: 1, Reason: "enough", By: "ana", Text: "so far"}},
 		{envelope.KindChildParked, payload.ChildQuestion{RunID: "r2", Agent: "deployer", Question: q}, event.ChildParked{RunID: "r2", Agent: "deployer", Question: wq}},
 		{envelope.KindText, payload.Text{Text: "Hello"}, event.Text{Text: "Hello"}},

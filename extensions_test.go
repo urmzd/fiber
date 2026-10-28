@@ -19,7 +19,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
@@ -52,8 +52,8 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	start(t, c.Run)
 	ctx := context.Background()
 
-	spec := agentspec.AgentSpec{Name: "oncall", Model: "house-1", Provider: "house", SystemPrompt: "Help.", Tools: []string{"lookup_runbook"}}
-	if _, err := c.Registry().Create(ctx, "acme", spec, "test"); err != nil {
+	spec := definition.AgentSpec{Name: "oncall", Model: "house-1", Provider: "house", SystemPrompt: "Help.", Tools: []string{"lookup_runbook"}}
+	if _, err := createAgent(c.Definitions(), ctx, "acme", spec, "test"); err != nil {
 		t.Fatalf("the registry refused an agent on the registered provider: %v", err)
 	}
 	target, _ := address.Parse("inbox://acme/out")
@@ -148,7 +148,7 @@ func declaredReachTheStores(t *testing.T, pool *pgxpool.Pool) {
 	c := newApp(t, opts...)
 	ctx := context.Background()
 
-	if _, err := c.Registry().Create(ctx, tenant, agentspec.AgentSpec{Name: "a", Model: "m", Provider: "fireworks", SystemPrompt: "x"}, "test"); err != nil {
+	if _, err := createAgent(c.Definitions(), ctx, tenant, definition.AgentSpec{Name: "a", Model: "m", Provider: "fireworks", SystemPrompt: "x"}, "test"); err != nil {
 		t.Errorf("an agent on the declared model endpoint was refused: %v", err)
 	}
 	snap, err := c.ToolProviders().Snapshot(ctx, tenant, "issues", 0)

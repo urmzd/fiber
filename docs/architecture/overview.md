@@ -784,12 +784,11 @@ leaves (stdlib only)
   pkg/address      github://urmzd/fiber/issues/42, slack://T01/C02?thread=...
   pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription, the actor a context acts for
   pkg/signature    HMAC verification for inbound webhooks
-  pkg/agentspec    immutable specs, content-addressed revisions
 
 seams
   pkg/connector    Trigger / Sink / Actor faces, registry
   pkg/bus          Bus interface, Memory, Redis Streams and Postgres, bustest
-  pkg/registry     agent store, Memory and Postgres, registrytest
+  pkg/definition   saige definitions, Policy, insert-only Source, Resolver and pins
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations

@@ -9,64 +9,35 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/turn"
 )
 
-// specSchema is the JSON Schema of a draft definition, shared by every action
-// that takes one. It mirrors agentspec.AgentSpec and has no tenant field,
-// because a definition does not have a tenant: the run does.
-const specSchema = `{
+// draftSchema is the JSON Schema of a draft, shared by every action that takes
+// one. It has no tenant field, because a definition does not have a tenant:
+// the run does.
+const draftSchema = `{
       "type": "object",
-      "description": "The complete agent definition. Always send every field, not a patch.",
+      "description": "The complete agent: the definition file and its policy. Always send both whole, not a patch.",
       "properties": {
-        "name": {"type": "string", "description": "Agent name: letters, digits, dash and underscore."},
-        "description": {"type": "string", "description": "One line on what the agent is for."},
-        "model": {"type": "string", "description": "Model id."},
-        "provider": {"type": "string", "description": "Provider name, such as anthropic, openai (also any OpenAI-compatible server), ollama or offline."},
-        "fallbacks": {
-          "type": "array",
-          "description": "Models tried in order when the primary model fails with an outage, rate limit or auth error. At most 4, none repeating the primary or each other.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "provider": {"type": "string"},
-              "model": {"type": "string"}
-            },
-            "required": ["provider", "model"]
-          }
-        },
-        "fallback_on": {
-          "type": "array",
-          "items": {"type": "string", "enum": ["any", "auth", "content_filter", "context_length", "rate_limit", "transient", "unavailable"]},
-          "description": "When to move to the next fallback model. Omit for any. \"any\" cannot be combined with others. Requires fallbacks."
-        },
-        "system_prompt": {"type": "string", "description": "The agent's instructions."},
-        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names the agent may call. \"mcp:<provider>\" grants the accepted read tools of that MCP provider, \"mcp:<provider>:write\" its write tools too."},
-        "sources": {
-          "type": "array",
-          "description": "Corpora the agent may retrieve from.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": {"type": "string"},
-              "uri": {"type": "string"},
-              "options": {"type": "object"}
-            },
-            "required": ["name", "uri"]
-          }
-        },
-        "access": {
+        "definition": {"type": "string", "description": "The .agent.md file: a --- line, YAML frontmatter (apiVersion: saige/v1, name, version, description, model {use: provider/model, fallback: [provider/model]}, tools {registry: [tool names], mcp: [{server}]}, subagents [{ref: name}], approval {ask: [tool names]}, limits), a --- line, then the system prompt. name is lowercase letters, digits and hyphens. version is semantic, such as 1.0.0."},
+        "policy": {
           "type": "object",
-          "description": "What the agent may do beyond talking. Everything not listed is denied.",
+          "description": "What fiber decides that the definition does not. Everything not listed is denied.",
           "properties": {
-            "spawn": {"type": "array", "items": {"type": "string"}, "description": "Agents it may delegate to."},
-            "workspace_areas": {"type": "array", "items": {"type": "string"}, "description": "Workspace key prefixes it may use."}
+            "workspace_areas": {"type": "array", "items": {"type": "string"}, "description": "Workspace key prefixes it may use."},
+            "mcp_write": {"type": "array", "items": {"type": "string"}, "description": "tools.mcp servers whose write tools it may call. Others are read only."},
+            "knowledge": {"type": "array", "description": "Corpora it may retrieve from.", "items": {"type": "object", "properties": {"name": {"type": "string"}, "uri": {"type": "string"}, "options": {"type": "object"}}, "required": ["name", "uri"]}},
+            "fallback_on": {"type": "array", "items": {"type": "string", "enum": ["any", "auth", "content_filter", "context_length", "rate_limit", "transient", "unavailable"]}, "description": "When to move to the next fallback model. Omit for any. \"any\" cannot be combined with others. Requires model.fallback."},
+            "approvers": {"type": "array", "items": {"type": "string"}, "description": "Who may approve its approval.ask calls. role:<name> names a role."},
+            "self_approval": {"type": "boolean"},
+            "answerers": {"type": "array", "items": {"type": "string"}},
+            "tagged_only": {"type": "boolean", "description": "Run only when a message names it."}
           }
         }
       },
-      "required": ["name", "model", "provider", "system_prompt"]
+      "required": ["definition"]
     }`
 
 const roleSchema = `{
@@ -90,7 +61,7 @@ func coreActions() []actionDef {
 		{
 			name:        "author_list",
 			effect:      EffectRead,
-			description: "List this tenant's agents at their current revision. Start here before changing anything.",
+			description: "List this tenant's live agents at their latest version. Start here before changing anything.",
 			schema: `{
   "type": "object",
   "properties": {
@@ -103,12 +74,12 @@ func coreActions() []actionDef {
 		{
 			name:        "author_get",
 			effect:      EffectRead,
-			description: "Read one agent's full definition: the current revision, or a specific one by number.",
+			description: "Read one agent's definition file and policy: the latest version, or a specific one.",
 			schema: `{
   "type": "object",
   "properties": {
     "name": {"type": "string", "description": "Agent name."},
-    "rev": {"type": "integer", "description": "Revision number. Omit or 0 for the current one."}
+    "version": {"type": "string", "description": "Exact version, such as 1.2.0. Omit for the latest."}
   },
   "required": ["name"],
   "additionalProperties": false
@@ -118,7 +89,7 @@ func coreActions() []actionDef {
 		{
 			name:        "author_history",
 			effect:      EffectRead,
-			description: "Show every revision of an agent, oldest first, with who made each one and when.",
+			description: "Show every version of an agent, lowest first, with who wrote each one and when.",
 			schema: `{
   "type": "object",
   "properties": {
@@ -132,13 +103,13 @@ func coreActions() []actionDef {
 		{
 			name:        "author_diff",
 			effect:      EffectRead,
-			description: "Show what changed between two revisions of one agent.",
+			description: "Show what changed between two versions of one agent.",
 			schema: `{
   "type": "object",
   "properties": {
     "name": {"type": "string", "description": "Agent name."},
-    "from": {"type": "integer", "description": "The older revision number."},
-    "to": {"type": "integer", "description": "The newer revision number. Omit or 0 for the current one."}
+    "from": {"type": "string", "description": "The older version."},
+    "to": {"type": "string", "description": "The newer version. Omit for the latest."}
   },
   "required": ["name", "from"],
   "additionalProperties": false
@@ -148,13 +119,13 @@ func coreActions() []actionDef {
 		{
 			name:        "author_validate",
 			effect:      EffectRead,
-			description: "Check a draft definition against the rules the registry enforces, without saving it.",
+			description: "Check a draft against the rules the store enforces, without saving it.",
 			schema: `{
   "type": "object",
   "properties": {
-    "spec": ` + specSchema + `
+    "draft": ` + draftSchema + `
   },
-  "required": ["spec"],
+  "required": ["draft"],
   "additionalProperties": false
 }`,
 			run: (*Connector).validate,
@@ -167,9 +138,9 @@ func coreActions() []actionDef {
 			schema: `{
   "type": "object",
   "properties": {
-    "spec": ` + specSchema + `
+    "draft": ` + draftSchema + `
   },
-  "required": ["spec"],
+  "required": ["draft"],
   "additionalProperties": false
 }`,
 			run: (*Connector).review,
@@ -178,7 +149,7 @@ func coreActions() []actionDef {
 			name:   "author_scaffold",
 			effect: EffectRead,
 			description: "Draft a system of agents from a short description: one router plus named specialists. " +
-				"Returns definitions in the order to create them. Saves nothing.",
+				"Returns drafts in the order to create them. Saves nothing.",
 			schema: `{
   "type": "object",
   "properties": {
@@ -207,9 +178,9 @@ func coreActions() []actionDef {
 			schema: `{
   "type": "object",
   "properties": {
-    "spec": ` + specSchema + `
+    "draft": ` + draftSchema + `
   },
-  "required": ["spec"],
+  "required": ["draft"],
   "additionalProperties": false
 }`,
 			run: (*Connector).proposeCreate,
@@ -217,15 +188,15 @@ func coreActions() []actionDef {
 		{
 			name:   "author_propose_revise",
 			effect: EffectPropose,
-			description: "Stage a new revision of an existing agent for approval. Returns the diff, the review findings and a token. " +
+			description: "Stage a new, higher version of an existing agent for approval. Returns the diff, the review findings and a token. " +
 				"Nothing is saved until a person approves and the token is applied in a later turn.",
 			schema: `{
   "type": "object",
   "properties": {
-    "spec": ` + specSchema + `,
-    "expected_rev": {"type": "integer", "description": "The revision number you read and edited. The change is refused if the agent has moved on since."}
+    "draft": ` + draftSchema + `,
+    "expected_version": {"type": "string", "description": "The latest version you read and edited. The change is refused if the agent has moved on since."}
   },
-  "required": ["spec", "expected_rev"],
+  "required": ["draft", "expected_version"],
   "additionalProperties": false
 }`,
 			run: (*Connector).proposeRevise,
@@ -234,14 +205,14 @@ func coreActions() []actionDef {
 			name:   "author_propose_delete",
 			effect: EffectPropose,
 			description: "Stage the retirement of an agent for approval. Returns what depends on it and a token. " +
-				"Nothing is deleted until a person approves and the token is applied in a later turn.",
+				"Nothing is retired until a person approves and the token is applied in a later turn.",
 			schema: `{
   "type": "object",
   "properties": {
     "name": {"type": "string", "description": "Agent name."},
-    "expected_rev": {"type": "integer", "description": "The current revision number you read."}
+    "expected_version": {"type": "string", "description": "The latest version you read."}
   },
-  "required": ["name", "expected_rev"],
+  "required": ["name", "expected_version"],
   "additionalProperties": false
 }`,
 			run: (*Connector).proposeDelete,
@@ -249,7 +220,7 @@ func coreActions() []actionDef {
 		{
 			name:   "author_apply",
 			effect: EffectWrite,
-			description: "Carry out one approved proposal by its token. This is the only action that changes the registry. " +
+			description: "Carry out one approved proposal by its token. This is the only action that changes the agents. " +
 				"It is refused in the turn that made the proposal: stop, show the person the proposal, and apply only after they approve.",
 			schema: `{
   "type": "object",
@@ -264,25 +235,40 @@ func coreActions() []actionDef {
 	}
 }
 
-// revisionView is a revision as actions report it.
-type revisionView struct {
-	Spec      agentspec.AgentSpec `json:"spec"`
-	Rev       int                 `json:"rev"`
-	Hash      string              `json:"hash"`
-	CreatedAt time.Time           `json:"created_at"`
-	CreatedBy string              `json:"created_by"`
+// versionView is a version as actions report it.
+type versionView struct {
+	Name       string            `json:"name"`
+	Version    string            `json:"version"`
+	Digest     string            `json:"digest"`
+	PolicyHash string            `json:"policy_hash"`
+	Definition string            `json:"definition"`
+	Policy     definition.Policy `json:"policy,omitzero"`
+	CreatedAt  time.Time         `json:"created_at"`
+	CreatedBy  string            `json:"created_by"`
 }
 
-func view(r agentspec.Revision) revisionView {
-	return revisionView{Spec: r.Spec, Rev: r.Rev, Hash: r.Hash, CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy}
-}
-
-func specJSON(s agentspec.AgentSpec) string {
-	raw, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("%+v", s)
+func view(r definition.Record) versionView {
+	return versionView{
+		Name: r.Name, Version: r.Version, Digest: r.Digest, PolicyHash: r.PolicyHash,
+		Definition: r.Content, Policy: r.Policy, CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy,
 	}
-	return string(raw)
+}
+
+func draftText(d Draft) string {
+	out := strings.TrimRight(d.Definition, "\n")
+	if raw, err := json.MarshalIndent(d.Policy.Normalize(), "", "  "); err == nil && string(raw) != "{}" {
+		out += "\npolicy: " + string(raw)
+	}
+	return out
+}
+
+// describe is a record's description, or "" when it no longer parses.
+func (c *Connector) describe(r definition.Record) string {
+	a, err := definition.Parse(r.Content, r.Policy, c.checks)
+	if err != nil {
+		return ""
+	}
+	return a.Spec.Description
 }
 
 func (c *Connector) list(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
@@ -292,21 +278,22 @@ func (c *Connector) list(ctx context.Context, who call, raw json.RawMessage) (co
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	revs, next, err := c.store.List(ctx, who.Tenant, registry.Page{Token: args.Cursor})
+	recs, next, err := c.src.List(ctx, who.Tenant, definition.Page{Token: args.Cursor})
 	if err != nil {
 		return connector.Result{}, fmt.Errorf("author: list: %w", err)
 	}
 	type row struct {
 		Name        string `json:"name"`
-		Rev         int    `json:"rev"`
+		Version     string `json:"version"`
 		Description string `json:"description,omitempty"`
 	}
-	rows := make([]row, 0, len(revs))
+	rows := make([]row, 0, len(recs))
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d agent(s)", len(revs))
-	for _, r := range revs {
-		rows = append(rows, row{r.Spec.Name, r.Rev, r.Spec.Description})
-		fmt.Fprintf(&b, "\n- %s (rev %d): %s", r.Spec.Name, r.Rev, r.Spec.Description)
+	fmt.Fprintf(&b, "%d agent(s)", len(recs))
+	for _, r := range recs {
+		d := c.describe(r)
+		rows = append(rows, row{r.Name, r.Version, d})
+		fmt.Fprintf(&b, "\n- %s (%s): %s", r.Name, r.Version, d)
 	}
 	if next != "" {
 		fmt.Fprintf(&b, "\nmore agents follow; continue with cursor %s", next)
@@ -317,21 +304,30 @@ func (c *Connector) list(ctx context.Context, who call, raw json.RawMessage) (co
 	}{rows, next})
 }
 
+// read returns one version, or the latest when version is empty.
+func (c *Connector) read(ctx context.Context, tenant, name, version string) (definition.Record, error) {
+	name = definition.NormalizeName(name)
+	if strings.TrimSpace(version) == "" {
+		return c.src.Latest(ctx, tenant, name)
+	}
+	return c.src.Get(ctx, tenant, name, strings.TrimSpace(version))
+}
+
 func (c *Connector) get(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
 	var args struct {
-		Name string `json:"name"`
-		Rev  int    `json:"rev"`
+		Name    string `json:"name"`
+		Version string `json:"version"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	rev, err := c.store.Get(ctx, who.Tenant, args.Name, args.Rev)
+	rec, err := c.read(ctx, who.Tenant, args.Name, args.Version)
 	if err != nil {
 		return connector.Result{}, fmt.Errorf("author: get: %w", err)
 	}
-	summary := fmt.Sprintf("%s rev %d, by %s at %s\n%s",
-		rev.Spec.Name, rev.Rev, rev.CreatedBy, rev.CreatedAt.Format(time.RFC3339), specJSON(rev.Spec))
-	return result(summary, view(rev))
+	summary := fmt.Sprintf("%s %s, by %s at %s\n%s",
+		rec.Name, rec.Version, rec.CreatedBy, rec.CreatedAt.Format(time.RFC3339), draftText(draftOf(rec)))
+	return result(summary, view(rec))
 }
 
 func (c *Connector) history(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
@@ -341,102 +337,104 @@ func (c *Connector) history(ctx context.Context, who call, raw json.RawMessage) 
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	revs, err := c.store.History(ctx, who.Tenant, args.Name)
+	name := definition.NormalizeName(args.Name)
+	recs, err := c.src.Versions(ctx, who.Tenant, name)
 	if err != nil {
 		return connector.Result{}, fmt.Errorf("author: history: %w", err)
 	}
+	_, latestErr := c.src.Latest(ctx, who.Tenant, name)
+	retired := errors.Is(latestErr, definition.ErrRetired)
 	type row struct {
-		Rev       int       `json:"rev"`
-		Hash      string    `json:"hash"`
+		Version   string    `json:"version"`
+		Digest    string    `json:"digest"`
 		CreatedAt time.Time `json:"created_at"`
 		CreatedBy string    `json:"created_by"`
 	}
-	rows := make([]row, 0, len(revs))
+	rows := make([]row, 0, len(recs))
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d revision(s), oldest first", len(revs))
-	for _, r := range revs {
-		rows = append(rows, row{r.Rev, r.Hash, r.CreatedAt, r.CreatedBy})
-		fmt.Fprintf(&b, "\n- rev %d by %s at %s", r.Rev, r.CreatedBy, r.CreatedAt.Format(time.RFC3339))
+	fmt.Fprintf(&b, "%d version(s), lowest first", len(recs))
+	if retired {
+		b.WriteString("; the agent is retired")
 	}
-	return result(b.String(), rows)
+	for _, r := range recs {
+		rows = append(rows, row{r.Version, r.Digest, r.CreatedAt, r.CreatedBy})
+		fmt.Fprintf(&b, "\n- %s by %s at %s", r.Version, r.CreatedBy, r.CreatedAt.Format(time.RFC3339))
+	}
+	return result(b.String(), struct {
+		Versions []row `json:"versions"`
+		Retired  bool  `json:"retired,omitempty"`
+	}{rows, retired})
 }
 
 func (c *Connector) diff(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
 	var args struct {
 		Name string `json:"name"`
-		From int    `json:"from"`
-		To   int    `json:"to"`
+		From string `json:"from"`
+		To   string `json:"to"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	if args.From < agentspec.FirstRev {
-		return connector.Result{}, fmt.Errorf("%w: from must name a revision, counting from %d", ErrInvalid, agentspec.FirstRev)
+	if strings.TrimSpace(args.From) == "" {
+		return connector.Result{}, fmt.Errorf("%w: from must name a version", ErrInvalid)
 	}
-	from, err := c.store.Get(ctx, who.Tenant, args.Name, args.From)
+	from, err := c.read(ctx, who.Tenant, args.Name, args.From)
 	if err != nil {
 		return connector.Result{}, fmt.Errorf("author: diff: %w", err)
 	}
-	to, err := c.store.Get(ctx, who.Tenant, args.Name, args.To)
+	to, err := c.read(ctx, who.Tenant, args.Name, args.To)
 	if err != nil {
 		return connector.Result{}, fmt.Errorf("author: diff: %w", err)
 	}
-	d := Diff(from.Spec, to.Spec)
-	summary := fmt.Sprintf("%s rev %d to rev %d\n%s", to.Spec.Name, from.Rev, to.Rev, d)
+	d := Diff(draftOf(from), draftOf(to))
+	summary := fmt.Sprintf("%s %s to %s\n%s", to.Name, from.Version, to.Version, d)
 	if d == "" {
-		summary = fmt.Sprintf("%s rev %d and rev %d are the same definition", to.Spec.Name, from.Rev, to.Rev)
+		summary = fmt.Sprintf("%s %s and %s are the same definition", to.Name, from.Version, to.Version)
 	}
 	return result(summary, struct {
-		From int    `json:"from"`
-		To   int    `json:"to"`
+		From string `json:"from"`
+		To   string `json:"to"`
 		Diff string `json:"diff"`
-	}{from.Rev, to.Rev, d})
+	}{from.Version, to.Version, d})
 }
 
-// draft canonicalizes and validates a definition exactly as the registry does
-// on write: Normalize, then ValidateWith the deployment's provider table.
-func (c *Connector) draft(spec agentspec.AgentSpec) (agentspec.AgentSpec, error) {
-	canonical := spec.Normalize()
-	if err := canonical.ValidateWith(c.providers); err != nil {
-		return agentspec.AgentSpec{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+// parsed is a draft that compiled.
+type parsed struct {
+	Draft
+	agent definition.Agent
+}
+
+// compile checks a draft exactly as the source does on write.
+func (c *Connector) compile(d *Draft) (parsed, error) {
+	if d == nil || strings.TrimSpace(d.Definition) == "" {
+		return parsed{}, fmt.Errorf("%w: no draft definition", ErrInvalid)
 	}
-	return canonical, nil
-}
-
-type specArgs struct {
-	Spec        *agentspec.AgentSpec `json:"spec"`
-	ExpectedRev int                  `json:"expected_rev"`
-}
-
-func (a specArgs) spec() (agentspec.AgentSpec, error) {
-	if a.Spec == nil {
-		return agentspec.AgentSpec{}, fmt.Errorf("%w: no spec", ErrInvalid)
+	a, err := definition.Parse(d.Definition, d.Policy, c.checks)
+	if err != nil {
+		return parsed{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
-	return *a.Spec, nil
+	return parsed{Draft: Draft{Definition: d.Definition, Policy: a.Policy}, agent: a}, nil
 }
 
 func (c *Connector) validate(_ context.Context, _ call, raw json.RawMessage) (connector.Result, error) {
 	var args struct {
-		Spec *agentspec.AgentSpec `json:"spec"`
+		Draft *Draft `json:"draft"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	spec, err := specArgs{Spec: args.Spec}.spec()
-	if err != nil {
-		return connector.Result{}, err
-	}
 	type verdict struct {
-		Valid bool   `json:"valid"`
-		Hash  string `json:"hash,omitempty"`
-		Error string `json:"error,omitempty"`
+		Valid      bool   `json:"valid"`
+		Digest     string `json:"digest,omitempty"`
+		PolicyHash string `json:"policy_hash,omitempty"`
+		Error      string `json:"error,omitempty"`
 	}
-	canonical, err := c.draft(spec)
+	p, err := c.compile(args.Draft)
 	if err != nil {
 		// An invalid draft is the answer to the question, not a failed call.
 		return result("invalid: "+err.Error(), verdict{Error: err.Error()})
 	}
-	return result("valid; nothing was saved", verdict{Valid: true, Hash: canonical.Hash()})
+	return result("valid; nothing was saved", verdict{Valid: true, Digest: p.agent.Definition.Digest, PolicyHash: p.Policy.Hash()})
 }
 
 // world gathers what Review needs to know about the tenant. It reads only the
@@ -446,14 +444,16 @@ func (c *Connector) world(ctx context.Context, tenant string) (World, error) {
 	if c.catalog != nil {
 		w.Tools = c.catalog()
 	}
-	page := registry.Page{Size: registry.MaxPageSize}
+	page := definition.Page{Size: definition.MaxPageSize}
 	for range maxWorldPages {
-		revs, next, err := c.store.List(ctx, tenant, page)
+		recs, next, err := c.src.List(ctx, tenant, page)
 		if err != nil {
 			return World{}, fmt.Errorf("author: read tenant agents: %w", err)
 		}
-		for _, r := range revs {
-			w.Agents = append(w.Agents, r.Spec)
+		for _, r := range recs {
+			if a, err := definition.Parse(r.Content, r.Policy, c.checks); err == nil {
+				w.Agents = append(w.Agents, a.Spec)
+			}
 		}
 		if next == "" {
 			break
@@ -465,12 +465,12 @@ func (c *Connector) world(ctx context.Context, tenant string) (World, error) {
 
 func (c *Connector) review(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
 	var args struct {
-		Spec *agentspec.AgentSpec `json:"spec"`
+		Draft *Draft `json:"draft"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	spec, err := specArgs{Spec: args.Spec}.spec()
+	p, err := c.compile(args.Draft)
 	if err != nil {
 		return connector.Result{}, err
 	}
@@ -478,7 +478,7 @@ func (c *Connector) review(ctx context.Context, who call, raw json.RawMessage) (
 	if err != nil {
 		return connector.Result{}, err
 	}
-	findings := Review(spec, w)
+	findings := Review(p.agent.Spec, w)
 	if findings == nil {
 		findings = []Finding{}
 	}
@@ -490,17 +490,17 @@ func (c *Connector) scaffold(_ context.Context, _ call, raw json.RawMessage) (co
 	if err := decode(raw, &sys); err != nil {
 		return connector.Result{}, err
 	}
-	specs, err := ScaffoldWith(sys, c.providers)
+	drafts, err := ScaffoldWith(sys, c.checks)
 	if err != nil {
 		return connector.Result{}, err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d draft definition(s), in the order to create them; nothing was saved", len(specs))
-	for _, s := range specs {
+	fmt.Fprintf(&b, "%d draft(s), in the order to create them; nothing was saved", len(drafts))
+	for _, d := range drafts {
 		b.WriteString("\n")
-		b.WriteString(specJSON(s))
+		b.WriteString(draftText(d))
 	}
-	return result(b.String(), specs)
+	return result(b.String(), drafts)
 }
 
 func (c *Connector) listPending(_ context.Context, who call, raw json.RawMessage) (connector.Result, error) {
@@ -512,8 +512,11 @@ func (c *Connector) listPending(_ context.Context, who call, raw json.RawMessage
 	fmt.Fprintf(&b, "%d pending proposal(s)", len(props))
 	for _, p := range props {
 		fmt.Fprintf(&b, "\n- %s %s", p.Op, p.Agent)
-		if p.ExpectedRev > 0 {
-			fmt.Fprintf(&b, " (from rev %d)", p.ExpectedRev)
+		if p.Version != "" {
+			fmt.Fprintf(&b, " %s", p.Version)
+		}
+		if p.ExpectedVersion != "" {
+			fmt.Fprintf(&b, " (from %s)", p.ExpectedVersion)
 		}
 		fmt.Fprintf(&b, ", token %s, expires %s", p.Token, p.ExpiresAt.Format(time.RFC3339))
 		if p.runID == who.runID {
@@ -554,116 +557,140 @@ func (c *Connector) stage(who call, p proposal, headline, diff string, findings 
 	return result(b.String(), staged{proposal: p, Diff: diff, Findings: findings})
 }
 
+// proposalOf stages a compiled draft as a write.
+func proposalOf(op string, p parsed) proposal {
+	d := p.agent.Definition
+	return proposal{
+		Op: op, Agent: d.Name, Version: d.Version, Digest: d.Digest, PolicyHash: p.Policy.Hash(),
+		record: definition.Record{Name: d.Name, Version: d.Version, Content: p.Definition, Policy: p.Policy},
+	}
+}
+
 func (c *Connector) proposeCreate(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
 	var args struct {
-		Spec *agentspec.AgentSpec `json:"spec"`
+		Draft *Draft `json:"draft"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	spec, err := specArgs{Spec: args.Spec}.spec()
+	p, err := c.compile(args.Draft)
 	if err != nil {
 		return connector.Result{}, err
 	}
-	canonical, err := c.draft(spec)
-	if err != nil {
-		return connector.Result{}, err
-	}
-	switch _, err := c.store.Get(ctx, who.Tenant, canonical.Name, 0); {
+	name := p.agent.Definition.Name
+	switch _, err := c.src.Latest(ctx, who.Tenant, name); {
 	case err == nil:
-		return connector.Result{}, fmt.Errorf("%w: agent %q; revise it instead", registry.ErrExists, canonical.Name)
-	case !errors.Is(err, registry.ErrNotFound):
+		return connector.Result{}, fmt.Errorf("%w: agent %q; revise it instead", definition.ErrExists, name)
+	case errors.Is(err, definition.ErrRetired):
+		return connector.Result{}, fmt.Errorf("%w: agent %q was retired and its name is not reused", definition.ErrRetired, name)
+	case !errors.Is(err, definition.ErrNotFound):
 		return connector.Result{}, fmt.Errorf("author: propose create: %w", err)
 	}
 	w, err := c.world(ctx, who.Tenant)
 	if err != nil {
 		return connector.Result{}, err
 	}
-	return c.stage(who,
-		proposal{Op: opCreate, Agent: canonical.Name, Hash: canonical.Hash(), spec: canonical},
-		"create agent "+canonical.Name,
-		Diff(agentspec.AgentSpec{}, canonical),
-		Review(canonical, w))
+	return c.stage(who, proposalOf(opCreate, p),
+		"create agent "+name+" "+p.agent.Definition.Version,
+		Diff(Draft{}, p.Draft),
+		Review(p.agent.Spec, w))
 }
 
 func (c *Connector) proposeRevise(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
-	var args specArgs
+	var args struct {
+		Draft           *Draft `json:"draft"`
+		ExpectedVersion string `json:"expected_version"`
+	}
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	spec, err := args.spec()
+	if strings.TrimSpace(args.ExpectedVersion) == "" {
+		return connector.Result{}, fmt.Errorf("%w: expected_version must be the latest version you read; read the agent first", ErrInvalid)
+	}
+	p, err := c.compile(args.Draft)
 	if err != nil {
 		return connector.Result{}, err
 	}
-	if args.ExpectedRev < agentspec.FirstRev {
-		return connector.Result{}, fmt.Errorf("%w: expected_rev must be the revision you read, counting from %d; read the agent first", ErrInvalid, agentspec.FirstRev)
-	}
-	canonical, err := c.draft(spec)
-	if err != nil {
-		return connector.Result{}, err
-	}
-	cur, err := c.store.Get(ctx, who.Tenant, canonical.Name, 0)
+	d := p.agent.Definition
+	cur, err := c.src.Latest(ctx, who.Tenant, d.Name)
 	if err != nil {
 		return connector.Result{}, fmt.Errorf("author: propose revise: %w", err)
 	}
-	if cur.Rev != args.ExpectedRev {
-		return connector.Result{}, fmt.Errorf("%w: agent %q is at rev %d, not rev %d; read it again and redo the edit on top of that", registry.ErrConflict, canonical.Name, cur.Rev, args.ExpectedRev)
+	if cur.Version != strings.TrimSpace(args.ExpectedVersion) {
+		return connector.Result{}, fmt.Errorf("%w: agent %q is at %s, not %s; read it again and redo the edit on top of that", definition.ErrConflict, d.Name, cur.Version, args.ExpectedVersion)
 	}
-	if cur.Hash == canonical.Hash() {
-		return result(fmt.Sprintf("no change: this is already %s rev %d; nothing was proposed", cur.Spec.Name, cur.Rev), view(cur))
+	if cur.Digest == d.Digest && cur.PolicyHash == p.Policy.Hash() {
+		return result(fmt.Sprintf("no change: this is already %s %s; nothing was proposed", cur.Name, cur.Version), view(cur))
+	}
+	if !newer(d.Version, cur.Version) {
+		return connector.Result{}, fmt.Errorf("%w: a revise is a new version above %s; %s is not", ErrInvalid, cur.Version, d.Version)
 	}
 	w, err := c.world(ctx, who.Tenant)
 	if err != nil {
 		return connector.Result{}, err
 	}
-	return c.stage(who,
-		proposal{Op: opRevise, Agent: canonical.Name, ExpectedRev: cur.Rev, Hash: canonical.Hash(), spec: canonical},
-		fmt.Sprintf("revise agent %s from rev %d", canonical.Name, cur.Rev),
-		Diff(cur.Spec, canonical),
-		Review(canonical, w))
+	prop := proposalOf(opRevise, p)
+	prop.ExpectedVersion = cur.Version
+	return c.stage(who, prop,
+		fmt.Sprintf("revise agent %s from %s to %s", d.Name, cur.Version, d.Version),
+		Diff(draftOf(cur), p.Draft),
+		Review(p.agent.Spec, w))
+}
+
+// newer reports whether version a is above b.
+func newer(a, b string) bool {
+	c, err := definition.CompareVersions(a, b)
+	return err == nil && c > 0
 }
 
 func (c *Connector) proposeDelete(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
 	var args struct {
-		Name        string `json:"name"`
-		ExpectedRev int    `json:"expected_rev"`
+		Name            string `json:"name"`
+		ExpectedVersion string `json:"expected_version"`
 	}
 	if err := decode(raw, &args); err != nil {
 		return connector.Result{}, err
 	}
-	cur, err := c.store.Get(ctx, who.Tenant, args.Name, 0)
+	cur, err := c.src.Latest(ctx, who.Tenant, definition.NormalizeName(args.Name))
 	if err != nil {
 		return connector.Result{}, fmt.Errorf("author: propose delete: %w", err)
 	}
-	if cur.Rev != args.ExpectedRev {
-		return connector.Result{}, fmt.Errorf("%w: agent %q is at rev %d, not rev %d; read it again before retiring it", registry.ErrConflict, cur.Spec.Name, cur.Rev, args.ExpectedRev)
+	if cur.Version != strings.TrimSpace(args.ExpectedVersion) {
+		return connector.Result{}, fmt.Errorf("%w: agent %q is at %s, not %s; read it again before retiring it", definition.ErrConflict, cur.Name, cur.Version, args.ExpectedVersion)
 	}
 	w, err := c.world(ctx, who.Tenant)
 	if err != nil {
 		return connector.Result{}, err
 	}
-	// Retiring an agent strands every spawn grant that names it, which is the
+	// Retiring an agent strands every delegation that names it, which is the
 	// one consequence a person approving a delete needs to see.
 	var findings []Finding
 	for _, a := range w.Agents {
-		for _, target := range a.Access.Spawn {
-			if target == cur.Spec.Name && a.Name != cur.Spec.Name {
-				findings = append(findings, Finding{
-					Code: CodeSpawnMissing, Severity: SeverityWarning, Subject: a.Name,
-					Message: fmt.Sprintf("agent %q delegates to %q and will be left with a grant that resolves to nothing", a.Name, cur.Spec.Name),
-				})
-			}
+		if a.Name != cur.Name && delegatesTo(a, cur.Name) {
+			findings = append(findings, Finding{
+				Code: CodeSpawnMissing, Severity: SeverityWarning, Subject: a.Name,
+				Message: fmt.Sprintf("agent %q delegates to %q and will no longer resolve", a.Name, cur.Name),
+			})
 		}
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].Subject < findings[j].Subject })
 	return c.stage(who,
-		proposal{Op: opDelete, Agent: cur.Spec.Name, ExpectedRev: cur.Rev},
-		fmt.Sprintf("retire agent %s at rev %d (history is kept, the name stops accepting tags)", cur.Spec.Name, cur.Rev),
+		proposal{Op: opDelete, Agent: cur.Name, ExpectedVersion: cur.Version},
+		fmt.Sprintf("retire agent %s at %s (every version is kept, the name stops accepting tags)", cur.Name, cur.Version),
 		"", findings)
 }
 
+func delegatesTo(a turn.Spec, name string) bool {
+	for _, t := range a.Access.Spawn {
+		if t == name {
+			return true
+		}
+	}
+	return false
+}
+
 // apply carries out a staged proposal. It is the only place this package
-// writes to the registry.
+// writes to the source.
 func (c *Connector) apply(ctx context.Context, who call, raw json.RawMessage) (connector.Result, error) {
 	var args struct {
 		Token string `json:"token"`
@@ -682,26 +709,41 @@ func (c *Connector) apply(ctx context.Context, who call, raw json.RawMessage) (c
 		return connector.Result{}, err
 	}
 
+	// cas checks the agent is still at the version the change was drafted
+	// against, so a version that landed after the approval is never
+	// overwritten or retired unseen.
+	cas := func() error {
+		cur, err := c.src.Latest(ctx, who.Tenant, p.Agent)
+		if err != nil {
+			return err
+		}
+		if cur.Version != p.ExpectedVersion {
+			return fmt.Errorf("%w: agent %q moved to %s after %s was approved", definition.ErrConflict, p.Agent, cur.Version, p.ExpectedVersion)
+		}
+		return nil
+	}
 	var (
-		rev     agentspec.Revision
+		version = p.Version
 		summary string
 	)
 	switch p.Op {
 	case opCreate:
-		rev, err = c.store.Create(ctx, who.Tenant, p.spec, by)
+		rec := p.record
+		rec.Tenant, rec.CreatedBy = who.Tenant, by
+		_, err = c.src.Put(ctx, rec)
 		summary = "created"
 	case opRevise:
-		rev, err = c.store.Revise(ctx, who.Tenant, p.spec, p.ExpectedRev, by)
+		if err = cas(); err == nil {
+			rec := p.record
+			rec.Tenant, rec.CreatedBy = who.Tenant, by
+			_, err = c.src.Put(ctx, rec)
+		}
 		summary = "revised"
 	case opDelete:
-		// The store checks the revision and retires the name in one step, so
-		// a revise that lands after the approval cannot be retired unseen.
-		// What was approved is exactly what is read back: an explicit
-		// revision resolves after the name is gone.
-		err = c.store.Delete(ctx, who.Tenant, p.Agent, p.ExpectedRev)
-		if err == nil {
-			rev, err = c.store.Get(ctx, who.Tenant, p.Agent, p.ExpectedRev)
+		if err = cas(); err == nil {
+			err = c.src.Retire(ctx, who.Tenant, p.Agent, by)
 		}
+		version = p.ExpectedVersion
 		summary = "retired"
 	default:
 		err = fmt.Errorf("%w: proposal has unknown operation %q", ErrInvalid, p.Op)
@@ -713,21 +755,21 @@ func (c *Connector) apply(ctx context.Context, who call, raw json.RawMessage) (c
 		return connector.Result{}, fmt.Errorf("author: apply %s %s: %w", p.Op, p.Agent, err)
 	}
 	return result(
-		fmt.Sprintf("%s %s, now rev %d, recorded as approved by %s", summary, p.Agent, rev.Rev, by),
+		fmt.Sprintf("%s %s, now %s, recorded as approved by %s", summary, p.Agent, version, by),
 		struct {
 			Op         string `json:"op"`
 			Agent      string `json:"agent"`
-			Rev        int    `json:"rev"`
+			Version    string `json:"version"`
 			By         string `json:"by"`
 			ProposedBy string `json:"proposed_by,omitempty"`
-		}{p.Op, p.Agent, rev.Rev, by, p.ProposedBy})
+		}{p.Op, p.Agent, version, by, p.ProposedBy})
 }
 
 // terminal reports an apply failure that will not go away on retry, so the
 // proposal that caused it is spent.
 func terminal(err error) bool {
 	for _, target := range []error{
-		registry.ErrConflict, registry.ErrExists, registry.ErrNotFound, registry.ErrInvalid, agentspec.ErrInvalid, ErrInvalid,
+		definition.ErrConflict, definition.ErrExists, definition.ErrNotFound, definition.ErrInvalid, definition.ErrRetired, ErrInvalid,
 	} {
 		if errors.Is(err, target) {
 			return true

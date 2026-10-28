@@ -282,21 +282,57 @@ and `run.delta` does not match `run.deltas.v1`. Channel segments split on
 ## 7. Definitions
 
 Agents are saige definitions (`saige/agent/definition`) plus a fiber
-**Policy** sidecar. fiber has no `AgentSpec`, no revision counter and no
-registry of its own.
+**Policy** sidecar, both in `pkg/definition`. fiber has no `AgentSpec`, no
+revision counter and no registry of its own.
 
-The sidecar holds what saige does not own:
+A definition is one `.agent.md` file: YAML frontmatter, then the system
+prompt.
 
-| Field | Meaning |
-|-------|---------|
-| `Sources` | Channels and type prefixes the agent subscribes to |
-| `WorkspaceAreas` | Sandbox areas the agent may touch |
-| `FallbackOn` | When a run falls back to another model |
-| MCP write grants | Which MCP tools may write |
-| `Approvers` | Who may approve the agent's gated actions |
-| `SelfApproval` | Whether the person who asked may approve |
-| `Answerers` | Who may answer a parked question |
-| `TaggedOnly` | Keep the agent out of messages that do not name it |
+```markdown
+---
+apiVersion: saige/v1
+name: docs-bot
+version: 1.0.0
+description: answers questions about how we ship
+model:
+  use: anthropic/claude-haiku-5-5
+  fallback: [openai/gpt-5-mini]
+tools:
+  registry: [lookup_runbook]
+  mcp:
+    - server: issues
+subagents:
+  - ref: helper@^1
+approval:
+  ask: [lookup_runbook]
+---
+You answer questions about the deploy pipeline. Cite your sources.
+```
+
+The sidecar holds what saige does not own. Its zero value grants nothing, and
+its hash (`Policy.Hash`, domain `fiber/policy/v1`) is part of every pin.
+
+| Field (JSON) | Meaning |
+|--------------|---------|
+| `subscriptions` | Channels and type prefixes the agent subscribes to |
+| `workspace_areas` | Sandbox areas the agent may touch |
+| `mcp_write` | `tools.mcp` servers whose write tools it may call |
+| `knowledge` | Corpora it may retrieve from |
+| `fallback_on` | When a run falls back to another model |
+| `approvers` | Who may approve its `approval.ask` calls |
+| `self_approval` | Whether the person who asked may approve |
+| `answerers` | Who may answer a parked question |
+| `tagged_only` | Keep the agent out of messages that do not name it |
+
+**Validation.** A definition passes saige's own checks, then fiber's, which
+fail closed: a model is required and is `provider/model` (no presets); the
+provider is in the deployment's table; at most 4 fallbacks, each with a
+credential when the deployment checks credentials; sub-agents delegate only;
+`approval` supports `ask` only, for tools the agent holds. Fields fiber cannot
+honor (dials, skills, memory, guardrails, compaction, harness tools, MCP allow
+lists) are refused, not ignored. Names follow saige's rule and are valid
+channel segments (`event.ValidToken`). Budgets are converted to `int64`
+micro-USD at load; an amount that cannot be represented exactly is refused.
 
 **The pin.** A run pins, in its durable input:
 
@@ -316,8 +352,21 @@ pin.
 
 **The definition Source** is scoped by tenant and insert only. A version, once
 written, is never updated, so a pin stays resolvable for as long as the run
-can be replayed. Retiring an agent stops new runs; it does not delete
-versions.
+can be replayed. `Put` of identical content is a no-op and of other content
+under a written version is `ErrExists`. Retiring an agent stops new runs and
+new versions; `Get` still reads every version. `Memory` and `Postgres`
+(`fiber_definitions`, `fiber_definition_retirements`, no UPDATE path) pass
+`definitiontest.Run`. A Resolver builds a saige registry over exactly the
+tree a root reaches, per tenant, so saige's reference and cycle checks apply.
+
+**From the old specs.** `FromAgentSpec` converts a stored spec
+deterministically: revision N becomes version N.0.0, `access.spawn` becomes
+`subagents`, `approvals` becomes `approval.ask`, and everything else goes to
+the Policy. A spec whose names break the name rule is refused with a
+`NameError` listing them.
+
+**Local runs.** `fiber run [flags] agent.agent.md MESSAGE` stores the file
+(and `-policy policy.json`) in memory and runs it once.
 
 ## 8. Runtime
 
@@ -370,8 +419,10 @@ type prefixes. An unknown selector is a config error, not an empty match.
 
 - **Activity names.** The durable turn registers `fiber.turn.v2`,
   `fiber.turn.agent.v2` and `fiber.turn.resume.v2`. A run recorded under the
-  v1 names (`fiber.turn`, `fiber.turn.agent`, `fiber.turn.resume`) fails
-  terminally on replay instead of running a body it was not recorded with.
+  v1 names (`fiber.turn`, `fiber.turn.agent`, `fiber.turn.resume`) or before
+  the rename (`mandatum.turn`) fails terminally on replay, with the reason
+  "started before the event union; send the message again", instead of
+  running a body it was not recorded with.
 - **Bus tables.** The channel bus writes new tables. The old `fiber_bus_*`
   tables are read by nothing after the upgrade and are safe to drop after
   24 hours, when every row in them has aged out.
@@ -393,5 +444,6 @@ These names are in stored data and do not change:
 | Activity names | `fiber.turn`, `fiber.turn.agent`, `fiber.turn.resume`, kept only so a v1 run is recognised and failed terminally |
 
 The tables `fiber_agents` and `fiber_agent_revisions` belonged to the
-registry. They are no longer written and can be dropped once no run pinned to
-a revision is still replayable.
+registry. They are no longer read or written. Their agents move to
+`fiber_definitions` through `FromAgentSpec`, and the tables can be dropped
+once no run pinned to a revision is still replayable.

@@ -19,7 +19,7 @@ func bridgeRequest() runtime.Request {
 		Tenant: "t1",
 		Text:   "update the docs",
 		Meta:   map[string]string{"repo": "fiber"},
-		Revision: agentrt.Revision{Rev: 2, Hash: "h", Spec: agentrt.Spec{
+		Definition: agentrt.Revision{Name: "docs-bot", Version: "2.0.0", Digest: "h", Spec: agentrt.Spec{
 			Name: "docs-bot", Provider: agentrt.ProviderOffline, Model: "scripted",
 		}},
 	}

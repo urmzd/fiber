@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/event"
@@ -35,13 +36,14 @@ type Body struct {
 
 // BodyOf renders an event in the v1 wire shape. The kind is the old kind the
 // type replaced, the topic is the old run topic, the revision is the pinned
-// version read as a number, and the origin is the channel's scheme.
+// version's major number, and the origin is the channel's scheme.
 func BodyOf(e event.Envelope) Body {
 	kind, ok := legacy.KindOf(e.Type)
 	if !ok {
 		kind = e.Type
 	}
-	rev, _ := strconv.Atoi(e.Version)
+	major, _, _ := strings.Cut(e.Version, ".")
+	rev, _ := strconv.Atoi(major)
 	b := Body{
 		Seq:    e.Seq,
 		Topic:  legacy.Topic(e.Agent, e.Run),

@@ -46,8 +46,9 @@ type Run struct {
 	ID     string
 	Tenant string
 	Agent  string
-	Rev    int
-	Origin string
+	// Version is the definition version the run pinned.
+	Version string
+	Origin  string
 	// Channel is where the run's events are published.
 	Channel string
 	Status  Status
@@ -90,22 +91,23 @@ func (a *App) Status(ctx context.Context, tenant, runID string) (Run, error) {
 	if err := json.Unmarshal(rec.Input, &in); err != nil {
 		return Run{}, fmt.Errorf("fiber: decode run %q input: %w", runID, err)
 	}
-	if in.Tag.Tenant != tenant {
+	tag := in.Tag()
+	if tag.Tenant != tenant {
 		return Run{}, fmt.Errorf("%w: run %q", ErrNotFound, runID)
 	}
 	out := Run{
 		ID:        rec.ID,
-		Tenant:    in.Tag.Tenant,
-		Agent:     in.Tag.Agent,
-		Rev:       in.Rev,
-		Origin:    in.Tag.Origin,
+		Tenant:    tag.Tenant,
+		Agent:     tag.Agent,
+		Version:   in.Pin.Version,
+		Origin:    tag.Origin,
 		Status:    statusOf(rec.Status),
-		Tag:       in.Tag,
+		Tag:       tag,
 		Error:     rec.Error,
 		CreatedAt: rec.CreatedAt,
 		EndedAt:   rec.CompletedAt,
 	}
-	out.Channel = runtime.ChannelOf(in.Tag)
+	out.Channel = runtime.ChannelOf(tag)
 	// LastSeq is the run's own answer: the sequence of its final event,
 	// which only a finished run has.
 	if rec.Status == drun.StatusSucceeded && len(rec.Output) > 0 {

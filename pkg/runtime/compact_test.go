@@ -187,9 +187,7 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 	w := newWorld(t)
 	lookup := &heldLookup{running: make(chan struct{}), release: make(chan struct{})}
 	model := &loopModel{turns: 30}
-	w.specs.mu.Lock()
-	w.specs.revs["docs-bot"][0].Spec.Tools = []string{"lookup"}
-	w.specs.mu.Unlock()
+	w.specs.edit("docs-bot", func(s *agentrt.Spec) { s.Tools = []string{"lookup"} })
 	exec := sandboxOf(t, w.specs, map[string]saigetypes.Provider{"docs-bot": model},
 		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
 			return agentrt.StaticTools(lookup), nil

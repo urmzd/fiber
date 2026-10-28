@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 )
 
 // Operations a proposal can stage.
@@ -27,23 +27,26 @@ type proposal struct {
 	Token string `json:"token"`
 	Op    string `json:"op"`
 	Agent string `json:"agent"`
-	// ExpectedRev is the revision the change was drafted against. Zero for a
-	// create.
-	ExpectedRev int `json:"expected_rev,omitempty"`
-	// Hash is the content hash of the proposed definition. Empty for a
+	// Version is the version a create or revise writes.
+	Version string `json:"version,omitempty"`
+	// ExpectedVersion is the latest version the change was drafted against.
+	// Empty for a create.
+	ExpectedVersion string `json:"expected_version,omitempty"`
+	// Digest and PolicyHash identify the proposed content. Empty for a
 	// delete.
-	Hash       string    `json:"hash,omitempty"`
+	Digest     string    `json:"digest,omitempty"`
+	PolicyHash string    `json:"policy_hash,omitempty"`
 	ProposedBy string    `json:"proposed_by,omitempty"`
 	ExpiresAt  time.Time `json:"expires_at"`
 
-	spec  agentspec.AgentSpec
-	runID string
+	record definition.Record
+	runID  string
 }
 
 // key identifies a change by its content, so proposing the same change twice
 // (a replayed attempt, a model repeating itself) yields one proposal.
 func (p proposal) key() string {
-	return fmt.Sprintf("%s\x00%s\x00%d\x00%s", p.Op, p.Agent, p.ExpectedRev, p.Hash)
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s", p.Op, p.Agent, p.Version, p.ExpectedVersion, p.Digest, p.PolicyHash)
 }
 
 // pending is the in-memory set of staged proposals, partitioned by tenant.

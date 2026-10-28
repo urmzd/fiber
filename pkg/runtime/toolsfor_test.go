@@ -75,9 +75,11 @@ func TestToolsForIsWhatATurnOfTheRequestIsOffered(t *testing.T) {
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
 	history.revise("helper", "Help.")
-	rev := history.revise("triage", "Triage.")
-	rev.Spec.Tools = []string{"lookup", "jira_transition", agentrt.MCPGroup("issues")}
-	rev.Spec.Access.Spawn = []string{"helper"}
+	history.revise("triage", "Triage.")
+	rev := history.edit("triage", func(s *agentrt.Spec) {
+		s.Tools = []string{"lookup", "jira_transition", agentrt.MCPGroup("issues")}
+		s.Access.Spawn = []string{"helper"}
+	})
 
 	lookup := &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "lookup", Description: "Look it up", Parameters: saigetypes.ParameterSchema{Type: "object"}}}
 	groups := &actorGroups{tool: &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "issues__search", Parameters: saigetypes.ParameterSchema{Type: "object"}}}}
@@ -94,7 +96,7 @@ func TestToolsForIsWhatATurnOfTheRequestIsOffered(t *testing.T) {
 		t.Fatal(err)
 	}
 	ana := envelope.Actor{ID: "U_ana", User: "u-ana"}
-	req := runtime.Request{RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "triage", Revision: rev}
+	req := withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "triage"}, rev)
 
 	if _, err := s.Execute(envelope.WithActor(context.Background(), ana), req,
 		func(context.Context, agentrt.Chunk) error { return nil }); err != nil {

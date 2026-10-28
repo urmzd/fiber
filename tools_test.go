@@ -15,7 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
@@ -69,8 +69,8 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 		WithToolProvider(toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP,
 			Endpoint: mcpTS.URL, CredentialScope: toolprovider.ScopePerson}, search))
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, tenant, agentspec.AgentSpec{
-		Name: "triage", Provider: agentspec.ProviderAnthropic, Model: "m", SystemPrompt: "Triage.",
+	if _, err := createAgent(app.Definitions(), ctx, tenant, definition.AgentSpec{
+		Name: "triage", Provider: definition.ProviderAnthropic, Model: "m", SystemPrompt: "Triage.",
 		Tools: []string{"mcp:issues", agentrt.AskPersonToolName, "jira_transition"},
 	}, "test"); err != nil {
 		t.Fatal(err)
@@ -143,8 +143,8 @@ func TestAListingNeedsAnExecutorThatCanGiveOne(t *testing.T) {
 		return runtime.Outcome{}, nil
 	})))
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, "acme", agentspec.AgentSpec{
-		Name: "triage", Provider: agentspec.ProviderOffline, Model: "m", SystemPrompt: "Triage.",
+	if _, err := createAgent(app.Definitions(), ctx, "acme", definition.AgentSpec{
+		Name: "triage", Provider: definition.ProviderOffline, Model: "m", SystemPrompt: "Triage.",
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}

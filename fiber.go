@@ -51,9 +51,9 @@ import (
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/cron"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
-	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -113,7 +113,7 @@ func WithAuthor(provider, model string) Option {
 // Backends. Each replaces the in-memory default; the App never closes what
 // it is given.
 
-// WithPostgres puts every store family on pool: the agent registry, the run
+// WithPostgres puts every store family on pool: the agent definitions, the run
 // ledger and queue, knowledge, thread journals and MCP tool providers. New
 // migrates each. A store passed by its own option wins over this one. The
 // bus is chosen separately (WithBus with bus.NewPostgres or bus.NewRedis).
@@ -123,10 +123,10 @@ func WithPostgres(pool *pgxpool.Pool) Option { return func(o *options) { o.Postg
 // bus.NewPostgres, or any implementation that passes bustest.
 func WithBus(b bus.Bus) Option { return func(o *options) { o.Bus = b } }
 
-// WithRegistry sets the agent store. The store decides which providers it
-// accepts (registry.WithProviders); App.Providers lists the names this App
-// can run.
-func WithRegistry(s registry.Store) Option { return func(o *options) { o.Registry = s } }
+// WithDefinitions sets the agent store. The store decides which providers it
+// accepts (definition.WithProviders or WithChecks); App.Providers lists the
+// names this App can run.
+func WithDefinitions(s definition.Source) Option { return func(o *options) { o.Definitions = s } }
 
 // WithDurable sets the run ledger and queue runs execute from, for example
 // the two durable.Open returns. Both are required.

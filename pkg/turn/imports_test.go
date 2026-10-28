@@ -17,9 +17,10 @@ const (
 )
 
 // mayImportSaige reports whether a package may import saige: the native
-// runtime and its alias packages, and the agentrt bridge.
+// runtime and its alias packages, the agentrt bridge, and pkg/definition,
+// whose agents are saige definitions.
 func mayImportSaige(pkg string) bool {
-	for _, root := range []string{module + "/pkg/turn/native", module + "/pkg/agentrt"} {
+	for _, root := range []string{module + "/pkg/turn/native", module + "/pkg/agentrt", module + "/pkg/definition"} {
 		if pkg == root || strings.HasPrefix(pkg, root+"/") {
 			return true
 		}

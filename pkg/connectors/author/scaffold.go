@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 )
 
 // Role is one agent in a scaffolded system: what it is called and what it is
@@ -30,36 +30,35 @@ type System struct {
 	Provider string `json:"provider"`
 }
 
-// Scaffold lays a System out as definitions, validated against the built-in
+// Scaffold lays a System out as drafts, validated against the built-in
 // provider table.
-func Scaffold(sys System) ([]agentspec.AgentSpec, error) {
-	return ScaffoldWith(sys, agentspec.KnownProviders())
+func Scaffold(sys System) ([]Draft, error) {
+	return ScaffoldWith(sys, definition.Checks{})
 }
 
-// ScaffoldWith is Scaffold for a deployment with its own provider table.
+// ScaffoldWith is Scaffold for a deployment with its own checks.
 //
 // The result is the specialists in the order given, then the router, which is
-// the order to create them in: the router's spawn grants then name agents that
-// already exist.
+// the order to create them in: the router's sub-agents then name agents that
+// already exist. Every draft is version 1.0.0.
 //
-// The delegation graph is a star and nothing more. The router's Access.Spawn
-// is exactly the specialists, and every specialist's Access is empty, so a
-// specialist cannot delegate onward, cannot call the router back, and holds no
-// workspace area. Access is default deny, and a scaffold that granted more
-// than its description asked for would be widening authority by template.
+// The delegation graph is a star and nothing more. The router's sub-agents
+// are exactly the specialists, and every specialist has none and an empty
+// policy, so a specialist cannot delegate onward, cannot call the router back,
+// and holds no workspace area. A scaffold that granted more than its
+// description asked for would be widening authority by template.
 //
-// Every definition returned has passed the same canonicalization and
-// validation the registry applies on write, so a scaffold that returns is a
-// scaffold that can be stored.
-func ScaffoldWith(sys System, providers []string) ([]agentspec.AgentSpec, error) {
+// Every draft returned has passed the same parse and checks the source applies
+// on write, so a scaffold that returns is a scaffold that can be stored.
+func ScaffoldWith(sys System, checks definition.Checks) ([]Draft, error) {
 	if len(sys.Specialists) == 0 {
 		return nil, fmt.Errorf("%w: a system needs at least one specialist for the router to delegate to", ErrInvalid)
 	}
-	router := agentspec.NormalizeName(sys.Router.Name)
+	router := definition.NormalizeName(sys.Router.Name)
 	seen := map[string]bool{router: true}
 	names := make([]string, 0, len(sys.Specialists))
 	for _, s := range sys.Specialists {
-		name := agentspec.NormalizeName(s.Name)
+		name := definition.NormalizeName(s.Name)
 		if seen[name] {
 			return nil, fmt.Errorf("%w: the name %q is used by more than one agent in the system", ErrInvalid, name)
 		}
@@ -68,37 +67,42 @@ func ScaffoldWith(sys System, providers []string) ([]agentspec.AgentSpec, error)
 	}
 	for _, r := range append([]Role{sys.Router}, sys.Specialists...) {
 		if strings.TrimSpace(r.Role) == "" {
-			return nil, fmt.Errorf("%w: agent %q has no role; the role is what its prompt is written from", ErrInvalid, agentspec.NormalizeName(r.Name))
+			return nil, fmt.Errorf("%w: agent %q has no role; the role is what its prompt is written from", ErrInvalid, definition.NormalizeName(r.Name))
 		}
 	}
 
-	out := make([]agentspec.AgentSpec, 0, len(sys.Specialists)+1)
+	specs := make([]definition.AgentSpec, 0, len(sys.Specialists)+1)
 	for i, s := range sys.Specialists {
-		out = append(out, agentspec.AgentSpec{
+		specs = append(specs, definition.AgentSpec{
 			Name:         names[i],
 			Description:  oneLine(s.Role),
 			Model:        sys.Model,
 			Provider:     sys.Provider,
 			SystemPrompt: specialistPrompt(names[i], s),
-			Tools:        s.Tools,
+			Tools:        cleanList(s.Tools),
 		})
 	}
-	out = append(out, agentspec.AgentSpec{
+	specs = append(specs, definition.AgentSpec{
 		Name:         router,
 		Description:  oneLine(sys.Router.Role),
 		Model:        sys.Model,
 		Provider:     sys.Provider,
 		SystemPrompt: routerPrompt(router, sys.Router, names, sys.Specialists),
-		Tools:        sys.Router.Tools,
-		Access:       agentspec.Access{Spawn: names},
+		Tools:        cleanList(sys.Router.Tools),
+		Access:       definition.AgentSpecAccess{Spawn: names},
 	})
 
-	for i, spec := range out {
-		canonical := spec.Normalize()
-		if err := canonical.ValidateWith(providers); err != nil {
+	out := make([]Draft, 0, len(specs))
+	for _, spec := range specs {
+		rec, err := definition.FromAgentSpec(spec, 1)
+		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
-		out[i] = canonical
+		a, err := definition.Parse(rec.Content, rec.Policy, checks)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalid, err)
+		}
+		out = append(out, Draft{Definition: rec.Content, Policy: a.Policy})
 	}
 	return out, nil
 }

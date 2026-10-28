@@ -16,6 +16,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
@@ -209,7 +210,7 @@ var (
 // resolution, or run.ErrParked while there is none.
 func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) (resolution, error) {
 	q := out.Parked.Question
-	runID := RunID(at.in.Tag.Tenant, at.in.Tag.ID)
+	runID := at.in.runID()
 	if q.Kind == payload.QuestionDelegation {
 		// The child run is started once, as a recorded step: a replay reads
 		// its id back, and a retried start lands on the same run, whose id
@@ -226,7 +227,7 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 	if _, err := anchor.Step(ctx, questionStepPrefix+q.ID, func(ctx context.Context) (payload.Question, error) {
 		fresh = true
 		if err := at.publish(ctx, event.Parked{
-			Attempt: at.attempt, Rev: at.in.Rev, Reason: "waiting on a person", Question: eventQuestion(&q),
+			Attempt: at.attempt, Reason: "waiting on a person", Question: eventQuestion(&q),
 		}); err != nil {
 			return payload.Question{}, err
 		}
@@ -360,17 +361,17 @@ func (r *Runtime) stoppedWhileParked(ctx context.Context, at *attemptLog, out Ou
 	}
 	final := Outcome{Text: out.Text, Prompt: out.Prompt, Stopped: &stop, Usage: out.Usage}
 	if err := r.remember(ctx, at.in, final); err != nil {
-		at.report(ctx, event.Failed{Attempt: at.attempt, Rev: at.in.Rev, Error: err.Error()})
+		at.report(ctx, event.Failed{Attempt: at.attempt, Error: err.Error()})
 		return Output{}, err
 	}
 	if err := at.publish(ctx, event.Stopped{
-		Attempt: at.attempt, Rev: at.in.Rev, Reason: stop.Reason, By: stop.By, Text: out.Text, Usage: eventUsage(out.Usage),
+		Attempt: at.attempt, Reason: stop.Reason, By: stop.By, Text: out.Text, Usage: eventUsage(out.Usage),
 	}); err != nil {
 		return Output{}, err
 	}
 	r.answerParent(ctx, at.in, out.Text, &stop, nil)
 	return Output{
-		Rev: at.in.Rev, Text: out.Text, LastSeq: at.band.close, Attempt: at.attempt,
+		Text: out.Text, LastSeq: at.band.close, Attempt: at.attempt,
 		Events: out.Chunks + 3 + 2*parks + 1, Stopped: &stop, Usage: out.Usage,
 	}, nil
 }
@@ -447,7 +448,7 @@ func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer
 		return payload.Answer{}, false, fmt.Errorf("runtime: answer %s: read the run: %w", req.RunID, err)
 	}
 	var in Input
-	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != req.Tenant {
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != req.Tenant {
 		return payload.Answer{}, false, ErrNoQuestion
 	}
 	q, ok := findQuestion(records, req.QuestionID)
@@ -475,7 +476,7 @@ func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer
 		if err != nil {
 			return payload.Answer{}, false, err
 		}
-		if err := mayEdit(in.Tag, q, req, a); err != nil {
+		if err := mayEdit(in.Tag(), q, req, a); err != nil {
 			return payload.Answer{}, false, err
 		}
 		a.QuestionID, a.By, a.At, a.Expired = q.ID, clip(req.By), now, false
@@ -641,7 +642,7 @@ func (r *Runtime) PendingQuestion(ctx context.Context, tenant, runID string) (pa
 		return payload.Question{}, false, fmt.Errorf("runtime: questions of %s: %w", runID, err)
 	}
 	var in Input
-	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant || rec.Status.Terminal() {
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant || rec.Status.Terminal() {
 		return payload.Question{}, false, nil
 	}
 	q, ok := pendingQuestion(records)
@@ -737,14 +738,14 @@ func (r *Runtime) childQuestion(tenant, parentRunID string) func(context.Context
 			return payload.ChildQuestion{}, false, false, fmt.Errorf("runtime: read child run %s: %w", runID, err)
 		}
 		var in Input
-		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
 			return payload.ChildQuestion{}, false, false, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
 		}
 		if rec.Status.Terminal() {
 			return payload.ChildQuestion{}, false, true, nil
 		}
 		q, ok := pendingQuestion(records)
-		return payload.ChildQuestion{RunID: runID, Agent: in.Tag.Agent, Question: q}, ok, false, nil
+		return payload.ChildQuestion{RunID: runID, Agent: in.Subscriber, Question: q}, ok, false, nil
 	}
 }
 
@@ -807,8 +808,8 @@ func watchChild(ctx context.Context, read func(context.Context, string) (payload
 	return nil
 }
 
-// mayAnswer decides whether req may answer q, from the run's pinned
-// revision: the definition the run was accepted under, never a newer one.
+// mayAnswer decides whether req may answer q, from the run's pinned policy:
+// the definition the run was accepted under, never a newer one.
 //
 // An approval is a second pair of eyes. The person whose request raised the
 // run may not approve its calls unless the spec allows self-approval, and
@@ -822,27 +823,28 @@ func watchChild(ctx context.Context, read func(context.Context, string) (payload
 // of its own (set per call by the tool that asked, agentrt.Approving) is
 // governed by them and by its own self-approval instead of the spec's.
 func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, req AnswerRequest) error {
-	rev, err := r.specs.At(ctx, in.Tag.Tenant, in.Tag.Agent, in.Rev)
+	loaded, err := r.defs.Verify(ctx, in.Trigger.Tenant, in.Pin)
 	if err != nil {
-		return fmt.Errorf("runtime: answer: read agent %q revision %d: %w", in.Tag.Agent, in.Rev, err)
+		return fmt.Errorf("runtime: answer: read agent %q version %s: %w", in.Subscriber, in.Pin.Version, err)
 	}
+	policy := loaded.Agent.Policy
 	by := clip(req.By)
 	var admitted []string
 	switch q.Kind {
 	case payload.QuestionApproval:
-		self := rev.Spec.SelfApproval
-		admitted = rev.Spec.Approvers
+		self := policy.SelfApproval
+		admitted = policy.Approvers
 		if len(q.Approvers) > 0 {
 			self, admitted = q.SelfApproval, q.Approvers
 		}
 		if !self {
-			requester := requesterOf(in.Tag)
+			requester := requesterOf(in.Tag())
 			if requester[by] || requester[strings.TrimSpace(req.Via)] {
 				return fmt.Errorf("%w: the request that raised this call cannot approve it; another person must", ErrNotAllowed)
 			}
 		}
 	case payload.QuestionChoice, payload.QuestionReply:
-		admitted = rev.Spec.Answerers
+		admitted = policy.Answerers
 	default:
 		return nil
 	}
@@ -864,7 +866,7 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 		if roles == nil {
 			roles = map[string]bool{}
 			if r.roles != nil {
-				held, err := r.roles(ctx, in.Tag.Tenant, by)
+				held, err := r.roles(ctx, in.Trigger.Tenant, by)
 				if err != nil {
 					return fmt.Errorf("runtime: answer: resolve the roles of %q: %w", by, err)
 				}
@@ -960,7 +962,7 @@ func wholeTranscript(prev []json.RawMessage, parked *agentrt.Parked) ([]json.Raw
 // WithChildRuns makes a delegation by a durable run a run of its own that the
 // parent parks on, instead of work the parent's turn waits for. The parent's
 // turn ends at the delegation's tool call, the runtime starts the child (the
-// target agent's current revision, the parent's tenant, requester and files,
+// target agent's pinned version, the parent's tenant, requester and files,
 // no thread), and the parent holds no worker until the child ends, when the
 // child's answer, or why it has none, is the tool call's result. A host's
 // Delegator is not called for such a run. It needs WithStopLedger.
@@ -986,22 +988,26 @@ func (r *Runtime) startChild(ctx context.Context, parent Input, q payload.Questi
 		Text string `json:"text"`
 	}
 	_ = json.Unmarshal(q.Tool.Arguments, &args)
-	parentID := RunID(parent.Tag.Tenant, parent.Tag.ID)
+	parentID := parent.runID()
+	from := parent.Tag()
 	tag := envelope.Tag{
 		// Derived from the parent and the wait, so a retried start joins
 		// the run the first one started.
 		ID:     "child-" + parentID + "-" + q.ID,
-		Tenant: parent.Tag.Tenant,
+		Tenant: parent.Trigger.Tenant,
 		Agent:  target,
 		Origin: "delegation",
 		// The requester of the parent is the requester of the child: who
 		// may approve its calls is decided against them.
-		Actor:       parent.Tag.Actor,
+		Actor:       from.Actor,
 		Text:        args.Text,
-		At:          parent.Tag.At,
-		Attachments: attachment.Inherit(parent.Tag.Attachments, nil),
+		At:          from.At,
+		Attachments: attachment.Inherit(from.Attachments, nil),
 	}
-	acc, err := r.accept(context.WithoutCancel(ctx), tag, &ParentRef{RunID: parentID, QuestionID: q.ID})
+	// The child runs the version its parent pinned for it, when it pinned
+	// one; a target outside the pin resolves its latest.
+	version, _ := parent.Pin.SubagentVersion(definition.NormalizeName(target))
+	acc, err := r.accept(context.WithoutCancel(ctx), tag, &ParentRef{RunID: parentID, QuestionID: q.ID}, version)
 	if err != nil {
 		if acc.RunID != "" {
 			// Durable, and the janitor will drive it.
@@ -1041,7 +1047,7 @@ func (r *Runtime) answerParent(ctx context.Context, in Input, text string, stopp
 	if in.Parent == nil || r.stops == nil {
 		return
 	}
-	a := payload.Answer{QuestionID: in.Parent.QuestionID, RunID: RunID(in.Tag.Tenant, in.Tag.ID), Text: text, At: r.now().UTC()}
+	a := payload.Answer{QuestionID: in.Parent.QuestionID, RunID: in.runID(), Text: text, At: r.now().UTC()}
 	switch {
 	case failure != nil:
 		a.Text, a.Note = "", "the delegated run failed: "+clip(failure.Error())

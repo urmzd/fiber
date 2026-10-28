@@ -736,8 +736,8 @@ func TestTheSandboxReplaysHistoryToTheModelAndNotToADelegatedAgent(t *testing.T)
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
 	history.revise("helper", "Help.")
-	lead := history.revise("lead", "Lead.")
-	lead.Spec.Access.Spawn = []string{"helper"}
+	history.revise("lead", "Lead.")
+	lead := history.edit("lead", func(s *agentrt.Spec) { s.Access.Spawn = []string{"helper"} })
 
 	var mu sync.Mutex
 	models := map[string]*agenttest.ScriptedProvider{}
@@ -760,13 +760,13 @@ func TestTheSandboxReplaysHistoryToTheModelAndNotToADelegatedAgent(t *testing.T)
 		t.Fatal(err)
 	}
 
-	out, err := s.Execute(context.Background(), runtime.Request{
-		RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "How are the tests?", Revision: lead,
+	out, err := s.Execute(context.Background(), withPin(runtime.Request{
+		RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "How are the tests?",
 		History: []agentrt.Message{
 			{Role: agentrt.RoleUser, Text: "SECRET-OF-THE-THREAD: we ship on friday"},
 			{Role: agentrt.RoleAssistant, Text: "noted"},
 		},
-	}, func(context.Context, agentrt.Chunk) error { return nil })
+	}, lead), func(context.Context, agentrt.Chunk) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

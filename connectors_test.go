@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/urmzd/fiber/pkg/blob"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
 )
 
 // The runtime reconciles a thread through the connector that owns its
@@ -18,7 +18,7 @@ func TestEveryConnectorThatCanListAThreadIsWiredAsAReconciler(t *testing.T) {
 		WithSlack(Slack{Token: "xoxb-test", SigningSecret: "secret"}),
 		WithGitHub(GitHub{Token: "ghs_test", WebhookSecret: "secret"}),
 		WithJira(Jira{Sites: map[string]string{"acme": "https://acme.atlassian.net"}, Email: "ops@acme.example", Token: "token", WebhookSecret: "secret"}),
-	}), registry.NewMemory(), blob.NewMemory())
+	}), definition.NewMemory(), blob.NewMemory())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestEveryConnectorThatCanListAThreadIsWiredAsAReconciler(t *testing.T) {
 func TestWithGitHubHandsTheConnectorItsLoginAndDefault(t *testing.T) {
 	build := func(g GitHub) error {
 		g.Token, g.WebhookSecret = "ghs_test", "secret"
-		_, err := buildConnectors(apply([]Option{WithTenant("acme"), WithGitHub(g)}), registry.NewMemory(), blob.NewMemory())
+		_, err := buildConnectors(apply([]Option{WithTenant("acme"), WithGitHub(g)}), definition.NewMemory(), blob.NewMemory())
 		return err
 	}
 	if err := build(GitHub{Login: "fiber[bot]", DefaultAgent: "triage"}); err != nil {

@@ -105,10 +105,15 @@ if err != nil {
 defer app.Close()
 go app.Run(ctx) // delivery and execution, in this process
 
-app.Registry().Create(ctx, "acme", agentspec.AgentSpec{
-    Name: "docs-bot", Provider: "anthropic", Model: "claude-haiku-5-5",
-    SystemPrompt: "You answer questions about the deploy pipeline. Cite your sources.",
-}, "ada")
+app.Definitions().Put(ctx, definition.Record{Tenant: "acme", CreatedBy: "ada", Content: `---
+apiVersion: saige/v1
+name: docs-bot
+version: 1.0.0
+model:
+  use: anthropic/claude-haiku-5-5
+---
+You answer questions about the deploy pipeline. Cite your sources.
+`})
 acc, err := app.Invoke(ctx, envelope.Tag{
     ID: "req-1", Tenant: "acme", Agent: "docs-bot", Origin: "api",
     Text: "how does a release get out the door?",
@@ -252,10 +257,11 @@ cannot resolve, go to standard error.
 | `-json` | Prints one JSON object per event, per line: the event as the bus carries it, with its payload as JSON. With `-tools`, the listing as one object. |
 | `-timeout D` | Gives up after `D`, such as `30s` (default `5m`; `0` waits forever). |
 
-Flags go before SPEC. SPEC is a file holding one agent spec as JSON (the
-fields of `agentspec.AgentSpec`), or `-` for standard input. A field the
-format does not have is an error rather than ignored, so a misspelt
-`system-prompt` is caught.
+Flags go before DEFINITION. DEFINITION is an `.agent.md` file (a saige
+definition: YAML frontmatter, then the system prompt), or `-` for standard
+input. `-policy FILE` reads the agent's policy sidecar from JSON; without it
+the policy is the zero value, which grants nothing. A policy field that does
+not exist is an error rather than ignored.
 
 | Exit status | Means |
 |-------------|-------|

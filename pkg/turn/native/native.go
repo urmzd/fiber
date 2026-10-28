@@ -436,7 +436,7 @@ func WithLogger(l *slog.Logger) Option {
 
 // New builds a runner for one pinned revision.
 func New(rev Revision, opts ...Option) (*Runner, error) {
-	if err := rev.Validate(); err != nil {
+	if err := validate(rev); err != nil {
 		return nil, err
 	}
 	cfg, err := newConfig(opts)
@@ -489,7 +489,7 @@ type Granted struct {
 // New's: an approval naming a tool the revision is not granted, a malformed
 // group, and with WithStrictTools any grant that does not resolve.
 func ResolveTools(rev Revision, opts ...Option) (Granted, error) {
-	if err := rev.Validate(); err != nil {
+	if err := validate(rev); err != nil {
 		return Granted{}, err
 	}
 	cfg, err := newConfig(opts)
@@ -558,7 +558,7 @@ func (cfg *config) toolset(rev Revision) (*saigetypes.ToolRegistry, []Unavailabl
 				// not the run.
 				unavailable = append(unavailable, unavailableTool(name, err))
 				cfg.logger.Warn("fiber/turn/native: a granted tool group is unavailable; the run continues without it",
-					"agent", rev.Spec.Name, "rev", rev.Rev, "group", name, "error", err)
+					"agent", rev.Spec.Name, "version", rev.Version, "group", name, "error", err)
 				continue
 			}
 			for _, t := range g.Tools {
@@ -583,7 +583,7 @@ func (cfg *config) toolset(rev Revision) (*saigetypes.ToolRegistry, []Unavailabl
 		}
 		if err != nil {
 			if cfg.strictTools {
-				return nil, nil, fmt.Errorf("native: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
+				return nil, nil, fmt.Errorf("native: agent %q version %s: %w", rev.Spec.Name, rev.Version, err)
 			}
 			// A grant this process cannot honour right now (a connector
 			// not configured here, an MCP tool held back or disabled) costs
@@ -591,7 +591,7 @@ func (cfg *config) toolset(rev Revision) (*saigetypes.ToolRegistry, []Unavailabl
 			// missing and the operator is told why.
 			unavailable = append(unavailable, unavailableTool(name, err))
 			cfg.logger.Warn("fiber/turn/native: a granted tool is unavailable; the run continues without it",
-				"agent", rev.Spec.Name, "rev", rev.Rev, "tool", name, "error", err)
+				"agent", rev.Spec.Name, "version", rev.Version, "tool", name, "error", err)
 			continue
 		}
 		tools.Register(t)
@@ -609,8 +609,8 @@ func (cfg *config) toolset(rev Revision) (*saigetypes.ToolRegistry, []Unavailabl
 				// called and there is nothing to approve.
 				continue
 			}
-			return nil, nil, fmt.Errorf("%w: agent %q revision %d requires approval for %q, which it is not granted",
-				ErrInvalid, rev.Spec.Name, rev.Rev, name)
+			return nil, nil, fmt.Errorf("%w: agent %q version %s requires approval for %q, which it is not granted",
+				ErrInvalid, rev.Spec.Name, rev.Version, name)
 		}
 		if _, marked := t.(*saigetypes.MarkedTool); marked {
 			continue
@@ -684,7 +684,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, eve
 	} else if r.retriever != nil && len(r.rev.Spec.Sources) > 0 {
 		ac, err := r.retriever.Retrieve(ctx, t.Text)
 		if err != nil {
-			return res, fmt.Errorf("native: agent %q revision %d: retrieve: %w", r.rev.Spec.Name, r.rev.Rev, err)
+			return res, fmt.Errorf("native: agent %q version %s: retrieve: %w", r.rev.Spec.Name, r.rev.Version, err)
 		}
 		cites := Citations(ac)
 		for _, c := range cites {
@@ -708,7 +708,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, eve
 	// could share a cached prefix with.
 	input, provider, pending, err := r.continuation(ctx, t, prompt)
 	if err != nil {
-		return res, fmt.Errorf("native: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
+		return res, fmt.Errorf("native: agent %q version %s: %w", r.rev.Spec.Name, r.rev.Version, err)
 	}
 
 	park := &parker{
@@ -771,7 +771,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, eve
 	agentCfg.Hooks = append(agentCfg.Hooks, translator.hooks())
 	agent, err := saige.New(agentCfg)
 	if err != nil {
-		return res, fmt.Errorf("native: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, err)
+		return res, fmt.Errorf("native: agent %q version %s: %w", r.rev.Spec.Name, r.rev.Version, err)
 	}
 
 	stream := agent.Invoke(ctx, input)
@@ -914,7 +914,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, eve
 		if _, cancelled := stopping.cancelled(); !cancelled {
 			parked, err := r.parkedOf(agent, park, t, len(res.Compactions) > 0)
 			if err != nil {
-				return res, fmt.Errorf("native: agent %q revision %d: park: %w", r.rev.Spec.Name, r.rev.Rev, err)
+				return res, fmt.Errorf("native: agent %q version %s: park: %w", r.rev.Spec.Name, r.rev.Version, err)
 			}
 			parked.Prompt = res.Prompt
 			res.Parked = parked
@@ -939,7 +939,7 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, eve
 		streamErr = errors.Join(streamErr, waitErr)
 	}
 	if streamErr != nil {
-		return res, fmt.Errorf("native: agent %q revision %d: %w", r.rev.Spec.Name, r.rev.Rev, streamErr)
+		return res, fmt.Errorf("native: agent %q version %s: %w", r.rev.Spec.Name, r.rev.Version, streamErr)
 	}
 	return res, nil
 }

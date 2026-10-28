@@ -77,7 +77,7 @@ func subTaskWorld(t *testing.T) (*Sandbox, *parentRuntime, Request, workspace.Wo
 		t.Fatal(err)
 	}
 	parent := &parentRuntime{ws: dispatchsandbox.ScopePDP(raw, ToolName("ops"), pdp)}
-	req := Request{Service: "svc", Revision: agentrt.Revision{Rev: 1, Spec: agentrt.Spec{Name: "ops"}}}
+	req := Request{Service: "svc", Definition: agentrt.Revision{Name: "ops", Version: "1.0.0", Spec: agentrt.Spec{Name: "ops"}}}
 	return s, parent, req, raw
 }
 

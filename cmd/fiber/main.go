@@ -1,22 +1,22 @@
-// Command fiber validates an agent spec locally: it runs the spec once, in
-// this process, and prints what the run does.
+// Command fiber validates an agent definition locally: it runs the
+// definition once, in this process, and prints what the run does.
 //
-//	fiber run [flags] SPEC MESSAGE
+//	fiber run [flags] DEFINITION MESSAGE
 //
 // fiber is a library first. This command is a program built on it like any
 // other: it composes fiber.New with nothing but the in-memory backends and a
-// temporary workspace, registers the agent the SPEC file defines, raises one
+// temporary workspace, stores the agent the DEFINITION file (.agent.md) defines, raises one
 // tag at it with MESSAGE as the request, and prints the run's events as they
 // stream. The exit status says how the run ended: 0 when it completed, 1 when
 // it failed, was stopped, parked on a question or ran out of time, and 2 when
-// the command line or the spec is wrong.
+// the command line, the definition or the policy is wrong.
 //
 // It listens on nothing, reads no configuration file and keeps nothing once
 // it exits. It reads no environment variable of its own; the built-in model
 // providers read their vendors' (ANTHROPIC_API_KEY, OPENAI_API_KEY and
 // OPENAI_BASE_URL, OLLAMA_HOST) when the agent is built, as they do in any
-// program composing fiber. -offline runs the spec on the offline provider,
-// which calls no model, so a spec can be checked with no key at all.
+// program composing fiber. -offline runs the definition on the offline provider,
+// which calls no model, so a definition can be checked with no key at all.
 //
 // It is for local test, not for serving: a program that serves agents
 // composes fiber.New itself (Humagen is one), with its own backends,
@@ -39,7 +39,7 @@ const (
 	// exitFailed is a run that did not complete: it failed, was stopped,
 	// parked on a question this command cannot answer, or ran out of time.
 	exitFailed = 1
-	// exitBadInput is a command line or a spec that is wrong.
+	// exitBadInput is a command line, definition or policy that is wrong.
 	exitBadInput = 2
 )
 
@@ -71,17 +71,19 @@ func cli(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `Usage: fiber run [flags] SPEC MESSAGE
+	fmt.Fprint(w, `Usage: fiber run [flags] DEFINITION MESSAGE
 
-Run the agent SPEC defines once, in process, with MESSAGE as its request, and
-print its events as they stream. SPEC is a JSON agent spec, or - for standard
-input. Everything is in memory and nothing is kept.
+Run the agent DEFINITION defines once, in process, with MESSAGE as its
+request, and print its events as they stream. DEFINITION is an .agent.md
+file, or - for standard input. Everything is in memory and nothing is kept.
 
-Flags go before SPEC:
-  -provider NAME    run on this model provider instead of the spec's
-  -model NAME       run on this model instead of the spec's
+Flags go before DEFINITION:
+  -policy FILE      read the agent's policy from this JSON file (default: the
+                    zero policy, which grants nothing)
+  -provider NAME    run on this model provider instead of the definition's
+  -model NAME       run on this model instead of the definition's
   -offline          run on the offline provider: no model is called and no key
-                    is needed (the spec's fallbacks are dropped)
+                    is needed (the definition's fallbacks are dropped)
   -tools            list the tools the agent would be granted, and run nothing
                     (MESSAGE is then optional)
   -json             print one JSON object per event instead of text
@@ -89,6 +91,6 @@ Flags go before SPEC:
                     default 5m)
 
 Exit status: 0 the run completed, 1 it did not (it failed, was stopped,
-parked on a question or timed out), 2 the command line or the spec is wrong.
+parked on a question or timed out), 2 the command line, the definition or the policy is wrong.
 `)
 }

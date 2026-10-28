@@ -66,7 +66,6 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/envelope"
 )
@@ -140,7 +139,7 @@ type Key struct {
 // id. A redelivery of that tag carries the same id and lands on the same
 // thread.
 func KeyOf(tag envelope.Tag) Key {
-	k := Key{Tenant: tag.Tenant, Agent: agentspec.NormalizeName(tag.Agent)}
+	k := Key{Tenant: tag.Tenant, Agent: strings.ToLower(strings.TrimSpace(tag.Agent))}
 	if tag.Source.IsZero() {
 		k.Surface = oneShot + tag.ID
 		return k
@@ -165,7 +164,7 @@ func (k Key) OneShot() bool { return strings.HasPrefix(k.Surface, oneShot) }
 
 // Validate checks that the key names exactly one thread.
 //
-// An empty tenant is refused for the reason pkg/registry refuses it: the
+// An empty tenant is refused for the reason every store refuses it: the
 // tenant comes from the caller's credential, so a missing one means the
 // authorization step was skipped, and a shared bucket for unscoped callers is
 // how one customer reads another's conversation.

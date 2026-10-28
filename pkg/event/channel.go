@@ -51,3 +51,25 @@ func ChannelHasPrefix(channel, prefix string) bool {
 	}
 	return false
 }
+
+// MaxTokenLen bounds one channel segment built from a name.
+const MaxTokenLen = 64
+
+// ValidToken reports whether s can stand alone as one channel segment: one
+// to MaxTokenLen ASCII letters, digits, '-', '_' or '.', not starting with
+// '.'. Anything that could end a segment, start a query or need escaping is
+// refused, so a name that passes is spelled the same in every channel.
+func ValidToken(s string) bool {
+	if s == "" || len(s) > MaxTokenLen || s[0] == '.' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}

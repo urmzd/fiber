@@ -82,16 +82,14 @@ func newParking(t *testing.T, w *world, script ...[]saigetypes.Delta) *parking {
 func newParkingWith(t *testing.T, w *world, mod func(*agentrt.Spec), script ...[]saigetypes.Delta) *parking {
 	t.Helper()
 	p := &parking{world: w, deploy: newDeployTool(), model: &agenttest.ScriptedProvider{Responses: script}}
-	rev := agentrt.Revision{Rev: 1, Hash: "sha256:ops@1", Spec: agentrt.Spec{
+	spec := agentrt.Spec{
 		Name: "ops", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "You run deploys.",
 		Tools: []string{"deploy", agentrt.AskPersonToolName}, Approvals: []string{"deploy"},
-	}}
-	if mod != nil {
-		mod(&rev.Spec)
 	}
-	w.specs.mu.Lock()
-	w.specs.revs["ops"] = []agentrt.Revision{rev}
-	w.specs.mu.Unlock()
+	if mod != nil {
+		mod(&spec)
+	}
+	w.specs.set(spec)
 	p.exec = sandboxOf(t, w.specs, map[string]saigetypes.Provider{"ops": p.model, "docs-bot": bystander()},
 		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
 			return agentrt.StaticTools(p.deploy), nil
@@ -680,13 +678,10 @@ func TestAChildRunParksAndItsParentShowsItsQuestion(t *testing.T) {
 	p := newParking(t, w,
 		call("c1", agentrt.AskPersonToolName, map[string]any{"question": "Which env?", "options": []any{"prod", "staging"}}),
 		agenttest.TextResponse("Child done."))
-	lead := agentrt.Revision{Rev: 1, Hash: "sha256:lead@1", Spec: agentrt.Spec{
+	w.specs.set(agentrt.Spec{
 		Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
 		Access: agentrt.Access{Spawn: []string{"ops"}},
-	}}
-	w.specs.mu.Lock()
-	w.specs.revs["lead"] = []agentrt.Revision{lead}
-	w.specs.mu.Unlock()
+	})
 	leadModel := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 		call("d1", runtime.DelegateToolName("ops"), map[string]any{"text": "deploy"}),
 		agenttest.TextResponse("Lead done."),
@@ -964,13 +959,10 @@ func (m routed) Stream(_ context.Context, req saigetypes.Request) (<-chan saiget
 func childRunWorld(t *testing.T, w *world) (*runtime.Runtime, *parking) {
 	t.Helper()
 	p := newParking(t, w)
-	lead := agentrt.Revision{Rev: 1, Hash: "sha256:lead@1", Spec: agentrt.Spec{
+	w.specs.set(agentrt.Spec{
 		Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
 		Access: agentrt.Access{Spawn: []string{"ops"}},
-	}}
-	w.specs.mu.Lock()
-	w.specs.revs["lead"] = []agentrt.Revision{lead}
-	w.specs.mu.Unlock()
+	})
 	p.exec = sandboxOf(t, w.specs, map[string]saigetypes.Provider{
 		"lead": routed{tool: runtime.DelegateToolName("ops"), args: map[string]any{"text": "deploy"}, done: "Lead got:"},
 		"ops":  routed{tool: agentrt.AskPersonToolName, args: map[string]any{"question": "Which env?", "options": []any{"prod", "staging"}}, done: "Child chose"},

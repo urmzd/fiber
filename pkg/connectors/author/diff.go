@@ -1,24 +1,24 @@
 package author
 
 import (
-	"sort"
+	"encoding/json"
 	"strings"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
 )
 
 // diffContext is how many unchanged lines are kept around a change.
 const diffContext = 2
 
-// Diff renders what changes between two definitions, as lines prefixed "- "
-// for removed, "+ " for added and two spaces for context. It returns the empty
-// string when the two canonicalize to the same definition, which is exactly
-// when the registry would treat a revise as a no-op.
+// Diff renders what changes between two drafts, as lines prefixed "- " for
+// removed, "+ " for added and two spaces for context. It returns the empty
+// string when the two are the same file and the same policy.
 //
-// Both sides are rendered one fact per line (one tool, one spawn grant, one
-// prompt line), so the diff is as fine-grained as the edit a person made.
-func Diff(from, to agentspec.AgentSpec) string {
-	a, b := renderSpec(from.Normalize()), renderSpec(to.Normalize())
+// Both sides are rendered as the definition file, line by line, then the
+// policy one fact per line, so the diff is as fine-grained as the edit a
+// person made.
+func Diff(from, to Draft) string {
+	a, b := renderDraft(from), renderDraft(to)
 	ops := lineDiff(a, b)
 	changed := false
 	for _, op := range ops {
@@ -59,66 +59,33 @@ func Diff(from, to agentspec.AgentSpec) string {
 	return strings.TrimRight(out.String(), "\n")
 }
 
-// renderSpec lays a canonical definition out one fact per line. An absent
-// definition (the "from" side of a create) renders as no lines.
-func renderSpec(s agentspec.AgentSpec) []string {
-	if s.Name == "" && s.SystemPrompt == "" {
+// renderDraft lays a draft out one line per fact. An absent draft (the
+// "from" side of a create) renders as no lines.
+func renderDraft(d Draft) []string {
+	if strings.TrimSpace(d.Definition) == "" {
 		return nil
 	}
-	lines := []string{
-		"name: " + s.Name,
-		"description: " + s.Description,
-		"model: " + s.Model,
-		"provider: " + s.Provider,
+	var lines []string
+	for _, l := range strings.Split(strings.TrimRight(d.Definition, "\n"), "\n") {
+		lines = append(lines, strings.TrimRight(l, " \t\r"))
 	}
-	for _, fb := range s.Fallbacks {
-		lines = append(lines, "fallback: "+fb.Provider+" "+fb.Model)
-	}
-	for _, c := range s.FallbackOn {
-		lines = append(lines, "fallback_on: "+c)
-	}
-	for _, t := range s.Tools {
-		lines = append(lines, "tool: "+t)
-	}
-	for _, t := range s.Approvals {
-		lines = append(lines, "approval: "+t)
-	}
-	for _, t := range s.Approvers {
-		lines = append(lines, "approver: "+t)
-	}
-	if s.SelfApproval {
-		lines = append(lines, "self_approval: true")
-	}
-	for _, t := range s.Answerers {
-		lines = append(lines, "answerer: "+t)
-	}
-	if s.TaggedOnly {
-		lines = append(lines, "tagged_only: true")
-	}
-	for _, t := range s.Access.Spawn {
-		lines = append(lines, "spawn: "+t)
-	}
-	for _, a := range s.Access.WorkspaceAreas {
-		lines = append(lines, "workspace_area: "+a)
-	}
-	for _, src := range s.Sources {
-		line := "source: " + src.Name + " " + src.URI
-		keys := make([]string, 0, len(src.Options))
-		for k := range src.Options {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			line += " " + k + "=" + src.Options[k]
-		}
-		lines = append(lines, line)
-	}
-	lines = append(lines, "system_prompt:")
-	for _, l := range strings.Split(s.SystemPrompt, "\n") {
-		lines = append(lines, "  "+strings.TrimRight(l, " \t\r"))
+	raw, err := json.MarshalIndent(d.Policy.Normalize(), "", "  ")
+	if err == nil && string(raw) != "{}" {
+		lines = append(lines, "# policy")
+		lines = append(lines, strings.Split(string(raw), "\n")...)
 	}
 	return lines
 }
+
+// Draft is a definition as the actions take and show it: the .agent.md file
+// and its policy.
+type Draft struct {
+	Definition string            `json:"definition"`
+	Policy     definition.Policy `json:"policy,omitzero"`
+}
+
+// draftOf is a stored record as a draft.
+func draftOf(r definition.Record) Draft { return Draft{Definition: r.Content, Policy: r.Policy} }
 
 type diffOp struct {
 	kind byte // ' ', '-' or '+'

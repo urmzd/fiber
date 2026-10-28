@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/turn"
@@ -92,23 +91,9 @@ func Render(trigger event.Envelope) (string, error) {
 	return entry.Render(trigger)
 }
 
-// RevisionOf is the Revision a pinned definition runs as. Its version must
-// be a revision number, and its digest is checked as the revision's hash.
+// RevisionOf is the Revision a pinned definition runs as.
 func RevisionOf(def turn.Pinned) (Revision, error) {
-	if err := def.Validate(); err != nil {
-		return Revision{}, err
-	}
-	n, err := strconv.Atoi(def.Version)
-	if err != nil {
-		return Revision{}, fmt.Errorf("%w: definition %q version %q is not a revision number", ErrInvalid, def.Name, def.Version)
-	}
-	rev := Revision{Spec: def.Spec, Rev: n, Hash: def.Digest}
-	return rev, rev.Validate()
-}
-
-// Pinned is the pinned form of a revision.
-func Pinned(rev Revision) turn.Pinned {
-	return turn.Pinned{Name: rev.Spec.Name, Version: strconv.Itoa(rev.Rev), Digest: rev.Hash, Spec: rev.Spec}
+	return def, validate(def)
 }
 
 // ResultOf is a Runner's result as a turn.Result.

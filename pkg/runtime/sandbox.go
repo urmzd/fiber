@@ -22,6 +22,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 
 	"github.com/urmzd/fiber/pkg/attachment"
@@ -116,7 +117,7 @@ func (r Request) SourceAddress() (address.Address, error) {
 type Sandbox struct {
 	plane   controlplane.ControlPlane
 	tools   *tool.Registry
-	specs   Specs
+	defs    Definitions
 	catalog Catalog
 	// groups supplies tool groups per turn ahead of the catalog's own; nil
 	// leaves them to the catalog.
@@ -328,10 +329,10 @@ func WithSandboxLogger(l *slog.Logger) SandboxOption {
 // NewSandbox returns an executor over a playscape control plane.
 //
 // tools is the registry the plane's nodes resolve from; the sandbox registers one
-// tool per agent into it as agents are first seen. specs is used only to resolve
+// tool per agent into it as agents are first seen. defs is used only to resolve
 // a delegation target's definition; passing nil disables delegation with an error
 // the model can read.
-func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, specs Specs, opts ...SandboxOption) (*Sandbox, error) {
+func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, defs Definitions, opts ...SandboxOption) (*Sandbox, error) {
 	if plane == nil {
 		return nil, fmt.Errorf("%w: no playscape control plane", ErrInvalid)
 	}
@@ -341,7 +342,7 @@ func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, specs Spe
 	s := &Sandbox{
 		plane:      plane,
 		tools:      tools,
-		specs:      specs,
+		defs:       defs,
 		replicas:   1,
 		buffer:     DefaultBuffer,
 		poll:       DefaultPollInterval,
@@ -362,9 +363,18 @@ var _ Executor = (*Sandbox)(nil)
 // agent's identity in the policy graph, and the object a spawn grant names.
 func ToolName(agent string) string { return "agent:" + agent }
 
-// DeploymentName is the playscape deployment a pinned revision runs in.
-func DeploymentName(agent string, rev int) string {
-	return fmt.Sprintf("fiber-%s-r%d", agent, rev)
+// DeploymentName is the playscape deployment a pinned definition runs in: its
+// name, version and the first 12 characters of the pin's hash, which covers
+// the policy the deployment's grants are compiled from.
+func DeploymentName(pin definition.Pin) string {
+	h := pin.Hash
+	if i := strings.LastIndexByte(h, ':'); i >= 0 {
+		h = h[i+1:]
+	}
+	if len(h) > 12 {
+		h = h[:12]
+	}
+	return fmt.Sprintf("fiber-%s-v%s-%s", pin.Name, pin.Version, h)
 }
 
 // DelegateToolName is the tool an agent calls to tag another agent.
@@ -380,7 +390,7 @@ func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Co
 	if req.RunID == "" {
 		return Outcome{}, fmt.Errorf("%w: turn has no run id", ErrInvalid)
 	}
-	deployment, err := s.ensure(ctx, req.Revision)
+	deployment, err := s.ensure(ctx, req)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -475,25 +485,31 @@ func (s *Sandbox) stream(ctx context.Context, req Request, deployment, taskID st
 	}
 }
 
-// ensure deploys the service a pinned revision runs in, registering its tool and
-// its delegation targets' tools, and returns the deployment name.
-func (s *Sandbox) ensure(ctx context.Context, rev agentrt.Revision) (string, error) {
-	agent := rev.Spec.Name
-	key := fmt.Sprintf("%s@%d", agent, rev.Rev)
+// ensure deploys the service a pinned definition runs in, registering its tool
+// and its delegation targets' tools, and returns the deployment name. The
+// grants are read from the pinned policy (workspace areas) and the pinned
+// sub-agents (spawn), and from nothing else.
+func (s *Sandbox) ensure(ctx context.Context, req Request) (string, error) {
+	agent := req.Definition.Spec.Name
+	if req.Pin.IsZero() || req.Pin.Hash == "" || req.Pin.Name != agent || req.Pin.Version != req.Definition.Version {
+		// A deployment is named by its pin, so a request without one would
+		// share another definition's grants.
+		return "", fmt.Errorf("%w: agent %q has no pin for version %q", ErrInvalid, agent, req.Definition.Version)
+	}
+	name := DeploymentName(req.Pin)
 
 	s.mu.Lock()
-	name, ok := s.deployed[key]
+	_, ok := s.deployed[name]
 	s.mu.Unlock()
 	if ok {
 		return name, nil
 	}
 
-	name = DeploymentName(agent, rev.Rev)
 	if err := s.register(ToolName(agent)); err != nil {
 		return "", err
 	}
-	spawn := make([]string, 0, len(rev.Spec.Access.Spawn))
-	for _, target := range rev.Spec.Access.Spawn {
+	spawn := make([]string, 0, len(req.Definition.Spec.Access.Spawn))
+	for _, target := range req.Definition.Spec.Access.Spawn {
 		// A delegation target must be dispatchable before it can be spawned,
 		// and it runs under its own tool name with no grants of its own: a
 		// sub-task inherits nothing.
@@ -502,8 +518,8 @@ func (s *Sandbox) ensure(ctx context.Context, rev agentrt.Revision) (string, err
 		}
 		spawn = append(spawn, ToolName(target))
 	}
-	areas := make([]dispatchsandbox.Area, 0, len(rev.Spec.Access.WorkspaceAreas))
-	for _, prefix := range rev.Spec.Access.WorkspaceAreas {
+	areas := make([]dispatchsandbox.Area, 0, len(req.Policy.WorkspaceAreas))
+	for _, prefix := range req.Policy.WorkspaceAreas {
 		areas = append(areas, dispatchsandbox.Area{Prefix: prefix})
 	}
 
@@ -524,7 +540,7 @@ func (s *Sandbox) ensure(ctx context.Context, rev agentrt.Revision) (string, err
 	}
 
 	s.mu.Lock()
-	s.deployed[key] = name
+	s.deployed[name] = name
 	s.mu.Unlock()
 	return name, nil
 }
@@ -589,7 +605,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		return nil, fmt.Errorf("runtime: sandbox: decode request: %w", err)
 	}
 	req := task.Request
-	rev := req.Revision
+	rev := req.Definition
 	if err := rev.Validate(); err != nil {
 		return nil, err
 	}
@@ -733,7 +749,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 // the turn would act for on it (envelope.WithActor), and a context with none
 // is a turn for nobody.
 func (s *Sandbox) ToolsFor(ctx context.Context, req Request) (agentrt.Granted, error) {
-	rev := req.Revision
+	rev := req.Definition
 	if err := rev.Validate(); err != nil {
 		return agentrt.Granted{}, err
 	}
@@ -771,7 +787,7 @@ func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, s
 		return send(agentrt.Chunk{Kind: envelope.KindActionTaken, Payload: body})
 	}
 
-	granted := make([]string, 0, len(req.Revision.Spec.Tools)+len(req.Revision.Spec.Access.Spawn))
+	granted := make([]string, 0, len(req.Definition.Spec.Tools)+len(req.Definition.Spec.Access.Spawn))
 	seen := make(map[string]bool, cap(granted))
 	add := func(name string) {
 		if name == "" || seen[name] {
@@ -780,19 +796,19 @@ func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, s
 		seen[name] = true
 		granted = append(granted, name)
 	}
-	for _, name := range req.Revision.Spec.Tools {
+	for _, name := range req.Definition.Spec.Tools {
 		add(name)
 	}
 
-	delegates := make(map[string]saigetypes.Tool, len(req.Revision.Spec.Access.Spawn))
-	for _, target := range req.Revision.Spec.Access.Spawn {
+	delegates := make(map[string]saigetypes.Tool, len(req.Definition.Spec.Access.Spawn))
+	for _, target := range req.Definition.Spec.Access.Spawn {
 		name := DelegateToolName(target)
 		delegates[name] = s.delegateTool(rt, req, actor, target, report, send)
 		if s.callTool == "" {
 			add(name)
 		}
 	}
-	if s.callTool != "" && len(req.Revision.Spec.Access.Spawn) > 0 {
+	if s.callTool != "" && len(req.Definition.Spec.Access.Spawn) > 0 {
 		add(s.callTool)
 	}
 
@@ -924,10 +940,10 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.A
 				defer done()
 				return s.delegator(dctx, parent, target, text, report)
 			}
-			if s.specs == nil {
+			if s.defs == nil {
 				return "", fmt.Errorf("%w: this deployment cannot resolve agent %q", ErrInvalid, target)
 			}
-			rev, err := s.specs.Latest(ctx, parent.Tenant, target)
+			loaded, err := s.subagent(ctx, parent, target)
 			if err != nil {
 				return "", fmt.Errorf("runtime: delegate to %q: %w", target, err)
 			}
@@ -957,8 +973,10 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.A
 				Source:  parent.Source,
 				Text:    text,
 				// No History: see above.
-				Revision: rev,
-				Service:  parent.Service,
+				Definition: pinnedOf(loaded),
+				Pin:        loaded.Pin,
+				Policy:     loaded.Agent.Policy,
+				Service:    parent.Service,
 				// The child's calls are keyed under the parent's, so no two
 				// calls of one run share a key at any depth.
 				Accounting: parent.Accounting + "/" + target + "." + sub,
@@ -1232,4 +1250,22 @@ func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Ques
 		return awaiting.AwaitQuestion(call)
 	}
 	return payload.Question{}, false
+}
+
+// subagent loads the definition a delegation runs: the version the parent's
+// pin names for target, verified, or the latest when the pin names none.
+func (s *Sandbox) subagent(ctx context.Context, parent Request, target string) (definition.Loaded, error) {
+	var (
+		pin definition.Pin
+		err error
+	)
+	if v, ok := parent.Pin.SubagentVersion(definition.NormalizeName(target)); ok {
+		pin, err = s.defs.ResolveAt(ctx, parent.Tenant, target, v)
+	} else {
+		pin, err = s.defs.Resolve(ctx, parent.Tenant, target)
+	}
+	if err != nil {
+		return definition.Loaded{}, err
+	}
+	return s.defs.Verify(ctx, parent.Tenant, pin)
 }

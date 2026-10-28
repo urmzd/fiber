@@ -124,17 +124,17 @@ func (c *config) group(rev Revision, name string) (ToolGroup, error) {
 	if !ok {
 		groups, can := c.tools.(ToolGroups)
 		if !can {
-			return ToolGroup{}, fmt.Errorf("%w: agent %q revision %d grants %q, which this deployment has not registered",
-				ErrNoSuchToolGroup, rev.Spec.Name, rev.Rev, name)
+			return ToolGroup{}, fmt.Errorf("%w: agent %q version %s grants %q, which this deployment has not registered",
+				ErrNoSuchToolGroup, rev.Spec.Name, rev.Version, name)
 		}
 		var err error
 		if g, err = groups.ToolGroup(name); err != nil {
-			return ToolGroup{}, fmt.Errorf("native: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
+			return ToolGroup{}, fmt.Errorf("native: agent %q version %s: %w", rev.Spec.Name, rev.Version, err)
 		}
 	}
 	if len(g.Tools) == 0 {
-		return ToolGroup{}, fmt.Errorf("%w: agent %q revision %d grants %q, which holds no tools",
-			ErrNoSuchToolGroup, rev.Spec.Name, rev.Rev, name)
+		return ToolGroup{}, fmt.Errorf("%w: agent %q version %s grants %q, which holds no tools",
+			ErrNoSuchToolGroup, rev.Spec.Name, rev.Version, name)
 	}
 	for _, t := range g.Tools {
 		if n := t.Definition().Name; n == "" || IsToolGroup(n) {

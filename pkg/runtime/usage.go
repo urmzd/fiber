@@ -216,7 +216,7 @@ func (r *Runtime) claimUsage(ctx context.Context, in Input, attempts []int, clai
 		case err == nil, errors.Is(err, run.ErrParked):
 		default:
 			r.logger.Warn("fiber/runtime: could not claim a usage record",
-				"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "attempt", a, "error", err)
+				"run_id", in.runID(), "attempt", a, "error", err)
 		}
 	}
 }
@@ -307,7 +307,7 @@ func (r *Runtime) childUsage(tenant, parentRunID string) func(context.Context, s
 			return payload.UsageChild{}, fmt.Errorf("runtime: read child run %s: %w", runID, err)
 		}
 		var in Input
-		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
 			return payload.UsageChild{}, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
 		}
 		if !rec.Status.Terminal() {
@@ -325,7 +325,7 @@ func (r *Runtime) childUsage(tenant, parentRunID string) func(context.Context, s
 		return payload.UsageChild{
 			AccountingID: payload.ChildRunAccountingID(runID),
 			RunID:        runID,
-			Agent:        in.Tag.Agent,
+			Agent:        in.Subscriber,
 			Depth:        1,
 			Usage:        total,
 		}, nil

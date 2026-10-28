@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/event"
@@ -30,12 +29,7 @@ func (x *runtimeExecutor) Execute(ctx context.Context, req Request, emit func(co
 	if x.rt == nil {
 		return Outcome{}, fmt.Errorf("%w: no turn runtime", ErrInvalid)
 	}
-	def := turnrt.Pinned{
-		Name:    req.Revision.Spec.Name,
-		Version: strconv.Itoa(req.Revision.Rev),
-		Digest:  req.Revision.Hash,
-		Spec:    req.Revision.Spec,
-	}
+	def := req.Definition
 	in := turnrt.Input{
 		Trigger:      triggerOf(req),
 		History:      req.History,
@@ -87,9 +81,9 @@ func triggerOf(req Request) event.Envelope {
 		Channel: firstNonEmpty(req.Source, "fiber:runtime"),
 		Tenant:  req.Tenant,
 		Run:     req.RunID,
-		Agent:   req.Revision.Spec.Name,
-		Version: strconv.Itoa(req.Revision.Rev),
-		Digest:  req.Revision.Hash,
+		Agent:   req.Definition.Name,
+		Version: req.Definition.Version,
+		Digest:  req.Definition.Digest,
 		Data: event.MessagePosted{Request: event.Request{
 			Text:        req.Text,
 			Attachments: req.Attachments,

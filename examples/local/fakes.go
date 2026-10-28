@@ -276,16 +276,16 @@ func (x *offlineExecutor) script(agent string, deltas ...[]saigetypes.Delta) {
 
 // Execute implements runtime.Executor.
 //
-// req.Revision is a resolved, PINNED revision, not a name and a number. An
+// req.Definition is a resolved, PINNED version, not a name and a range. An
 // executor must never re-resolve it: it may be running in another process, and
 // "which definition to run" is not a question it is allowed to answer.
 func (x *offlineExecutor) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
 	x.calls.Add(1)
 
-	runner, err := agentrt.New(req.Revision,
-		// The spec says provider "offline", so agentrt resolves it to
-		// saige's agenttest.ScriptedProvider with this script. Change the
-		// spec's provider to "anthropic" and the same code calls a model.
+	runner, err := agentrt.New(req.Definition,
+		// The definition says provider "offline", so agentrt resolves it to
+		// saige's agenttest.ScriptedProvider with this script. Change its
+		// model.use to anthropic/<model> and the same code calls a model.
 		agentrt.WithScript(x.scripts[req.Agent()]...),
 		agentrt.WithRetriever(x.retriever),
 		agentrt.WithLogger(quiet),

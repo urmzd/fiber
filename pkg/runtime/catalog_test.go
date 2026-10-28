@@ -84,8 +84,8 @@ func TestAnMCPToolGroupResolvesThroughTheSandbox(t *testing.T) {
 	tools := tool.NewRegistry()
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
-	lead := history.revise("lead", "Lead.")
-	lead.Spec.Tools = []string{agentrt.MCPGroup("urmzd")}
+	history.revise("lead", "Lead.")
+	lead := history.edit("lead", func(s *agentrt.Spec) { s.Tools = []string{agentrt.MCPGroup("urmzd")} })
 
 	catalog := groupCatalog{group: agentrt.ToolGroup{Name: agentrt.MCPGroup("urmzd"), Tools: []saigetypes.Tool{echoTool{}}}}
 	s, err := runtime.NewSandbox(plane, tools, history,

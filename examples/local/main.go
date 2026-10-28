@@ -6,7 +6,7 @@
 // deployment would run against real infrastructure runs here against the
 // in-memory implementations of the same interfaces:
 //
-//	control plane   pkg/registry.Memory        (a real registry would be Postgres)
+//	control plane   pkg/definition.Memory      (a real one would be Postgres)
 //	bus             pkg/bus.Memory             (a real bus would be Redis Streams)
 //	ledger + queue  anchor's ledger.Memory   (a real ledger would be Postgres)
 //	                and queue.Memory
@@ -21,8 +21,8 @@
 // with the storage swapped. The seven sections below are the seven claims
 // fiber makes, each one demonstrated rather than described.
 //
-//  1. an agent is a declarative spec
-//  2. a revision is immutable; revising creates the next one
+//  1. an agent is a definition file (agents/*.agent.md)
+//  2. a version is immutable; revising writes the next one
 //  3. origin and destination are independent   ← the mesh thesis
 //  4. one run, two sinks, two granularities    ← N:M selectivity
 //  5. a third party can listen to an agent     ← "the Kafka of agents"
@@ -32,6 +32,8 @@ package main
 
 import (
 	"context"
+	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,11 +47,10 @@ import (
 
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
-	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 )
@@ -61,6 +62,16 @@ const tenant = "acme"
 
 // author is who the control plane attributes these definitions to.
 const author = "ada@acme.test"
+
+// The agent, as two versions of one saige definition file and its policy.
+var (
+	//go:embed agents/docs-bot.v1.agent.md
+	docsBotV1 string
+	//go:embed agents/docs-bot.v2.agent.md
+	docsBotV2 string
+	//go:embed agents/docs-bot.policy.json
+	docsBotPolicy string
+)
 
 // demoStride shrinks the per-attempt sequence band from its default of 2^20 so
 // that the numbers in the output stay readable. Every attempt of a run gets its
@@ -98,8 +109,8 @@ func run() error {
 	// This is the whole composition root. Each of these owns exactly one
 	// concern, and the wiring below is the only place they meet.
 
-	// The control plane: append-only agent definitions with revisions.
-	store := registry.NewMemory(registry.WithClock(fixedClock))
+	// The control plane: insert-only agent definitions, one row per version.
+	store := definition.NewMemory(definition.WithClock(fixedClock))
 
 	// The broker. Runs publish here; everything else subscribes. flakyBus
 	// wraps it for section 7 and forwards Subscribe untouched, so the router
@@ -159,7 +170,7 @@ func run() error {
 	app, err := fiber.New(ctx,
 		fiber.WithTenant(tenant),
 		fiber.WithLogger(quiet),
-		fiber.WithRegistry(store),
+		fiber.WithDefinitions(store),
 		fiber.WithBus(published),
 		fiber.WithExecutor(exec),
 		fiber.WithConnector(slack),
@@ -184,68 +195,56 @@ func run() error {
 	go func() { appDone <- app.Run(ctx) }()
 
 	// ── 1 ───────────────────────────────────────────────────────────
-	section(1, "AN AGENT IS A DECLARATIVE SPEC")
+	section(1, "AN AGENT IS A DEFINITION FILE")
 
-	first := agentspec.AgentSpec{
-		Name:        "docs-bot",
-		Description: "answers questions about how we ship",
-		// Change these two fields to "anthropic" and a real model id and
-		// every other line in this file stays the same. That is the only
-		// difference between this example and a production deployment's
-		// agent definition.
-		Provider:     agentspec.ProviderOffline,
-		Model:        "scripted",
-		SystemPrompt: "You answer questions about the deploy pipeline. Cite your sources.",
-		Sources: []agentspec.Source{
-			{Name: "handbook", URI: "https://docs.acme.test/"},
-		},
+	// The definition is a saige .agent.md file; what it may touch beyond its
+	// tools (here, the corpus it retrieves from) is its policy, which grants
+	// nothing it does not name.
+	var policy definition.Policy
+	if err := json.Unmarshal([]byte(docsBotPolicy), &policy); err != nil {
+		return fmt.Errorf("read policy: %w", err)
 	}
-
-	rev1, err := store.Create(ctx, tenant, first, author)
+	v1, err := store.Put(ctx, definition.Record{Tenant: tenant, Content: docsBotV1, Policy: policy, CreatedBy: author})
 	if err != nil {
 		return fmt.Errorf("create agent: %w", err)
 	}
-	fmt.Printf("  created  %s  revision %d\n", rev1.Spec.Name, rev1.Rev)
-	fmt.Printf("  hash     %s\n", rev1.Hash)
-	fmt.Printf("  prompt   %q\n", rev1.Spec.SystemPrompt)
-	fmt.Printf("  address  agent:%s          ← this is now a topic anyone can subscribe to\n", rev1.Spec.Name)
+	fmt.Printf("  created  %s  version %s\n", v1.Name, v1.Version)
+	fmt.Printf("  digest   %s\n", v1.Digest)
+	fmt.Printf("  policy   %s\n", v1.PolicyHash)
+	fmt.Printf("  address  agent:%s          ← this is now a topic anyone can subscribe to\n", v1.Name)
 
 	// ── 2 ───────────────────────────────────────────────────────────
-	section(2, "A REVISION IS IMMUTABLE; REVISING CREATES THE NEXT ONE")
+	section(2, "A VERSION IS IMMUTABLE; REVISING WRITES THE NEXT ONE")
 
-	second := first
-	second.SystemPrompt = "You answer questions about the deploy pipeline. " +
-		"Cite your sources, and always mention the rollback procedure."
-
-	// expectedRev is optimistic concurrency: say which revision you edited,
-	// and a racing editor cannot silently overwrite you.
-	rev2, err := store.Revise(ctx, tenant, second, rev1.Rev, author)
+	// A version is never rewritten: storing other content under 1.0.0 is
+	// refused, so an edit is a new, higher version.
+	v2, err := store.Put(ctx, definition.Record{Tenant: tenant, Content: docsBotV2, Policy: policy, CreatedBy: author})
 	if err != nil {
 		return fmt.Errorf("revise agent: %w", err)
 	}
-	fmt.Printf("  revised  %s  revision %d\n\n", rev2.Spec.Name, rev2.Rev)
+	fmt.Printf("  revised  %s  version %s\n\n", v2.Name, v2.Version)
 
-	// Both numbers still resolve, and revision 1 is byte-for-byte what it was
-	// before the edit. This is not a nicety: a run PINS its revision at accept
+	// Both versions still resolve, and 1.0.0 is byte-for-byte what it was
+	// before the edit. This is not a nicety: a run PINS its version at accept
 	// time and replays under it forever, because anchor replays a workflow
 	// from the top and a definition that moved between attempts would make the
 	// replay diverge from its own ledger.
-	got1, err := store.Get(ctx, tenant, "docs-bot", 1)
+	got1, err := store.Get(ctx, tenant, "docs-bot", v1.Version)
 	if err != nil {
-		return fmt.Errorf("resolve revision 1: %w", err)
+		return fmt.Errorf("resolve version %s: %w", v1.Version, err)
 	}
-	got2, err := store.Get(ctx, tenant, "docs-bot", 2)
+	got2, err := store.Get(ctx, tenant, "docs-bot", v2.Version)
 	if err != nil {
-		return fmt.Errorf("resolve revision 2: %w", err)
+		return fmt.Errorf("resolve version %s: %w", v2.Version, err)
 	}
-	fmt.Printf("  rev 1    %s\n           %q\n", got1.Hash, got1.Spec.SystemPrompt)
-	fmt.Printf("  rev 2    %s\n           %q\n\n", got2.Hash, got2.Spec.SystemPrompt)
+	fmt.Printf("  %s  %s\n", got1.Version, got1.Digest)
+	fmt.Printf("  %s  %s\n\n", got2.Version, got2.Digest)
 
-	if got1.Hash != rev1.Hash {
-		return fmt.Errorf("revision 1 changed under a revise: %s became %s", rev1.Hash, got1.Hash)
+	if got1.Digest != v1.Digest {
+		return fmt.Errorf("version %s changed under a revise: %s became %s", v1.Version, v1.Digest, got1.Digest)
 	}
-	fmt.Println("  revision 1 still resolves, unchanged, after the edit that created 2.")
-	fmt.Println("  a run in flight against revision 1 finishes as revision 1.")
+	fmt.Println("  1.0.0 still resolves, unchanged, after the edit that wrote 2.0.0.")
+	fmt.Println("  a run in flight against 1.0.0 finishes as 1.0.0.")
 
 	// ── 3 ───────────────────────────────────────────────────────────
 	section(3, "ORIGIN AND DESTINATION ARE INDEPENDENT   ← the mesh thesis")
@@ -319,7 +318,7 @@ func run() error {
 
 	// Invoke registers the run's routes with the router first (an event for
 	// a run it has no routes for has nowhere to go), then accepts: it pins
-	// the revision, publishes the accepted event, and submits the run
+	// the version, publishes the accepted event, and submits the run
 	// durably. From here the process could be killed and restarted and the
 	// run would still finish.
 	meshRun := runtime.RunID(tag.Tenant, tag.ID)
@@ -327,8 +326,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("accept tag: %w", err)
 	}
-	fmt.Printf("  accepted run %s on channel %s, pinned to revision %d\n\n",
-		acc.RunID, acc.Channel, acc.Rev)
+	fmt.Printf("  accepted run %s on channel %s, pinned to version %s\n\n",
+		acc.RunID, acc.Channel, acc.Version)
 
 	out, err := app.Runtime().Result(ctx, acc.RunID)
 	if err != nil {
@@ -488,7 +487,7 @@ func run() error {
 	// ── shutdown ────────────────────────────────────────────────────
 	section(0, "WHAT JUST HAPPENED")
 
-	fmt.Printf("  agents defined      1 (%d revisions, both still resolvable)\n", rev2.Rev)
+	fmt.Println("  agents defined      1 (2 versions, both still resolvable)")
 	fmt.Printf("  runs executed       %d (one from GitHub, one from a schedule)\n", len(watcher.runs()))
 	fmt.Printf("  events on the bus   %d (%d + %d, counted by a subscriber that invoked nothing)\n",
 		watcher.total(), len(watcher.events(meshRun)), len(watcher.events(cronRun)))
@@ -496,7 +495,7 @@ func run() error {
 	fmt.Printf("  model calls         %d\n", after)
 	fmt.Println()
 	fmt.Println("  pass WithPostgres(pool) and WithBus(bus.NewRedis(client)) instead of")
-	fmt.Println("  the in-memory registry, bus and executor, swap the two fakes for")
+	fmt.Println("  the in-memory definitions, bus and executor, swap the two fakes for")
 	fmt.Println("  WithSlack and WithWebhooks, and this file does not otherwise change.")
 	fmt.Println()
 

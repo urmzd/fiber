@@ -12,7 +12,6 @@
   "version": "1.2.0",
   "digest": "sha256:abc",
   "data": {
-    "attempt": 1,
-    "rev": 3
+    "attempt": 1
   }
 }

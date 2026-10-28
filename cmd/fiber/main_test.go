@@ -16,16 +16,25 @@ import (
 	"github.com/urmzd/fiber/pkg/event"
 )
 
-// docsBot is a spec as a deployment would write it: a real provider, a
-// fallback on another, and grants this local composition only partly has.
-const docsBot = `{
-  "name": "docs-bot",
-  "description": "answers questions about how we ship",
-  "provider": "anthropic",
-  "model": "house-model",
-  "system_prompt": "You answer questions about the deploy pipeline.",
-  "fallbacks": [{"provider": "openai", "model": "other-model"}]
-}`
+// docsBot is a definition as a deployment would write it: a real provider
+// and a fallback on another.
+const docsBot = `---
+apiVersion: saige/v1
+name: docs-bot
+version: 1.0.0
+description: answers questions about how we ship
+model:
+  use: anthropic/house-model
+  fallback:
+    - openai/other-model
+---
+You answer questions about the deploy pipeline.
+`
+
+// agentFile is a minimal definition with frontmatter lines of the test's.
+func agentFile(front, prompt string) string {
+	return "---\napiVersion: saige/v1\nname: docs-bot\nversion: 1.0.0\n" + front + "---\n" + prompt + "\n"
+}
 
 // noKeys makes sure no vendor key is in reach, so a test that passes did so
 // without one.
@@ -38,7 +47,12 @@ func noKeys(t *testing.T) {
 
 func writeSpec(t *testing.T, body string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "spec.json")
+	return writeFile(t, "docs-bot.agent.md", body)
+}
+
+func writeFile(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +82,7 @@ func TestASpecRunsOfflineEndToEndWithNoKey(t *testing.T) {
 	}
 	at := -1
 	for _, want := range []string{
-		"[run.accepted.v1] docs-bot version 1, run ",
+		"[run.accepted.v1] docs-bot version 1.0.0, run ",
 		"[run.started.v1] attempt 1",
 		"docs-bot is running with the offline provider, so no model was called.",
 		"[run.usage.v1] house-model:",
@@ -110,8 +124,8 @@ func TestJSONPrintsOneEventPerLine(t *testing.T) {
 		last = e.Seq
 		types = append(types, e.Type)
 		runs[e.Run] = true
-		if e.Agent != "docs-bot" || e.Version != "1" || e.Run == "" {
-			t.Errorf("event %+v is not docs-bot version 1 of a run", e)
+		if e.Agent != "docs-bot" || e.Version != "1.0.0" || e.Run == "" {
+			t.Errorf("event %+v is not docs-bot version 1.0.0 of a run", e)
 		}
 		switch b := e.Data.(type) {
 		case event.Text:
@@ -136,9 +150,7 @@ func TestJSONPrintsOneEventPerLine(t *testing.T) {
 // name: here the offline provider, under a model name of the test's.
 func TestProviderAndModelFlagsReplaceTheSpecs(t *testing.T) {
 	noKeys(t)
-	code, stdout, stderr := fiberCLI(t, "", "run", "-json", "-provider", "offline", "-model", "chosen-here", writeSpec(t, `{
-  "name": "docs-bot", "provider": "anthropic", "model": "house-model", "system_prompt": "Answer."
-}`), "how?")
+	code, stdout, stderr := fiberCLI(t, "", "run", "-json", "-provider", "offline", "-model", "chosen-here", writeSpec(t, agentFile("model:\n  use: anthropic/house-model\n", "Answer.")), "how?")
 	if code != exitCompleted {
 		t.Fatalf("exit %d\nstderr:\n%s", code, stderr)
 	}
@@ -158,24 +170,27 @@ func TestASpecOnStandardInputRuns(t *testing.T) {
 
 // -tools lists what a run would be granted here, needing no key and no
 // MESSAGE, and runs nothing: the built-in ask_person, the author tools
-// every App has, a delegation tool per spawn grant, which calls wait for
-// approval, and the grants this composition cannot honour, with why.
+// every App has, which calls wait for approval, and the grants this
+// composition cannot honour, with why.
 func TestToolsListsWhatTheAgentWouldBeGrantedAndRunsNothing(t *testing.T) {
 	noKeys(t)
-	path := writeSpec(t, `{
-  "name": "docs-bot", "provider": "anthropic", "model": "house-model", "system_prompt": "Answer.",
-  "tools": ["ask_person", "author_get", "jira_transition", "mcp:issues"],
-  "approvals": ["author_get"],
-  "access": {"spawn": ["helper"]}
-}`)
+	path := writeSpec(t, agentFile(`model:
+  use: anthropic/house-model
+tools:
+  registry: [ask_person, author_get, jira_transition]
+  mcp:
+    - server: issues
+approval:
+  ask: [author_get]
+`, "Answer."))
 
 	code, stdout, stderr := fiberCLI(t, "", "run", "-tools", path)
 	if code != exitCompleted {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	for _, want := range []string{
-		"docs-bot revision 1 would be granted 3 tools:",
-		"ask_person", "tag_helper",
+		"docs-bot 1.0.0 would be granted 2 tools:",
+		"ask_person", "author_get",
 		"(each call waits for approval)",
 		"2 grants are unavailable here",
 		`"jira_transition" is not contributed by any registered connector`,
@@ -207,8 +222,8 @@ func TestToolsListsWhatTheAgentWouldBeGrantedAndRunsNothing(t *testing.T) {
 	for _, u := range l.Unavailable {
 		missing = append(missing, u.Name)
 	}
-	if !slices.Equal(names, []string{"ask_person", "author_get", "tag_helper"}) || !slices.Equal(approved, []string{"author_get"}) ||
-		!slices.Equal(missing, []string{"jira_transition", "mcp:issues"}) || l.Agent != "docs-bot" || l.Rev != 1 {
+	if !slices.Equal(names, []string{"ask_person", "author_get"}) || !slices.Equal(approved, []string{"author_get"}) ||
+		!slices.Equal(missing, []string{"jira_transition", "mcp:issues"}) || l.Agent != "docs-bot" || l.Version != "1.0.0" {
 		t.Errorf("listing %+v", l)
 	}
 }
@@ -238,7 +253,17 @@ func TestARunOutOfTimeExitsOne(t *testing.T) {
 	}
 }
 
-// A command line or a spec that is wrong exits 2 before anything runs, and
+// A policy file is read with the definition, strictly.
+func TestAPolicyFileIsRead(t *testing.T) {
+	noKeys(t)
+	policy := writeFile(t, "policy.json", `{"tagged_only": true, "fallback_on": ["timeout"]}`)
+	code, stdout, stderr := fiberCLI(t, "", "run", "-offline", "-policy", policy, writeSpec(t, docsBot), "how?")
+	if code != exitCompleted || !strings.Contains(stdout, "[run.completed.v1]") {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
+// A command line or a definition that is wrong exits 2 before anything runs, and
 // says what is wrong. A misspelt field is wrong, not ignored.
 func TestBadInputExitsTwoAndSaysWhy(t *testing.T) {
 	noKeys(t)
@@ -251,7 +276,7 @@ func TestBadInputExitsTwoAndSaysWhy(t *testing.T) {
 	}{
 		{"no command", "", nil, "Usage: fiber run"},
 		{"an unknown command", "", []string{"serve"}, `unknown command "serve"`},
-		{"no spec", "", []string{"run"}, "no SPEC"},
+		{"no definition", "", []string{"run"}, "no DEFINITION"},
 		{"no message", "", []string{"run", good}, "no MESSAGE"},
 		{"an empty message", "", []string{"run", good, "  "}, "MESSAGE is empty"},
 		{"a flag after the spec", "", []string{"run", good, "hi", "-json"}, "flags go before it"},
@@ -260,14 +285,16 @@ func TestBadInputExitsTwoAndSaysWhy(t *testing.T) {
 		{"an unknown flag", "", []string{"run", "-verbose", good, "hi"}, "-verbose"},
 		{"offline and a provider", "", []string{"run", "-offline", "-provider", "openai", good, "hi"}, "give one"},
 		{"a negative timeout", "", []string{"run", "-timeout", "-1s", good, "hi"}, "negative"},
-		{"a missing file", "", []string{"run", filepath.Join(t.TempDir(), "nope.json"), "hi"}, "no such file"},
+		{"a missing file", "", []string{"run", filepath.Join(t.TempDir(), "nope.agent.md"), "hi"}, "no such file"},
 		{"empty input", "", []string{"run", "-", "hi"}, "empty"},
-		{"not JSON", "name: docs-bot", []string{"run", "-", "hi"}, "not an agent spec"},
-		{"a misspelt field", `{"name":"x","provider":"offline","model":"m","system-prompt":"hi"}`, []string{"run", "-", "hi"}, `unknown field "system-prompt"`},
-		{"two specs", `{"name":"x"} {"name":"y"}`, []string{"run", "-", "hi"}, "more than one JSON value"},
-		{"no system prompt", `{"name":"x","provider":"offline","model":"m"}`, []string{"run", "-", "hi"}, "empty system prompt"},
-		{"an unknown provider", `{"name":"x","provider":"house","model":"m","system_prompt":"hi"}`, []string{"run", "-", "hi"}, `names provider "house"`},
-		{"an approval for a tool it is not granted", `{"name":"x","provider":"offline","model":"m","system_prompt":"hi","approvals":["deploy"]}`, []string{"run", "-tools", "-"}, "deploy"},
+		{"no frontmatter", "name: docs-bot", []string{"run", "-", "hi"}, "frontmatter"},
+		{"no prompt", agentFile("model:\n  use: offline/m\n", ""), []string{"run", "-", "hi"}, "prompt is empty"},
+		{"no model", agentFile("", "hi"), []string{"run", "-", "hi"}, "a model is required"},
+		{"an unknown provider", agentFile("model:\n  use: house/m\n", "hi"), []string{"run", "-", "hi"}, `names provider "house"`},
+		{"an approval for a tool it is not granted", agentFile("model:\n  use: offline/m\napproval:\n  ask: [deploy]\n", "hi"), []string{"run", "-tools", "-"}, "deploy"},
+		{"a subagent it cannot resolve", agentFile("model:\n  use: offline/m\nsubagents:\n  - ref: helper\n", "hi"), []string{"run", "-tools", "-"}, "helper"},
+		{"a misspelt policy field", "", []string{"run", "-policy", writeFile(t, "p.json", `{"tagged-only": true}`), good, "hi"}, `unknown field "tagged-only"`},
+		{"two policies", "", []string{"run", "-policy", writeFile(t, "p.json", `{} {}`), good, "hi"}, "more than one JSON value"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, stdout, stderr := fiberCLI(t, tc.stdin, tc.args...)
@@ -294,7 +321,7 @@ func TestHelpIsExitZero(t *testing.T) {
 // none of it streamed, as a replayed attempt's does not.
 func TestTextShowsEachEventUnderItsKind(t *testing.T) {
 	ev := func(body event.Body) event.Envelope {
-		return event.Envelope{Type: body.Type(), Agent: "docs-bot", Version: "2", Run: "r1", Data: body}
+		return event.Envelope{Type: body.Type(), Agent: "docs-bot", Version: "2.0.0", Run: "r1", Data: body}
 	}
 	for _, tc := range []struct {
 		name   string
@@ -320,10 +347,10 @@ func TestTextShowsEachEventUnderItsKind(t *testing.T) {
 			"Done.\n" +
 			"[run.completed.v1] attempt 1\n"},
 		{"an answer that did not stream is shown with its ending", []event.Envelope{
-			ev(event.Accepted{Rev: 2}),
+			ev(event.Accepted{}),
 			ev(event.Resumed{Attempt: 2}),
 			ev(event.Completed{Attempt: 2, Text: "From the ledger."}),
-		}, "[run.accepted.v1] docs-bot version 2, run r1\n" +
+		}, "[run.accepted.v1] docs-bot version 2.0.0, run r1\n" +
 			"[run.resumed.v1] attempt 2\n" +
 			"[run.completed.v1] attempt 2\n" +
 			"From the ledger.\n"},

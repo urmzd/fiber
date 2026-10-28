@@ -395,7 +395,7 @@ func (r *Runtime) recordStop(ctx context.Context, tenant, runID string, body []b
 		return false, nil
 	}
 	var in Input
-	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
 		// Not a run of this runtime's, or not the asker's.
 		return false, nil
 	}
@@ -449,7 +449,7 @@ func (r *Runtime) StopRequested(ctx context.Context, tenant, runID string) (Stop
 		return StopRecord{}, false, fmt.Errorf("runtime: stop state of %s: %w", runID, err)
 	}
 	var in Input
-	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
 		return StopRecord{}, false, nil
 	}
 	for _, record := range records {
@@ -691,13 +691,13 @@ func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan ag
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	if r.control != nil {
-		ch, err := StopChannel(in.Tag.Tenant, runID)
+		ch, err := StopChannel(in.Trigger.Tenant, runID)
 		if err != nil {
 			// Accept checked this run's id, so this cannot happen; a run
 			// that cannot be stopped is better than one that cannot start.
 			r.logger.Error("fiber/runtime: stop channel is invalid", "run_id", runID, "error", err)
 		} else {
-			sub := bus.Subscription{Tenant: busTenant(in.Tag.Tenant), Channels: []string{ch}, Types: []string{event.TypeStop}}
+			sub := bus.Subscription{Tenant: busTenant(in.Trigger.Tenant), Channels: []string{ch}, Types: []string{event.TypeStop}}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()

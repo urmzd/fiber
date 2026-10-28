@@ -622,14 +622,14 @@ func TestTheSandboxRefusesATaskWhoseTurnIsGone(t *testing.T) {
 	// is held, so stop it with an already-cancelled context.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _ = s.Execute(ctx, runtime.Request{RunID: "warm", Tenant: "acme", Text: "x", Revision: rev}, nil)
+	_, _ = s.Execute(ctx, withPin(runtime.Request{RunID: "warm", Tenant: "acme", Text: "x"}, rev), nil)
 
 	before := len(model.asked())
-	input, err := json.Marshal(runtime.Request{RunID: "nobody-waits", Tenant: "acme", Text: "x", Revision: rev})
+	input, err := json.Marshal(withPin(runtime.Request{RunID: "nobody-waits", Tenant: "acme", Text: "x"}, rev))
 	if err != nil {
 		t.Fatal(err)
 	}
-	deployment := runtime.DeploymentName("docs-bot", rev.Rev)
+	deployment := runtime.DeploymentName(withPin(runtime.Request{}, rev).Pin)
 	id, err := plane.SubmitAsync(context.Background(), deployment, task.Task{Tool: runtime.ToolName("docs-bot"), Input: input})
 	if err != nil {
 		t.Fatal(err)
@@ -672,7 +672,7 @@ func TestCancellingAWaitingTurnCancelsItsTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Execute(ctx, runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x", Revision: rev},
+		_, err := s.Execute(ctx, withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x"}, rev),
 			func(context.Context, agentrt.Chunk) error { return nil })
 		done <- err
 	}()
@@ -738,17 +738,10 @@ func (c *causeRecorder) delegate(ctx context.Context, _ runtime.Request, _, _ st
 
 func leadWithSpawn(sp *specs) agentrt.Revision {
 	sp.revise("helper", "Help.")
-	rev := agentrt.Revision{
-		Rev: 1, Hash: "sha256:lead@1",
-		Spec: agentrt.Spec{
-			Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
-			Access: agentrt.Access{Spawn: []string{"helper"}},
-		},
-	}
-	sp.mu.Lock()
-	sp.revs["lead"] = []agentrt.Revision{rev}
-	sp.mu.Unlock()
-	return rev
+	return sp.set(agentrt.Spec{
+		Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
+		Access: agentrt.Access{Spawn: []string{"helper"}},
+	})
 }
 
 func delegatingLead() *agenttest.ScriptedProvider {
@@ -792,7 +785,7 @@ func TestADelegatorCanTellAStopFromAnyOtherCancellation(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_, _ = exec.Execute(ctx, runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x", Revision: lead},
+			_, _ = exec.Execute(ctx, withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x"}, lead),
 				func(context.Context, agentrt.Chunk) error { return nil })
 		}()
 		<-rec.started

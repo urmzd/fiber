@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +20,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
@@ -29,59 +29,183 @@ import (
 
 // ── fixtures ────────────────────────────────────────────────────────
 
-// specs is a control plane's revision history, complete enough to be revised
-// and to answer a pinned lookup after it has been.
+// specs is a control plane's definitions, complete enough to be revised and
+// to answer a pinned lookup after it has been. Every tenant reads the same
+// definitions, as the fixtures here are not about tenancy.
 type specs struct {
-	mu   sync.Mutex
-	revs map[string][]agentrt.Revision // agent -> revisions, index 0 is rev 1
+	*definition.Resolver
+	src *anyTenant
+
+	mu       sync.Mutex
+	versions map[string]int // agent -> latest major version
 }
 
-func newSpecs() *specs { return &specs{revs: make(map[string][]agentrt.Revision)} }
+func newSpecs() *specs {
+	src := &anyTenant{Source: definition.NewMemory(), tampered: map[string]string{}}
+	return &specs{Resolver: definition.NewResolver(src, definition.Checks{}), src: src, versions: map[string]int{}}
+}
 
-// revise appends the next revision of an agent and returns it.
+// specContent is the definition file every fixture agent is written as.
+func specContent(agent, version, prompt string) string {
+	return fmt.Sprintf("---\napiVersion: saige/v1\nname: %s\nversion: %s\nmodel: offline/scripted\n---\n%s\n", agent, version, prompt)
+}
+
+// revise writes the next major version of an agent and returns it.
 func (s *specs) revise(agent, prompt string) agentrt.Revision {
+	return s.set(agentrt.Spec{Name: agent, Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: prompt})
+}
+
+// set writes spec as the next major version of its agent and returns it. The
+// agents it delegates to must already exist.
+func (s *specs) set(spec agentrt.Spec) agentrt.Revision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rev := agentrt.Revision{
-		Rev: len(s.revs[agent]) + 1,
-		Spec: agentrt.Spec{
-			Name:         agent,
-			Provider:     agentrt.ProviderOffline,
-			Model:        "scripted",
-			SystemPrompt: prompt,
-		},
+	s.versions[spec.Name]++
+	old := definition.AgentSpec{
+		Name: spec.Name, Description: spec.Description, Model: spec.Model, Provider: spec.Provider,
+		SystemPrompt: spec.SystemPrompt, Tools: spec.Tools,
+		Access:     definition.AgentSpecAccess{Spawn: spec.Access.Spawn, WorkspaceAreas: spec.Access.WorkspaceAreas},
+		FallbackOn: spec.FallbackOn, Approvals: spec.Approvals, Approvers: spec.Approvers,
+		SelfApproval: spec.SelfApproval, Answerers: spec.Answerers, TaggedOnly: spec.TaggedOnly,
 	}
-	rev.Hash = fmt.Sprintf("sha256:%s@%d", agent, rev.Rev)
-	s.revs[agent] = append(s.revs[agent], rev)
+	for _, f := range spec.Fallbacks {
+		old.Fallbacks = append(old.Fallbacks, definition.AgentSpecModel{Provider: f.Provider, Model: f.Model})
+	}
+	for _, c := range spec.Sources {
+		old.Sources = append(old.Sources, definition.Corpus{Name: c.Name, URI: c.URI, Options: c.Options})
+	}
+	rec, err := definition.FromAgentSpec(old, s.versions[spec.Name])
+	if err != nil {
+		panic(err)
+	}
+	rec.Tenant, rec.CreatedBy = "acme", "test"
+	if rec, err = s.src.Put(context.Background(), rec); err != nil {
+		panic(err)
+	}
+	a, err := definition.Parse(rec.Content, rec.Policy, definition.Checks{})
+	if err != nil {
+		panic(err)
+	}
+	// The digest a run reports is the resolved one, which needs every
+	// sub-agent to exist. One written before its sub-agents reports the
+	// file's own until then.
+	digest := rec.Digest
+	if pin, err := s.ResolveAt(context.Background(), fixtureTenant, rec.Name, rec.Version); err == nil {
+		digest = pin.Digest
+	}
+	rev := agentrt.Revision{Name: rec.Name, Version: rec.Version, Digest: digest, Spec: a.Spec}
+	fixtures.Store(pinKey(rev), s)
 	return rev
 }
 
-// at overwrites a stored revision, which only a broken control plane would do.
-// It exists so a test can prove that fiber notices.
-func (s *specs) corrupt(agent string, rev int, hash string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.revs[agent][rev-1].Hash = hash
+// latest pins the latest version of agent, as accept would.
+func (s *specs) latest(agent string) (agentrt.Revision, error) {
+	pin, err := s.Resolve(context.Background(), fixtureTenant, agent)
+	if err != nil {
+		return agentrt.Revision{}, err
+	}
+	loaded, err := s.Verify(context.Background(), fixtureTenant, pin)
+	if err != nil {
+		return agentrt.Revision{}, err
+	}
+	rev := agentrt.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
+	fixtures.Store(pinKey(rev), s)
+	return rev, nil
 }
 
-func (s *specs) Latest(_ context.Context, _, agent string) (agentrt.Revision, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	history := s.revs[agent]
-	if len(history) == 0 {
-		return agentrt.Revision{}, fmt.Errorf("no such agent %q", agent)
+// fixtures maps every version a fixture wrote to the fixture, so a test that
+// calls an executor directly can send the request accept would have built.
+var fixtures sync.Map
+
+func pinKey(rev agentrt.Revision) string { return rev.Name + "@" + rev.Version + "#" + rev.Digest }
+
+// withPin is req for rev, pinned now as accept pins it.
+func withPin(req runtime.Request, rev agentrt.Revision) runtime.Request {
+	v, ok := fixtures.Load(pinKey(rev))
+	if !ok {
+		panic("no fixture wrote " + pinKey(rev))
 	}
-	return history[len(history)-1], nil
+	s := v.(*specs)
+	pin, err := s.ResolveAt(context.Background(), fixtureTenant, rev.Name, rev.Version)
+	if err != nil {
+		panic(err)
+	}
+	loaded, err := s.Verify(context.Background(), fixtureTenant, pin)
+	if err != nil {
+		panic(err)
+	}
+	req.Definition = agentrt.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
+	req.Pin, req.Policy = pin, loaded.Agent.Policy
+	return req
 }
 
-func (s *specs) At(_ context.Context, _, agent string, rev int) (agentrt.Revision, error) {
+// edit writes the next version of an agent with its latest spec changed by
+// mod.
+func (s *specs) edit(agent string, mod func(*agentrt.Spec)) agentrt.Revision {
+	rec, err := s.src.Latest(context.Background(), fixtureTenant, agent)
+	if err != nil {
+		panic(err)
+	}
+	a, err := definition.Parse(rec.Content, rec.Policy, definition.Checks{})
+	if err != nil {
+		panic(err)
+	}
+	spec := a.Spec
+	mod(&spec)
+	return s.set(spec)
+}
+
+// corrupt makes a stored version read back with other content, which only a
+// broken control plane would do. It exists so a test can prove that fiber
+// notices.
+func (s *specs) corrupt(agent string, major int, prompt string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	history := s.revs[agent]
-	if rev < 1 || rev > len(history) {
-		return agentrt.Revision{}, fmt.Errorf("agent %q has no revision %d", agent, rev)
+	s.src.mu.Lock()
+	defer s.src.mu.Unlock()
+	s.src.tampered[agent+"@"+fmt.Sprintf("%d.0.0", major)] = prompt
+}
+
+// anyTenant is a Source that keeps every tenant's definitions as one, and can
+// read a version back tampered with.
+type anyTenant struct {
+	definition.Source
+	mu       sync.Mutex
+	tampered map[string]string // name@version -> prompt
+}
+
+const fixtureTenant = "any"
+
+func (a *anyTenant) Put(ctx context.Context, r definition.Record) (definition.Record, error) {
+	r.Tenant = fixtureTenant
+	return a.Source.Put(ctx, r)
+}
+
+func (a *anyTenant) Get(ctx context.Context, _, name, version string) (definition.Record, error) {
+	r, err := a.Source.Get(ctx, fixtureTenant, name, version)
+	a.mu.Lock()
+	prompt, ok := a.tampered[name+"@"+version]
+	a.mu.Unlock()
+	if err == nil && ok {
+		r.Content = specContent(name, version, prompt)
 	}
-	return history[rev-1], nil
+	return r, err
+}
+
+func (a *anyTenant) Versions(ctx context.Context, _, name string) ([]definition.Record, error) {
+	return a.Source.Versions(ctx, fixtureTenant, name)
+}
+
+func (a *anyTenant) Latest(ctx context.Context, _, name string) (definition.Record, error) {
+	return a.Source.Latest(ctx, fixtureTenant, name)
+}
+
+func (a *anyTenant) List(ctx context.Context, _ string, page definition.Page) ([]definition.Record, string, error) {
+	return a.Source.List(ctx, fixtureTenant, page)
+}
+
+func (a *anyTenant) Retire(ctx context.Context, _, name, by string) error {
+	return a.Source.Retire(ctx, fixtureTenant, name, by)
 }
 
 // recorder is a bus that keeps every Publish call, deduplication included, so a
@@ -375,8 +499,8 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 		if err := json.Unmarshal(rec.Input, &in); err != nil {
 			t.Fatalf("decode run %s: %v", want.runID, err)
 		}
-		if in.Tag.Tenant != want.tenant || in.Tag.Text != want.text {
-			t.Errorf("run %s holds tenant %q text %q, want %q %q", want.runID, in.Tag.Tenant, in.Tag.Text, want.tenant, want.text)
+		if got := in.Tag(); got.Tenant != want.tenant || got.Text != want.text {
+			t.Errorf("run %s holds tenant %q text %q, want %q %q", want.runID, got.Tenant, got.Text, want.tenant, want.text)
 		}
 	}
 	for _, e := range h.bus.all() {
@@ -497,8 +621,8 @@ func TestEveryEventCarriesRunIdentity(t *testing.T) {
 		if e.Agent != "docs-bot" {
 			t.Errorf("%s carries agent %q, want docs-bot", e.Type, e.Agent)
 		}
-		if e.Version != strconv.Itoa(rev.Rev) || e.Digest != rev.Hash {
-			t.Errorf("%s carries version %q digest %q, want the pinned %d %q", e.Type, e.Version, e.Digest, rev.Rev, rev.Hash)
+		if e.Version != rev.Version || e.Digest != rev.Digest {
+			t.Errorf("%s carries version %q digest %q, want the pinned %s %q", e.Type, e.Version, e.Digest, rev.Version, rev.Digest)
 		}
 		if e.Time.IsZero() {
 			t.Errorf("%s has no timestamp", e.Type)
@@ -519,8 +643,8 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 		h.specs.revise("docs-bot", fmt.Sprintf("revision %d instructions", i))
 	}
 	pinned := h.specs.revise("docs-bot", "revision 6 instructions")
-	if pinned.Rev != 6 {
-		t.Fatalf("fixture pinned revision %d, want 6", pinned.Rev)
+	if pinned.Version != "6.0.0" {
+		t.Fatalf("fixture pinned version %s, want 6.0.0", pinned.Version)
 	}
 
 	ctx := context.Background()
@@ -528,16 +652,16 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	if acc.Rev != 6 {
-		t.Fatalf("accepted at revision %d, want 6", acc.Rev)
+	if acc.Version != "6.0.0" {
+		t.Fatalf("accepted at version %s, want 6.0.0", acc.Version)
 	}
 
 	// The agent is revised while the run sits in the queue, which is exactly
 	// the race a real deployment has: a tag arrives, someone ships a prompt
 	// change, and the worker picks the run up afterwards.
 	seven := h.specs.revise("docs-bot", "revision 7 instructions")
-	if seven.Rev != 7 {
-		t.Fatalf("fixture revised to %d, want 7", seven.Rev)
+	if seven.Version != "7.0.0" {
+		t.Fatalf("fixture revised to %s, want 7.0.0", seven.Version)
 	}
 
 	h.work(t)
@@ -550,17 +674,17 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 		t.Fatalf("the executor ran %d times, want 1", len(seen))
 	}
 	req := seen[0]
-	if req.Rev() != 6 {
-		t.Errorf("the turn executed revision %d, want the pinned 6", req.Rev())
+	if req.Version() != "6.0.0" {
+		t.Errorf("the turn executed version %s, want the pinned 6.0.0", req.Version())
 	}
-	if got := req.Revision.Spec.SystemPrompt; got != "revision 6 instructions" {
+	if got := req.Definition.Spec.SystemPrompt; got != "revision 6 instructions" {
 		t.Errorf("the turn executed the prompt %q, want revision 6's", got)
 	}
-	if got := req.Revision.Hash; got != pinned.Hash {
-		t.Errorf("the turn executed hash %q, want the pinned %q", got, pinned.Hash)
+	if got := req.Definition.Digest; got != pinned.Digest {
+		t.Errorf("the turn executed digest %q, want the pinned %q", got, pinned.Digest)
 	}
 	for _, e := range h.bus.all() {
-		if e.Version != "6" {
+		if e.Version != "6.0.0" {
 			t.Errorf("%s reports version %q, want the pinned 6", e.Type, e.Version)
 		}
 	}
@@ -598,8 +722,8 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 	if n := h.exec.count(); n != 1 {
 		t.Fatalf("the turn executed %d times, want once", n)
 	}
-	if rev := h.exec.seen()[0].Rev(); rev != 1 {
-		t.Fatalf("the run executed revision %d, want the revision pinned by the first delivery", rev)
+	if v := h.exec.seen()[0].Version(); v != "1.0.0" {
+		t.Fatalf("the run executed version %s, want the version pinned by the first delivery", v)
 	}
 	// Both deliveries announce, and the redelivery resolves the revision that
 	// is current when IT arrives — it cannot know the run already exists,
@@ -617,8 +741,8 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 			t.Errorf("an accepted event landed at seq %d, want %d: reusing the sequence is the only thing that lets the broker collapse the redelivery", e.Seq, runtime.SeqAccepted)
 		}
 	}
-	if accepted[0].Version != "1" {
-		t.Errorf("the accepted event the broker keeps reports version %q; the run pinned 1", accepted[0].Version)
+	if accepted[0].Version != "1.0.0" {
+		t.Errorf("the accepted event the broker keeps reports version %q; the run pinned 1.0.0", accepted[0].Version)
 	}
 	// Everything the run itself produced — which is everything a subscriber
 	// will actually see, since the redelivery's announcement never survives —
@@ -627,8 +751,8 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 		if e.Type == event.TypeAccepted {
 			continue
 		}
-		if e.Version != "1" {
-			t.Errorf("%s reports version %q; the run pinned 1", e.Type, e.Version)
+		if e.Version != "1.0.0" {
+			t.Errorf("%s reports version %q; the run pinned 1.0.0", e.Type, e.Version)
 		}
 	}
 }
@@ -880,8 +1004,8 @@ func TestAParkedRunPublishesParked(t *testing.T) {
 	}
 }
 
-// A revision is immutable by contract. One whose content hash moved under a
-// pinned number is corruption, and executing it would silently run a definition
+// A version is immutable by contract. One whose content moved under a pinned
+// version is corruption, and executing it would silently run a definition
 // the run never agreed to.
 func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	t.Parallel()
@@ -914,7 +1038,7 @@ func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	if !body.Terminal {
 		t.Error("a changed revision was reported as retryable")
 	}
-	if !strings.Contains(body.Error, "immutable revision changed") {
+	if !strings.Contains(body.Error, "pin does not hold") || !strings.Contains(body.Error, "content changed under its version") {
 		t.Errorf("failure reports %q, want it to name the mismatch", body.Error)
 	}
 }
