@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"strconv"
@@ -13,7 +13,7 @@ import (
 // gave none (Turn.Accounting): unique within the turn, and nowhere else.
 const DefaultAccounting = "turn"
 
-// accountant turns saige's usage reports into usage.call bodies for one turn.
+// accountant turns saige's usage reports into run.usage.v1 bodies for one turn.
 //
 // What it knows about the model comes from saige: the rate card and the
 // context window from the provider's declared capabilities, which saige's

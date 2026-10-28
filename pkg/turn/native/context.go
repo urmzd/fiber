@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/turn"
 )
 
 // This file is the context policy of a turn: how the request is laid out so a
@@ -261,11 +262,7 @@ func (g *compactionGuard) after(_ context.Context, ev *saige.CompactionEvent) er
 
 // CompactRequest asks a running turn to compact its history before its next
 // model call. See Turn.Compact.
-type CompactRequest struct {
-	// By is who asked. It is reported on the compaction and never sent to
-	// the model.
-	By string `json:"by,omitempty"`
-}
+type CompactRequest = turn.CompactRequest
 
 // TriggerRequested is payload.Compaction.Trigger for a compaction a host
 // asked for.

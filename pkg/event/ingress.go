@@ -51,6 +51,18 @@ type Request struct {
 	Context map[string]string `json:"context,omitempty"`
 }
 
+func (r Request) request() Request { return r }
+
+// RequestOf returns the request an ingress body carries, and false for a
+// body that carries none.
+func RequestOf(b Body) (Request, bool) {
+	r, ok := b.(interface{ request() Request })
+	if !ok {
+		return Request{}, false
+	}
+	return r.request(), true
+}
+
 // SlackRef is where in Slack a message was posted.
 type SlackRef struct {
 	Team        string `json:"team"`

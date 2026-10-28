@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"fmt"
@@ -129,7 +129,7 @@ func (c *config) group(rev Revision, name string) (ToolGroup, error) {
 		}
 		var err error
 		if g, err = groups.ToolGroup(name); err != nil {
-			return ToolGroup{}, fmt.Errorf("agentrt: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
+			return ToolGroup{}, fmt.Errorf("native: agent %q revision %d: %w", rev.Spec.Name, rev.Rev, err)
 		}
 	}
 	if len(g.Tools) == 0 {

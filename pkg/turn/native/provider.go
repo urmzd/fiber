@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"fmt"
@@ -365,7 +365,7 @@ func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Pro
 			if i == 0 {
 				return nil, nil, err
 			}
-			return nil, nil, fmt.Errorf("agentrt: agent %q revision %d fallback %d (%s %q): %w",
+			return nil, nil, fmt.Errorf("native: agent %q revision %d fallback %d (%s %q): %w",
 				rev.Spec.Name, rev.Rev, i, ref.Provider, ref.Model, err)
 		}
 		if p == nil {
@@ -378,7 +378,7 @@ func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Pro
 	}
 	chain, err := fallback.New(fallback.Config{Providers: members}, fallback.WithFallbackOn(rule))
 	if err != nil {
-		return nil, nil, fmt.Errorf("agentrt: agent %q revision %d: fallback: %w", rev.Spec.Name, rev.Rev, err)
+		return nil, nil, fmt.Errorf("native: agent %q revision %d: fallback: %w", rev.Spec.Name, rev.Rev, err)
 	}
 	return chain, members, nil
 }
@@ -391,7 +391,7 @@ func (c *config) modelChain(rev Revision) (saigetypes.Provider, []saigetypes.Pro
 func withRetry(p saigetypes.Provider) (saigetypes.Provider, error) {
 	r, err := retry.New(p, retry.DefaultConfig())
 	if err != nil {
-		return nil, fmt.Errorf("agentrt: retry: %w", err)
+		return nil, fmt.Errorf("native: retry: %w", err)
 	}
 	return r, nil
 }

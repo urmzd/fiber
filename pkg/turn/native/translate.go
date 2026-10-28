@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"bytes"
@@ -8,24 +8,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/urmzd/fiber/pkg/event"
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
-
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
 )
-
-// Chunk is one event body a turn produced: a kind and its marshalled payload.
-//
-// It is deliberately NOT an envelope.Event. An Event carries run identity —
-// topic, sequence, tenant, revision — and this package does not know what run
-// it is inside, on purpose: the same translation must serve a durable run, a
-// one-shot CLI invocation, and a test. pkg/runtime owns the run and stamps the
-// identity on.
-type Chunk struct {
-	Kind    envelope.Kind
-	Payload []byte
-}
 
 // Translator converts saige's typed deltas into event bodies.
 //
@@ -98,18 +84,18 @@ func (t *Translator) maps() {
 // whether this delta becomes an event at all.
 //
 // Most deltas do not. saige's delta set is a rendering protocol — part starts
-// and ends, token usage, marker prompts, handoffs — while envelope.Kind is a
-// published contract with a fixed set of members. Rather than invent kinds for
-// the rest, or overload one, this package publishes the five that mean
-// something to a subscriber and drops the framing:
+// and ends, token usage, marker prompts, handoffs — while the catalog is a
+// published contract. Rather than invent types for the rest, this package
+// publishes the ones that mean something to a subscriber and drops the
+// framing:
 //
-//	PartDelta with Text                        -> delta.text
-//	PartDelta with Thinking                    -> delta.thinking
-//	PartStart of a tool_call, ToolExecStartDelta -> delta.tool.call
-//	ToolExecEndDelta                           -> delta.tool.done
+//	PartDelta with Text                          -> run.delta.text.v1
+//	PartDelta with Thinking                      -> run.delta.thinking.v1
+//	PartStart of a tool_call, ToolExecStartDelta -> run.delta.tool.call.v1
+//	ToolExecEndDelta                             -> run.delta.tool.done.v1
 //
 // The executing delta.tool.call and the delta.tool.done carry the call's
-// arguments (see payload.MaxToolArguments and ToolArguments). The requested
+// arguments (see event.MaxToolArguments and ToolArguments). The requested
 // one does not: it is published as the model starts the call, before its
 // arguments exist.
 //
@@ -124,61 +110,61 @@ func (t *Translator) maps() {
 //     terminality a subscriber needs; a bare error event mid-stream would say
 //     less and could contradict the lifecycle event that follows.
 //   - StoppedDelta becomes Result.Stopped for the same reason: a stopped run
-//     is announced by pkg/runtime as lifecycle.stopped, once, with the attempt.
-//   - UsageDelta is accounting, and Runner.Run publishes it as usage.call
+//     is announced by the host as run.stopped.v1, once, with the attempt.
+//   - UsageDelta is accounting, and Runner.Run publishes it as run.usage.v1
 //     with what only the runner knows: the call's key, the model's price and
 //     its context window. Connectors do not render that kind, so token counts
 //     never reach a Slack thread.
-func (t *Translator) Delta(d saigetypes.Delta) (Chunk, bool) { return t.delta("", d) }
+func (t *Translator) Delta(d saigetypes.Delta) (event.Body, bool) { return t.delta("", d) }
 
 // delta translates d, a delta of the agent whose tool call path is scope.
 // Part indices are only unique within one agent's stream, so a nested agent's
 // parts are kept apart from its parent's by scope.
-func (t *Translator) delta(scope string, d saigetypes.Delta) (Chunk, bool) {
+func (t *Translator) delta(scope string, d saigetypes.Delta) (event.Body, bool) {
 	switch v := d.(type) {
 	case saigetypes.PartDelta:
 		switch {
 		case v.Text != "":
-			return chunk(envelope.KindText, payload.Text{Text: v.Text})
+			return event.Text{Text: v.Text}, true
 		case v.Thinking != "":
-			return chunk(envelope.KindThinking, payload.Thinking{Text: v.Thinking})
+			return event.Thinking{Text: v.Thinking}, true
 		case v.Args != "":
 			t.fragment(scope, v.Index, v.Args)
-			return Chunk{}, false
+			return nil, false
 		default:
-			return Chunk{}, false
+			return nil, false
 		}
 
 	case saigetypes.PartStart:
 		if v.Kind != saigetypes.KindToolCall {
-			return Chunk{}, false
+			return nil, false
 		}
 		t.open(scope, v.Index, v.ID, v.Name)
-		return chunk(envelope.KindToolCall, payload.ToolCall{
-			ID: v.ID, Name: v.Name, Phase: payload.PhaseRequested,
-		})
+		return event.ToolCall{
+			ID: v.ID, Name: v.Name, Phase: event.PhaseRequested,
+		}, true
 
 	case saigetypes.PartEnd:
 		t.close(scope, v)
-		return Chunk{}, false
+		return nil, false
 
 	case saigetypes.ToolExecStartDelta:
 		args := t.requested(callKey(scope, v.ToolCallID))
-		return chunk(envelope.KindToolCall, payload.ToolCall{
-			ID: v.ToolCallID, Name: v.Name, Phase: payload.PhaseExecuting,
+		return event.ToolCall{
+			ID: v.ToolCallID, Name: v.Name, Phase: event.PhaseExecuting,
 			Arguments: args.json, ArgumentsBytes: args.bytes,
-		})
+		}, true
 
 	case saigetypes.ToolExecEndDelta:
 		args := t.executed(callKey(scope, v.ToolCallID))
-		return chunk(envelope.KindToolDone, payload.ToolDone{
+		return event.ToolDone{
 			ID:             v.ToolCallID,
 			Name:           v.Name,
 			Result:         v.Result,
 			Error:          v.Error,
 			Arguments:      args.json,
 			ArgumentsBytes: args.bytes,
-		})
+		}, true
 
 	case saigetypes.ToolExecDelta:
 		// A streaming tool or sub-agent nested inside a tool call. Its inner
@@ -187,7 +173,7 @@ func (t *Translator) delta(scope string, d saigetypes.Delta) (Chunk, bool) {
 		return t.delta(scope+"/"+v.ToolCallID, v.Inner)
 
 	default:
-		return Chunk{}, false
+		return nil, false
 	}
 }
 
@@ -332,7 +318,7 @@ func (t *Translator) executed(key string) rendered {
 
 // render turns arguments into what an event carries: compact JSON with keys
 // in sorted order, scrubbed by the deployment's ToolArguments, and left out
-// when over payload.MaxToolArguments.
+// when over event.MaxToolArguments.
 func (t *Translator) render(tool string, args map[string]any) rendered {
 	if len(args) == 0 {
 		return rendered{}
@@ -352,20 +338,8 @@ func (t *Translator) render(tool string, args map[string]any) rendered {
 		}
 		b = buf.Bytes()
 	}
-	if len(b) > payload.MaxToolArguments {
+	if len(b) > event.MaxToolArguments {
 		return rendered{bytes: len(b)}
 	}
 	return rendered{json: b}
-}
-
-// chunk marshals a body into a Chunk. A payload that will not marshal is a
-// programming error in this package (every payload type is a plain struct of
-// strings and ints), so the chunk is dropped rather than failing a live turn
-// over it.
-func chunk(kind envelope.Kind, body any) (Chunk, bool) {
-	b, err := payload.Encode(body)
-	if err != nil {
-		return Chunk{}, false
-	}
-	return Chunk{Kind: kind, Payload: b}, true
 }

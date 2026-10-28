@@ -14,6 +14,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/topic"
+	turnrt "github.com/urmzd/fiber/pkg/turn"
 )
 
 // Compacting a run on request.
@@ -142,15 +143,12 @@ func (r *Runtime) Compact(ctx context.Context, req CompactRequest) error {
 	return nil
 }
 
-type compactSignalKey struct{}
-
 // CompactSignal returns the channel on which the turn executing under ctx is
 // asked to compact, or nil when it cannot be. An Executor hands it to the
 // agent loop as agentrt.Turn.Compact; one that does not simply never
 // compacts on request.
 func CompactSignal(ctx context.Context) <-chan agentrt.CompactRequest {
-	ch, _ := ctx.Value(compactSignalKey{}).(chan agentrt.CompactRequest)
-	return ch
+	return turnrt.CompactSignal(ctx)
 }
 
 // listenCompact puts a CompactSignal on ctx and relays to it the requests to
@@ -190,7 +188,7 @@ func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (co
 			}
 		}
 	}()
-	return context.WithValue(ctx, compactSignalKey{}, signal), func() {
+	return turnrt.WithCompactSignal(ctx, signal), func() {
 		cancel()
 		<-done
 	}

@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"context"
@@ -44,7 +44,7 @@ var ErrNoSuchTool = fmt.Errorf("%w: no such tool", ErrInvalid)
 // credential reaches.
 //
 // after is called for every action that runs, successfully or not. pkg/runtime
-// passes a function that publishes envelope.KindActionTaken, which is what puts
+// passes a function that publishes run.action.taken.v1, which is what puts
 // "the work got done" on the bus next to the conversation.
 func ConnectorTools(reg *connector.Registry, target address.Address, after func(payload.Action) error) Tools {
 	return ConnectorToolsForRun(reg, target, "", after)
@@ -102,7 +102,7 @@ func StaticTools(tools ...saigetypes.Tool) Tools {
 func ActionTool(a connector.Action, target address.Address, after func(payload.Action) error) (saigetypes.Tool, error) {
 	schema, err := parameterSchema(a.Schema)
 	if err != nil {
-		return nil, fmt.Errorf("agentrt: action %q: %w", a.Name, err)
+		return nil, fmt.Errorf("native: action %q: %w", a.Name, err)
 	}
 	if a.Invoke == nil {
 		return nil, fmt.Errorf("%w: action %q has no Invoke", ErrInvalid, a.Name)
@@ -133,7 +133,7 @@ func (t *actionTool) Definition() saigetypes.ToolDef { return t.def }
 func (t *actionTool) Execute(ctx context.Context, args map[string]any) (string, error) {
 	raw, err := json.Marshal(args)
 	if err != nil {
-		return "", fmt.Errorf("agentrt: action %q: marshal arguments: %w", t.action.Name, err)
+		return "", fmt.Errorf("native: action %q: marshal arguments: %w", t.action.Name, err)
 	}
 	res, invokeErr := t.action.Invoke(ctx, t.target, raw)
 
@@ -149,7 +149,7 @@ func (t *actionTool) Execute(ctx context.Context, args map[string]any) (string, 
 	}
 	if t.after != nil {
 		if err := t.after(rec); err != nil {
-			return "", fmt.Errorf("agentrt: action %q: report: %w", t.action.Name, err)
+			return "", fmt.Errorf("native: action %q: report: %w", t.action.Name, err)
 		}
 	}
 	if invokeErr != nil {

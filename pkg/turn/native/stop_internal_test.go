@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"sync/atomic"

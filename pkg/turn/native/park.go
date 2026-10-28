@@ -1,4 +1,4 @@
-package agentrt
+package native
 
 import (
 	"bytes"
@@ -725,7 +725,7 @@ func EncodeMessage(m saigetypes.Message) (json.RawMessage, error) {
 	for _, part := range saigetypes.PartsOf(m) {
 		raw, err := saigetypes.MarshalPartInline(part)
 		if err != nil {
-			return nil, fmt.Errorf("agentrt: encode %s message: %w", m.Role(), err)
+			return nil, fmt.Errorf("native: encode %s message: %w", m.Role(), err)
 		}
 		w.Parts = append(w.Parts, raw)
 	}
@@ -736,7 +736,7 @@ func EncodeMessage(m saigetypes.Message) (json.RawMessage, error) {
 func DecodeMessage(raw json.RawMessage) (saigetypes.Message, error) {
 	var w wireMessage
 	if err := json.Unmarshal(raw, &w); err != nil {
-		return nil, fmt.Errorf("agentrt: decode message: %w", err)
+		return nil, fmt.Errorf("native: decode message: %w", err)
 	}
 	switch w.Role {
 	case saigetypes.RoleSystem:
@@ -744,7 +744,7 @@ func DecodeMessage(raw json.RawMessage) (saigetypes.Message, error) {
 		for _, raw := range w.Parts {
 			p, err := saigetypes.UnmarshalRolePart[saigetypes.SystemPart](raw)
 			if err != nil {
-				return nil, fmt.Errorf("agentrt: decode system message: %w", err)
+				return nil, fmt.Errorf("native: decode system message: %w", err)
 			}
 			m.Parts = append(m.Parts, p)
 		}
@@ -754,7 +754,7 @@ func DecodeMessage(raw json.RawMessage) (saigetypes.Message, error) {
 		for _, raw := range w.Parts {
 			p, err := saigetypes.UnmarshalRolePart[saigetypes.UserPart](raw)
 			if err != nil {
-				return nil, fmt.Errorf("agentrt: decode user message: %w", err)
+				return nil, fmt.Errorf("native: decode user message: %w", err)
 			}
 			m.Parts = append(m.Parts, p)
 		}
@@ -764,7 +764,7 @@ func DecodeMessage(raw json.RawMessage) (saigetypes.Message, error) {
 		for _, raw := range w.Parts {
 			p, err := saigetypes.UnmarshalRolePart[saigetypes.AssistantPart](raw)
 			if err != nil {
-				return nil, fmt.Errorf("agentrt: decode assistant message: %w", err)
+				return nil, fmt.Errorf("native: decode assistant message: %w", err)
 			}
 			m.Parts = append(m.Parts, p)
 		}

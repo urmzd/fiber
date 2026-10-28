@@ -19,6 +19,7 @@ import (
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/topic"
+	turnrt "github.com/urmzd/fiber/pkg/turn"
 )
 
 // Stopping a run.
@@ -539,8 +540,6 @@ func clip(s string) string {
 	return s[:end]
 }
 
-type stopSignalKey struct{}
-
 // StopSignal returns the channel on which the turn executing under ctx is
 // asked to stop, or nil when it cannot be.
 //
@@ -554,10 +553,7 @@ type stopSignalKey struct{}
 // It is a channel on the context rather than a method on Executor so that the
 // request waits for the turn: a stop that arrives before the executor has set
 // the turn up is still there when it looks.
-func StopSignal(ctx context.Context) <-chan agentrt.Stop {
-	ch, _ := ctx.Value(stopSignalKey{}).(chan agentrt.Stop)
-	return ch
-}
+func StopSignal(ctx context.Context) <-chan agentrt.Stop { return turnrt.StopSignal(ctx) }
 
 // execute runs the turn through the executor, listening for a stop request for
 // as long as it runs.
@@ -595,7 +591,7 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 	defer release()
 
 	signal := make(chan agentrt.Stop, 1)
-	turnCtx, cancel := context.WithCancel(context.WithValue(ctx, stopSignalKey{}, signal))
+	turnCtx, cancel := context.WithCancel(turnrt.WithStopSignal(ctx, signal))
 	defer cancel()
 
 	var (

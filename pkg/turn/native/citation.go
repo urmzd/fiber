@@ -1,14 +1,12 @@
-package agentrt
+package native
 
 import (
 	"context"
 	"strconv"
 	"strings"
 
+	"github.com/urmzd/fiber/pkg/event"
 	ragtypes "github.com/urmzd/saige/rag/types"
-
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // Retriever grounds a turn in a corpus.
@@ -37,13 +35,13 @@ type Retriever interface {
 // makes them honest: they report what the turn was GIVEN, which a model cannot
 // misattribute, rather than what it claims to have used.
 //
-// A nil or empty context yields no chunks. A block with neither text nor a
+// A nil or empty context yields no bodies. A block with neither text nor a
 // label is skipped: it would render as an empty footnote.
-func Citations(ac *ragtypes.AssembledContext) []Chunk {
+func Citations(ac *ragtypes.AssembledContext) []event.Body {
 	if ac == nil || len(ac.Blocks) == 0 {
 		return nil
 	}
-	out := make([]Chunk, 0, len(ac.Blocks))
+	out := make([]event.Body, 0, len(ac.Blocks))
 	for i, b := range ac.Blocks {
 		text := strings.TrimSpace(b.Text)
 		label := strings.TrimSpace(b.Citation)
@@ -55,26 +53,20 @@ func Citations(ac *ragtypes.AssembledContext) []Chunk {
 			// marker even when the assembler did not emit one.
 			label = "[" + strconv.Itoa(i+1) + "]"
 		}
-		c, ok := chunk(envelope.KindCitation, payload.Citation{
+		out = append(out, event.Citation{
 			Label:  label,
 			Text:   text,
 			Index:  i,
 			Source: provenance(b.Provenance),
 		})
-		if !ok {
-			continue
-		}
-		out = append(out, c)
 	}
 	return out
 }
 
-// provenance copies saige's provenance into the wire form. It is a field-for-
-// field copy rather than a type alias so pkg/agentrt/payload stays free of
-// saige, which is what lets a connector decode a citation without linking the
-// RAG stack.
-func provenance(p ragtypes.Provenance) payload.Provenance {
-	return payload.Provenance{
+// provenance copies saige's provenance into the event body. It is a field
+// for field copy so pkg/event stays free of saige.
+func provenance(p ragtypes.Provenance) event.Provenance {
+	return event.Provenance{
 		DocumentUUID:   p.DocumentUUID,
 		DocumentTitle:  p.DocumentTitle,
 		SourceURI:      p.SourceURI,
