@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/author"
 	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 )
 
@@ -630,10 +630,10 @@ func TestTheBuiltInAgentRunsOfflineAgainstItsOwnTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	rev := agentrt.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
+	rev := native.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
 
-	var actions []payload.Action
-	tools := agentrt.ConnectorToolsForRun(reg, address.Address{}, "run-ada", func(a payload.Action) error {
+	var actions []event.Action
+	tools := native.ConnectorToolsForRun(reg, address.Address{}, "run-ada", func(a event.Action) error {
 		actions = append(actions, a)
 		return nil
 	})
@@ -642,16 +642,16 @@ func TestTheBuiltInAgentRunsOfflineAgainstItsOwnTools(t *testing.T) {
 			t.Errorf("the built-in agent grants %s, which does not resolve: %v", name, err)
 		}
 	}
-	runner, err := agentrt.New(rev,
-		agentrt.WithTools(tools),
-		agentrt.WithScript(
+	runner, err := native.New(rev,
+		native.WithTools(tools),
+		native.WithScript(
 			agenttest.ToolCallResponse("call_1", "author_list", map[string]any{}),
 			agenttest.TextResponse("You have one agent."),
 		))
 	if err != nil {
-		t.Fatalf("agentrt.New: %v", err)
+		t.Fatalf("native.New: %v", err)
 	}
-	res, err := runner.Run(ctx, agentrt.Turn{Text: "what agents do I have?"}, func(context.Context, agentrt.Chunk) error { return nil })
+	res, err := runner.Run(ctx, native.Turn{Text: "what agents do I have?"}, func(context.Context, event.Body) error { return nil })
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

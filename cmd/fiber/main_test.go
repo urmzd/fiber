@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // docsBot is a definition as a deployment would write it: a real provider
@@ -40,7 +40,7 @@ func agentFile(front, prompt string) string {
 // without one.
 func noKeys(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{agentrt.EnvAnthropicKey, agentrt.EnvOpenAIKey, agentrt.EnvOpenAIBaseURL} {
+	for _, k := range []string{native.EnvAnthropicKey, native.EnvOpenAIKey, native.EnvOpenAIBaseURL} {
 		t.Setenv(k, "")
 	}
 }
@@ -236,7 +236,7 @@ func TestARunThatFailsExitsOne(t *testing.T) {
 	if code != exitFailed {
 		t.Fatalf("exit %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFailed, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "[run.failed.v1] attempt 1:") || !strings.Contains(stdout, agentrt.EnvAnthropicKey) {
+	if !strings.Contains(stdout, "[run.failed.v1] attempt 1:") || !strings.Contains(stdout, native.EnvAnthropicKey) {
 		t.Errorf("the failure was not printed:\n%s", stdout)
 	}
 	if strings.Contains(stdout, "[run.completed.v1]") || !strings.Contains(stderr, "failed") {

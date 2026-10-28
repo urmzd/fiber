@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // compatServer is a minimal OpenAI-compatible server: it records each chat
@@ -64,9 +64,9 @@ func (s *compatServer) only(t *testing.T) compatRequest {
 	return s.reqs[0]
 }
 
-func openaiRevision(model string) agentrt.Revision {
-	return agentrt.Revision{Name: "docs-bot", Version: "1.0.0", Spec: agentrt.Spec{
-		Name: "docs-bot", Provider: agentrt.ProviderOpenAI, Model: model, SystemPrompt: "You document things.",
+func openaiRevision(model string) native.Revision {
+	return native.Revision{Name: "docs-bot", Version: "1.0.0", Spec: native.Spec{
+		Name: "docs-bot", Provider: native.ProviderOpenAI, Model: model, SystemPrompt: "You document things.",
 	}}
 }
 
@@ -74,14 +74,14 @@ func openaiRevision(model string) agentrt.Revision {
 // alone: a local server needs no key, and none is sent.
 func TestOpenAIProviderRunsATurnAgainstACompatibleServer(t *testing.T) {
 	srv := newCompatServer(t)
-	t.Setenv(agentrt.EnvOpenAIBaseURL, srv.URL+"/v1")
-	t.Setenv(agentrt.EnvOpenAIKey, "")
+	t.Setenv(native.EnvOpenAIBaseURL, srv.URL+"/v1")
+	t.Setenv(native.EnvOpenAIKey, "")
 
-	r, err := agentrt.New(openaiRevision("qwen3:8b"))
+	r, err := native.New(openaiRevision("qwen3:8b"))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, res := collect(t, r, agentrt.Turn{Text: "say hello"})
+	_, res := collect(t, r, native.Turn{Text: "say hello"})
 
 	if res.Text != "hello from a compatible server" {
 		t.Errorf("answer is %q", res.Text)
@@ -106,16 +106,16 @@ func TestOpenAIProviderRunsATurnAgainstACompatibleServer(t *testing.T) {
 func TestOpenAICompatibleNeverSendsTheEnvironmentKeyElsewhere(t *testing.T) {
 	srv := newCompatServer(t)
 	other := newCompatServer(t)
-	t.Setenv(agentrt.EnvOpenAIKey, "sk-openai-secret")
-	t.Setenv(agentrt.EnvOpenAIBaseURL, other.URL)
+	t.Setenv(native.EnvOpenAIKey, "sk-openai-secret")
+	t.Setenv(native.EnvOpenAIBaseURL, other.URL)
 
 	rev := openaiRevision("llama")
 	rev.Spec.Provider = "vllm"
-	r, err := agentrt.New(rev, agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{Name: "vllm", BaseURL: srv.URL}))
+	r, err := native.New(rev, native.WithOpenAICompatible(native.OpenAICompatible{Name: "vllm", BaseURL: srv.URL}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	collect(t, r, agentrt.Turn{Text: "hi"})
+	collect(t, r, native.Turn{Text: "hi"})
 
 	got := srv.only(t)
 	if got.auth != "" {
@@ -124,7 +124,7 @@ func TestOpenAICompatibleNeverSendsTheEnvironmentKeyElsewhere(t *testing.T) {
 	other.mu.Lock()
 	defer other.mu.Unlock()
 	if len(other.reqs) != 0 {
-		t.Errorf("the provider followed %s to another server", agentrt.EnvOpenAIBaseURL)
+		t.Errorf("the provider followed %s to another server", native.EnvOpenAIBaseURL)
 	}
 }
 
@@ -135,11 +135,11 @@ func TestOpenAICompatibleSendsTheKeyFromItsEnvVar(t *testing.T) {
 	t.Setenv("GATEWAY_KEY", "gw-key")
 	rev := openaiRevision("m")
 	rev.Spec.Provider = "gateway"
-	r, err := agentrt.New(rev, agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{Name: "gateway", BaseURL: srv.URL, KeyEnv: "GATEWAY_KEY"}))
+	r, err := native.New(rev, native.WithOpenAICompatible(native.OpenAICompatible{Name: "gateway", BaseURL: srv.URL, KeyEnv: "GATEWAY_KEY"}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	collect(t, r, agentrt.Turn{Text: "hi"})
+	collect(t, r, native.Turn{Text: "hi"})
 	if got := srv.only(t).auth; got != "Bearer gw-key" {
 		t.Errorf("Authorization is %q, want the provider's key", got)
 	}
@@ -156,10 +156,10 @@ func TestOpenAIProviderRefusesAnIncompleteConfiguration(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(agentrt.EnvOpenAIBaseURL, tt.base)
-			t.Setenv(agentrt.EnvOpenAIKey, tt.key)
-			_, err := agentrt.New(openaiRevision(tt.model))
-			if !errors.Is(err, agentrt.ErrInvalid) {
+			t.Setenv(native.EnvOpenAIBaseURL, tt.base)
+			t.Setenv(native.EnvOpenAIKey, tt.key)
+			_, err := native.New(openaiRevision(tt.model))
+			if !errors.Is(err, native.ErrInvalid) {
 				t.Fatalf("New: %v, want ErrInvalid", err)
 			}
 		})
@@ -172,8 +172,8 @@ func TestOpenAICompatibleRefusesAKeyVariableThatIsUnset(t *testing.T) {
 	t.Setenv("GATEWAY_KEY", "")
 	rev := openaiRevision("m")
 	rev.Spec.Provider = "gateway"
-	_, err := agentrt.New(rev, agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{Name: "gateway", BaseURL: "http://127.0.0.1:1/v1", KeyEnv: "GATEWAY_KEY"}))
-	if !errors.Is(err, agentrt.ErrInvalid) {
+	_, err := native.New(rev, native.WithOpenAICompatible(native.OpenAICompatible{Name: "gateway", BaseURL: "http://127.0.0.1:1/v1", KeyEnv: "GATEWAY_KEY"}))
+	if !errors.Is(err, native.ErrInvalid) {
 		t.Fatalf("New: %v, want ErrInvalid", err)
 	}
 }

@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/attachment/intake"
 	"github.com/urmzd/fiber/pkg/attachment/resolve"
 	"github.com/urmzd/fiber/pkg/blob"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 const filesTenant = "acme"
@@ -34,14 +34,14 @@ func TestAnAttachedFileReachesTheModelOnTheTurnsOwnMessage(t *testing.T) {
 	store := blob.NewMemory()
 	log := stored(t, store, filesTenant, "deploy.log", "step three: migrate failed with exit code 7\n")
 
-	history := []agentrt.Message{
-		{Role: agentrt.RoleUser, Text: "the deploy failed"},
-		{Role: agentrt.RoleAssistant, Text: "send me the log"},
+	history := []native.Message{
+		{Role: native.RoleUser, Text: "the deploy failed"},
+		{Role: native.RoleAssistant, Text: "send me the log"},
 	}
-	turn := agentrt.Turn{Text: "here it is", Tenant: filesTenant, Attachments: []attachment.Attachment{log}}
+	turn := native.Turn{Text: "here it is", Tenant: filesTenant, Attachments: []attachment.Attachment{log}}
 
-	with, _ := threadRun(t, history, turn, 0, agentrt.WithAttachments(resolve.New(store)))
-	without, _ := threadRun(t, history, agentrt.Turn{Text: "here it is"}, 0)
+	with, _ := threadRun(t, history, turn, 0, native.WithAttachments(resolve.New(store)))
+	without, _ := threadRun(t, history, native.Turn{Text: "here it is"}, 0)
 
 	got, plain := with[0].Messages, without[0].Messages
 	if len(got) != len(plain) {
@@ -70,12 +70,12 @@ func TestATurnWithFilesAndNoResolverIsRefused(t *testing.T) {
 	store := blob.NewMemory()
 	log := stored(t, store, filesTenant, "deploy.log", "x\n")
 
-	r, err := agentrt.New(offlineRevision(1, "You are docs-bot."))
+	r, err := native.New(offlineRevision(1, "You are docs-bot."))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = r.Run(context.Background(), agentrt.Turn{Text: "look", Tenant: filesTenant, Attachments: []attachment.Attachment{log}}, nil)
-	if !errors.Is(err, agentrt.ErrInvalid) {
+	_, err = r.Run(context.Background(), native.Turn{Text: "look", Tenant: filesTenant, Attachments: []attachment.Attachment{log}}, nil)
+	if !errors.Is(err, native.ErrInvalid) {
 		t.Fatalf("Run: got %v, want ErrInvalid", err)
 	}
 }
@@ -87,8 +87,8 @@ func TestAnotherTenantsFileNeverReachesTheModel(t *testing.T) {
 	store := blob.NewMemory()
 	theirs := stored(t, store, "globex", "secret.txt", "the globex launch code is 0000\n")
 
-	turn := agentrt.Turn{Text: "what does this say?", Tenant: filesTenant, Attachments: []attachment.Attachment{theirs}}
-	model, _ := threadRun(t, nil, turn, 0, agentrt.WithAttachments(resolve.New(store)))
+	turn := native.Turn{Text: "what does this say?", Tenant: filesTenant, Attachments: []attachment.Attachment{theirs}}
+	model, _ := threadRun(t, nil, turn, 0, native.WithAttachments(resolve.New(store)))
 
 	body := string(wireMessages(t, model[0].Messages))
 	if strings.Contains(body, "launch code") {

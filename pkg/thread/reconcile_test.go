@@ -9,7 +9,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/thread/threadtest"
@@ -41,7 +40,7 @@ func TestReconcileAppendsUnseenSurfaceMessagesInSurfaceOrder(t *testing.T) {
 		t.Fatalf("journal = %q", texts(got))
 	}
 	if e := got[0]; e.Role != thread.RoleUser || e.SurfaceID != first || e.RunID != "" ||
-		e.Actor != (envelope.Actor{ID: "ada", Display: "ada"}) || e.At.IsZero() {
+		e.Actor != (event.Actor{ID: "ada", Display: "ada"}) || e.At.IsZero() {
 		t.Errorf("a reconciled message lost who said it, when, or which message it is: %+v", e)
 	}
 

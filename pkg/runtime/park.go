@@ -14,18 +14,17 @@ import (
 	"github.com/urmzd/anchor"
 	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // Parking a run on a person.
 //
 // A turn can need a person: a tool call that needs approval, or the agent's
-// ask_person tool (see pkg/agentrt's park.go for how a turn ends at the
+// ask_person tool (see pkg/turn/native's park.go for how a turn ends at the
 // question and how a later turn continues it). This file makes that wait
 // durable.
 //
@@ -103,14 +102,14 @@ type Continue struct {
 	Seq int `json:"seq"`
 	// Parked is the turn to continue, with the answers its pending calls
 	// have, the new one included.
-	Parked agentrt.Parked `json:"parked"`
+	Parked native.Parked `json:"parked"`
 }
 
 // resolution is how a question was resolved, as its event record holds it.
 type resolution struct {
-	QuestionID string          `json:"question_id"`
-	Answer     *payload.Answer `json:"answer,omitempty"`
-	Stopped    *agentrt.Stop   `json:"stopped,omitempty"`
+	QuestionID string        `json:"question_id"`
+	Answer     *event.Answer `json:"answer,omitempty"`
+	Stopped    *native.Stop  `json:"stopped,omitempty"`
 }
 
 // Waker enqueues a run so a worker replays it. Every anchor queue
@@ -127,7 +126,7 @@ func WithWaker(w Waker) Option {
 }
 
 // WithQuestionTTL sets how long a question waits for an answer before its
-// default applies (default agentrt.DefaultQuestionTTL).
+// default applies (default native.DefaultQuestionTTL).
 func WithQuestionTTL(d time.Duration) Option {
 	return func(r *Runtime) {
 		if d > 0 {
@@ -211,7 +210,7 @@ var (
 func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) (resolution, error) {
 	q := out.Parked.Question
 	runID := at.in.runID()
-	if q.Kind == payload.QuestionDelegation {
+	if q.Kind == event.QuestionDelegation {
 		// The child run is started once, as a recorded step: a replay reads
 		// its id back, and a retried start lands on the same run, whose id
 		// is derived from this run and the question.
@@ -224,12 +223,12 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 		q.ChildRunID = child
 	}
 	fresh := false
-	if _, err := anchor.Step(ctx, questionStepPrefix+q.ID, func(ctx context.Context) (payload.Question, error) {
+	if _, err := anchor.Step(ctx, questionStepPrefix+q.ID, func(ctx context.Context) (event.Question, error) {
 		fresh = true
 		if err := at.publish(ctx, event.Parked{
-			Attempt: at.attempt, Reason: "waiting on a person", Question: eventQuestion(&q),
+			Attempt: at.attempt, Reason: "waiting on a person", Question: &q,
 		}); err != nil {
-			return payload.Question{}, err
+			return event.Question{}, err
 		}
 		return q, nil
 	}); err != nil {
@@ -249,11 +248,11 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 	// whatever the record then holds.
 	if r.stops != nil {
 		// A stop recorded on the run ends the wait.
-		var stop *agentrt.Stop
+		var stop *native.Stop
 		if raw, err := anchor.Event[json.RawMessage](ctx, stopRecordName); err == nil {
-			var body payload.StopRequest
+			var body event.StopRequest
 			if json.Unmarshal(raw, &body) == nil && body.RunID == runID {
-				stop = &agentrt.Stop{Reason: body.Reason, By: body.By}
+				stop = &native.Stop{Reason: body.Reason, By: body.By}
 			}
 		} else if s, ok := r.recordedStop(ctx, runID); ok {
 			stop = &s
@@ -290,14 +289,14 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 }
 
 // expired is a question's default, as the answer it resolves to.
-func expired(q payload.Question, now time.Time) *payload.Answer {
-	a := payload.Answer{QuestionID: q.ID, Expired: true, At: now.UTC()}
+func expired(q event.Question, now time.Time) *event.Answer {
+	a := event.Answer{QuestionID: q.ID, Expired: true, At: now.UTC()}
 	if q.Default != nil {
 		a = *q.Default
 		a.QuestionID, a.Expired, a.At = q.ID, true, now.UTC()
 	}
-	if q.Kind == payload.QuestionApproval && a.Decision == "" {
-		a.Decision = payload.DecisionDeny
+	if q.Kind == event.QuestionApproval && a.Decision == "" {
+		a.Decision = event.DecisionDeny
 	}
 	return &a
 }
@@ -353,11 +352,11 @@ func decodeResolution(raw []byte) (resolution, error) {
 // stoppedWhileParked ends a run that was stopped while it waited on a person.
 // Its turn is not resumed: the run ends with what it had said before it asked,
 // and what it had spent.
-func (r *Runtime) stoppedWhileParked(ctx context.Context, at *attemptLog, out Outcome, stop agentrt.Stop, parks int) (Output, error) {
+func (r *Runtime) stoppedWhileParked(ctx context.Context, at *attemptLog, out Outcome, stop native.Stop, parks int) (Output, error) {
 	r.claimStop(ctx, at.in)
 	stop.Reason = clip(stop.Reason)
 	if stop.Reason == "" {
-		stop.Reason = agentrt.DefaultStopReason
+		stop.Reason = native.DefaultStopReason
 	}
 	final := Outcome{Text: out.Text, Prompt: out.Prompt, Stopped: &stop, Usage: out.Usage}
 	if err := r.remember(ctx, at.in, final); err != nil {
@@ -365,7 +364,7 @@ func (r *Runtime) stoppedWhileParked(ctx context.Context, at *attemptLog, out Ou
 		return Output{}, err
 	}
 	if err := at.publish(ctx, event.Stopped{
-		Attempt: at.attempt, Reason: stop.Reason, By: stop.By, Text: out.Text, Usage: eventUsage(out.Usage),
+		Attempt: at.attempt, Reason: stop.Reason, By: stop.By, Text: out.Text, Usage: out.Usage,
 	}); err != nil {
 		return Output{}, err
 	}
@@ -383,12 +382,12 @@ type AnswerRequest struct {
 	Tenant string
 	// RunID is the run.
 	RunID string
-	// QuestionID is the question, as payload.Question.ID reported it.
+	// QuestionID is the question, as event.Question.ID reported it.
 	QuestionID string
 	// Answer is the answer: Decision and optionally Arguments for an
 	// approval, Choice for a choice, Text for a reply, and an optional Note.
 	// Its QuestionID, By, At and Expired are set here.
-	Answer payload.Answer
+	Answer event.Answer
 	// By is who answered, from the caller's credential: its subject, or the
 	// person a credential trusted to act for others named.
 	By string
@@ -432,28 +431,28 @@ var ErrNotAllowed = errors.New("runtime: not allowed to answer this question")
 // without the question being answered, an error matching ErrInvalid for an
 // answer that does not fit the question, and ErrAnswerUnavailable without
 // WithStopLedger.
-func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer, bool, error) {
+func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (event.Answer, bool, error) {
 	if r.stops == nil {
-		return payload.Answer{}, false, fmt.Errorf("%w: no ledger to record it in", ErrAnswerUnavailable)
+		return event.Answer{}, false, fmt.Errorf("%w: no ledger to record it in", ErrAnswerUnavailable)
 	}
 	req.RunID, req.QuestionID = strings.TrimSpace(req.RunID), strings.TrimSpace(req.QuestionID)
 	if req.RunID == "" || req.QuestionID == "" {
-		return payload.Answer{}, false, fmt.Errorf("%w: an answer names a run and a question", ErrInvalid)
+		return event.Answer{}, false, fmt.Errorf("%w: an answer names a run and a question", ErrInvalid)
 	}
 	rec, records, err := r.recordsOf(ctx, req.RunID, true, prefixQuestion, prefixAnswer)
 	switch {
 	case errors.Is(err, run.ErrNotFound):
-		return payload.Answer{}, false, ErrNoQuestion
+		return event.Answer{}, false, ErrNoQuestion
 	case err != nil:
-		return payload.Answer{}, false, fmt.Errorf("runtime: answer %s: read the run: %w", req.RunID, err)
+		return event.Answer{}, false, fmt.Errorf("runtime: answer %s: read the run: %w", req.RunID, err)
 	}
 	var in Input
 	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != req.Tenant {
-		return payload.Answer{}, false, ErrNoQuestion
+		return event.Answer{}, false, ErrNoQuestion
 	}
 	q, ok := findQuestion(records, req.QuestionID)
 	if !ok {
-		return payload.Answer{}, false, ErrNoQuestion
+		return event.Answer{}, false, ErrNoQuestion
 	}
 	for _, rr := range records {
 		if rr.Key == answerRecordKey(q.ID) && rr.Status == run.RecordOK {
@@ -461,10 +460,10 @@ func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer
 		}
 	}
 	if rec.Status.Terminal() {
-		return payload.Answer{}, false, ErrQuestionClosed
+		return event.Answer{}, false, ErrQuestionClosed
 	}
 	if err := r.mayAnswer(ctx, in, q, req); err != nil {
-		return payload.Answer{}, false, err
+		return event.Answer{}, false, err
 	}
 
 	now := r.now().UTC()
@@ -474,23 +473,23 @@ func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer
 	} else {
 		a, err := checkAnswer(q, req.Answer)
 		if err != nil {
-			return payload.Answer{}, false, err
+			return event.Answer{}, false, err
 		}
 		if err := mayEdit(in, q, req, a); err != nil {
-			return payload.Answer{}, false, err
+			return event.Answer{}, false, err
 		}
 		a.QuestionID, a.By, a.At, a.Expired = q.ID, clip(req.By), now, false
 		res.Answer = &a
 	}
 	stored, err := r.resolve(ctx, req.RunID, res)
 	if err != nil {
-		return payload.Answer{}, false, err
+		return event.Answer{}, false, err
 	}
 	// The run may have ended between the check above and the write: failed
 	// for good, say. Nothing will ever read the answer then, and saying it
 	// was taken would be a lie.
 	if after, err := r.loadRun(ctx, req.RunID); err == nil && after.Status == run.StatusFailed {
-		return payload.Answer{}, false, ErrQuestionClosed
+		return event.Answer{}, false, ErrQuestionClosed
 	}
 	r.wake(ctx, req.RunID)
 	raw, _ := json.Marshal(stored)
@@ -499,29 +498,29 @@ func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer
 }
 
 // answered returns the answer a resolution record holds.
-func answered(raw []byte, first bool) (payload.Answer, bool, error) {
+func answered(raw []byte, first bool) (event.Answer, bool, error) {
 	res, err := decodeResolution(raw)
 	if err != nil {
-		return payload.Answer{}, false, err
+		return event.Answer{}, false, err
 	}
 	if res.Answer == nil {
-		return payload.Answer{}, false, ErrQuestionClosed
+		return event.Answer{}, false, ErrQuestionClosed
 	}
 	return *res.Answer, first, nil
 }
 
 // findQuestion returns a question a run recorded.
-func findQuestion(records []run.Record, id string) (payload.Question, bool) {
+func findQuestion(records []run.Record, id string) (event.Question, bool) {
 	for _, rec := range records {
 		if rec.Key != questionStepKey(id) || rec.Status != run.RecordOK {
 			continue
 		}
-		var q payload.Question
+		var q event.Question
 		if json.Unmarshal(rec.Output, &q) == nil && q.ID == id {
 			return q, true
 		}
 	}
-	return payload.Question{}, false
+	return event.Question{}, false
 }
 
 // CheckAnswer reports whether an answer fits its question, as Answer checks
@@ -529,25 +528,25 @@ func findQuestion(records []run.Record, id string) (payload.Question, bool) {
 // which must satisfy the tool's schema; a choice is one of the options; a
 // reply has text. A host can check an answer before it submits one. Who may
 // answer, and who may edit a call's arguments, Answer decides.
-func CheckAnswer(q payload.Question, a payload.Answer) error {
+func CheckAnswer(q event.Question, a event.Answer) error {
 	_, err := checkAnswer(q, a)
 	return err
 }
 
 // checkAnswer checks an answer against its question and returns the part of
 // it that is recorded.
-func checkAnswer(q payload.Question, a payload.Answer) (payload.Answer, error) {
-	out := payload.Answer{Note: clipQuestion(a.Note)}
+func checkAnswer(q event.Question, a event.Answer) (event.Answer, error) {
+	out := event.Answer{Note: clipQuestion(a.Note)}
 	switch q.Kind {
-	case payload.QuestionApproval:
+	case event.QuestionApproval:
 		switch a.Decision {
-		case payload.DecisionApprove:
-		case payload.DecisionDeny:
+		case event.DecisionApprove:
+		case event.DecisionDeny:
 			if len(bytes.TrimSpace(a.Arguments)) > 0 {
 				return out, fmt.Errorf("%w: a denial cannot carry arguments", ErrInvalid)
 			}
 		default:
-			return out, fmt.Errorf("%w: an approval is answered %q or %q, not %q", ErrInvalid, payload.DecisionApprove, payload.DecisionDeny, a.Decision)
+			return out, fmt.Errorf("%w: an approval is answered %q or %q, not %q", ErrInvalid, event.DecisionApprove, event.DecisionDeny, a.Decision)
 		}
 		out.Decision = a.Decision
 		if args := bytes.TrimSpace(a.Arguments); len(args) > 0 {
@@ -573,18 +572,18 @@ func checkAnswer(q payload.Question, a payload.Answer) (payload.Answer, error) {
 			}
 			out.Arguments = compact.Bytes()
 		}
-	case payload.QuestionChoice:
+	case event.QuestionChoice:
 		if !slices.Contains(q.Options, a.Choice) {
 			return out, fmt.Errorf("%w: %q is not one of the options offered", ErrInvalid, a.Choice)
 		}
 		out.Choice = a.Choice
-	case payload.QuestionReply:
+	case event.QuestionReply:
 		text := clipQuestion(a.Text)
 		if text == "" {
 			return out, fmt.Errorf("%w: a reply needs text", ErrInvalid)
 		}
 		out.Text = text
-	case payload.QuestionDelegation:
+	case event.QuestionDelegation:
 		return out, fmt.Errorf("%w: question %s waits on a child run, and is answered by that run ending", ErrInvalid, q.ID)
 	default:
 		return out, fmt.Errorf("%w: question %s has kind %q, which this runtime cannot answer", ErrInvalid, q.ID, q.Kind)
@@ -595,10 +594,10 @@ func checkAnswer(q payload.Question, a payload.Answer) (payload.Answer, error) {
 // clipQuestion trims an answer's free text and bounds it, on a rune boundary.
 func clipQuestion(s string) string {
 	s = strings.TrimSpace(s)
-	if len(s) <= agentrt.MaxQuestionText {
+	if len(s) <= native.MaxQuestionText {
 		return s
 	}
-	end := agentrt.MaxQuestionText
+	end := native.MaxQuestionText
 	for end > 0 && s[end]&0xC0 == 0x80 {
 		end--
 	}
@@ -630,20 +629,20 @@ func (r *Runtime) wake(ctx context.Context, runID string) {
 // host that shows it. A run that is not parked, does not exist or is another
 // tenant's reports false. It returns ErrAnswerUnavailable without
 // WithStopLedger.
-func (r *Runtime) PendingQuestion(ctx context.Context, tenant, runID string) (payload.Question, bool, error) {
+func (r *Runtime) PendingQuestion(ctx context.Context, tenant, runID string) (event.Question, bool, error) {
 	if r.stops == nil {
-		return payload.Question{}, false, fmt.Errorf("%w: no ledger", ErrAnswerUnavailable)
+		return event.Question{}, false, fmt.Errorf("%w: no ledger", ErrAnswerUnavailable)
 	}
 	rec, records, err := r.recordsOf(ctx, runID, true, prefixQuestion, prefixAnswer)
 	switch {
 	case errors.Is(err, run.ErrNotFound):
-		return payload.Question{}, false, nil
+		return event.Question{}, false, nil
 	case err != nil:
-		return payload.Question{}, false, fmt.Errorf("runtime: questions of %s: %w", runID, err)
+		return event.Question{}, false, fmt.Errorf("runtime: questions of %s: %w", runID, err)
 	}
 	var in Input
 	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant || rec.Status.Terminal() {
-		return payload.Question{}, false, nil
+		return event.Question{}, false, nil
 	}
 	q, ok := pendingQuestion(records)
 	return q, ok, nil
@@ -651,20 +650,20 @@ func (r *Runtime) PendingQuestion(ctx context.Context, tenant, runID string) (pa
 
 // pendingQuestion is the latest question among a run's records that has no
 // resolution.
-func pendingQuestion(records []run.Record) (payload.Question, bool) {
+func pendingQuestion(records []run.Record) (event.Question, bool) {
 	resolved := map[string]bool{}
 	for _, rec := range records {
 		if rec.Kind == run.KindEvent && strings.HasPrefix(rec.Name, answerRecordPrefix) {
 			resolved[strings.TrimPrefix(rec.Name, answerRecordPrefix)] = true
 		}
 	}
-	var out payload.Question
+	var out event.Question
 	found := false
 	for _, rec := range records {
 		if !isQuestionRecord(rec) || rec.Status != run.RecordOK {
 			continue
 		}
-		var q payload.Question
+		var q event.Question
 		if json.Unmarshal(rec.Output, &q) != nil || q.ID == "" || resolved[q.ID] {
 			continue
 		}
@@ -687,11 +686,11 @@ func (r *Runtime) stopParked(ctx context.Context, tenant, runID string, body []b
 	if !ok {
 		return nil
 	}
-	var req payload.StopRequest
+	var req event.StopRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return fmt.Errorf("runtime: stop %s: %w", runID, err)
 	}
-	if _, err := r.resolve(ctx, runID, resolution{QuestionID: q.ID, Stopped: &agentrt.Stop{Reason: req.Reason, By: req.By}}); err != nil {
+	if _, err := r.resolve(ctx, runID, resolution{QuestionID: q.ID, Stopped: &native.Stop{Reason: req.Reason, By: req.By}}); err != nil {
 		return err
 	}
 	r.wake(ctx, runID)
@@ -721,31 +720,31 @@ type childQuestionKey struct{}
 // childQuestion returns how a child run a Delegator started is checked and
 // read for a pending question: a run of the parent's tenant, other than the
 // parent, in the ledger.
-func (r *Runtime) childQuestion(tenant, parentRunID string) func(context.Context, string) (payload.ChildQuestion, bool, bool, error) {
-	return func(ctx context.Context, runID string) (payload.ChildQuestion, bool, bool, error) {
+func (r *Runtime) childQuestion(tenant, parentRunID string) func(context.Context, string) (event.ChildParked, bool, bool, error) {
+	return func(ctx context.Context, runID string) (event.ChildParked, bool, bool, error) {
 		runID = strings.TrimSpace(runID)
 		if r.stops == nil {
-			return payload.ChildQuestion{}, false, false, fmt.Errorf("%w: watching a child run needs the run ledger (WithStopLedger)", ErrNotAChild)
+			return event.ChildParked{}, false, false, fmt.Errorf("%w: watching a child run needs the run ledger (WithStopLedger)", ErrNotAChild)
 		}
 		if runID == "" || runID == parentRunID {
-			return payload.ChildQuestion{}, false, false, fmt.Errorf("%w: %q", ErrNotAChild, runID)
+			return event.ChildParked{}, false, false, fmt.Errorf("%w: %q", ErrNotAChild, runID)
 		}
 		rec, records, err := r.recordsOf(ctx, runID, true, prefixQuestion, prefixAnswer)
 		switch {
 		case errors.Is(err, run.ErrNotFound):
-			return payload.ChildQuestion{}, false, false, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
+			return event.ChildParked{}, false, false, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
 		case err != nil:
-			return payload.ChildQuestion{}, false, false, fmt.Errorf("runtime: read child run %s: %w", runID, err)
+			return event.ChildParked{}, false, false, fmt.Errorf("runtime: read child run %s: %w", runID, err)
 		}
 		var in Input
 		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
-			return payload.ChildQuestion{}, false, false, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
+			return event.ChildParked{}, false, false, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
 		}
 		if rec.Status.Terminal() {
-			return payload.ChildQuestion{}, false, true, nil
+			return event.ChildParked{}, false, true, nil
 		}
 		q, ok := pendingQuestion(records)
-		return payload.ChildQuestion{RunID: runID, Agent: in.Subscriber, Question: q}, ok, false, nil
+		return event.ChildParked{RunID: runID, Agent: in.Subscriber, Question: q}, ok, false, nil
 	}
 }
 
@@ -779,7 +778,7 @@ func WatchChildQuestions(ctx context.Context, runID string) error {
 
 // watchChild polls a child run for questions and reports each new one, until
 // the child ends or ctx does.
-func watchChild(ctx context.Context, read func(context.Context, string) (payload.ChildQuestion, bool, bool, error), runID string, report func(payload.ChildQuestion) error) error {
+func watchChild(ctx context.Context, read func(context.Context, string) (event.ChildParked, bool, bool, error), runID string, report func(event.ChildParked) error) error {
 	if _, _, _, err := read(ctx, runID); err != nil {
 		return err
 	}
@@ -820,9 +819,9 @@ func watchChild(ctx context.Context, read func(context.Context, string) (payload
 // stranger to approve its own call. Approvers and answerers, when the spec
 // names them, are the only people admitted; asked_of on a question is a
 // routing hint and admits nobody. An approval question that names approvers
-// of its own (set per call by the tool that asked, agentrt.Approving) is
+// of its own (set per call by the tool that asked, native.Approving) is
 // governed by them and by its own self-approval instead of the spec's.
-func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, req AnswerRequest) error {
+func (r *Runtime) mayAnswer(ctx context.Context, in Input, q event.Question, req AnswerRequest) error {
 	loaded, err := r.defs.Verify(ctx, in.Trigger.Tenant, in.Pin)
 	if err != nil {
 		return fmt.Errorf("runtime: answer: read agent %q version %s: %w", in.Subscriber, in.Pin.Version, err)
@@ -831,7 +830,7 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 	by := clip(req.By)
 	var admitted []string
 	switch q.Kind {
-	case payload.QuestionApproval:
+	case event.QuestionApproval:
 		self := policy.SelfApproval
 		admitted = policy.Approvers
 		if len(q.Approvers) > 0 {
@@ -843,7 +842,7 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 				return fmt.Errorf("%w: the request that raised this call cannot approve it; another person must", ErrNotAllowed)
 			}
 		}
-	case payload.QuestionChoice, payload.QuestionReply:
+	case event.QuestionChoice, event.QuestionReply:
 		admitted = policy.Answerers
 	default:
 		return nil
@@ -890,7 +889,7 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 // one answering. Anyone else's edit would act as them on something they did
 // not ask for, at whatever their credential reaches; they may still approve
 // or deny the call as it was asked.
-func mayEdit(in Input, q payload.Question, req AnswerRequest, a payload.Answer) error {
+func mayEdit(in Input, q event.Question, req AnswerRequest, a event.Answer) error {
 	if len(a.Arguments) == 0 || q.Tool == nil || !q.Tool.ActsForPerson || isActor(in, clip(req.By)) {
 		return nil
 	}
@@ -928,7 +927,7 @@ func requesterOf(in Input) map[string]bool {
 // is then stored once, in pieces, instead of once per park. A park whose
 // transcript does not start with the one it was given (it compacted, or it
 // records the whole conversation) is stored whole.
-func trimTranscript(parked, given *agentrt.Parked) {
+func trimTranscript(parked, given *native.Parked) {
 	if parked == nil || given == nil || parked.Whole || given.Whole {
 		return
 	}
@@ -948,7 +947,7 @@ func trimTranscript(parked, given *agentrt.Parked) {
 // wholeTranscript rebuilds a park's whole transcript from the previous one's
 // and what this park stored. It reads only recorded outcomes, so a replay
 // rebuilds the same bytes.
-func wholeTranscript(prev []json.RawMessage, parked *agentrt.Parked) ([]json.RawMessage, error) {
+func wholeTranscript(prev []json.RawMessage, parked *native.Parked) ([]json.RawMessage, error) {
 	if parked.Since == 0 {
 		return parked.Transcript, nil
 	}
@@ -977,7 +976,7 @@ func WithChildRuns() Option {
 }
 
 // startChild accepts the child run a delegation waits on and returns its id.
-func (r *Runtime) startChild(ctx context.Context, parent Input, q payload.Question) (string, error) {
+func (r *Runtime) startChild(ctx context.Context, parent Input, q event.Question) (string, error) {
 	if q.Tool == nil {
 		return "", anchor.NonRetryable(fmt.Errorf("%w: delegation %s names no tool call", ErrInvalid, q.ID))
 	}
@@ -1043,12 +1042,12 @@ func childInput(parent Input, target, text, questionID string) (Input, error) {
 
 // childEnded answers a delegation from its child run's record, once the
 // child has ended.
-func (r *Runtime) childEnded(ctx context.Context, q payload.Question) (*payload.Answer, bool) {
+func (r *Runtime) childEnded(ctx context.Context, q event.Question) (*event.Answer, bool) {
 	rec, err := r.loadRun(ctx, q.ChildRunID)
 	if err != nil || !rec.Status.Terminal() {
 		return nil, false
 	}
-	a := &payload.Answer{QuestionID: q.ID, RunID: q.ChildRunID, At: r.now().UTC()}
+	a := &event.Answer{QuestionID: q.ID, RunID: q.ChildRunID, At: r.now().UTC()}
 	if rec.Status == run.StatusFailed {
 		a.Note = "the delegated run failed: " + clip(rec.Error)
 		return a, true
@@ -1066,11 +1065,11 @@ func (r *Runtime) childEnded(ctx context.Context, q payload.Question) (*payload.
 // answerParent tells the run that started this one for a delegation how it
 // ended, and wakes it. It is best effort: a parent that is not told reads the
 // child's ending from the ledger when its janitor poll comes.
-func (r *Runtime) answerParent(ctx context.Context, in Input, text string, stopped *agentrt.Stop, failure error) {
+func (r *Runtime) answerParent(ctx context.Context, in Input, text string, stopped *native.Stop, failure error) {
 	if in.Parent == nil || r.stops == nil {
 		return
 	}
-	a := payload.Answer{QuestionID: in.Parent.QuestionID, RunID: in.runID(), Text: text, At: r.now().UTC()}
+	a := event.Answer{QuestionID: in.Parent.QuestionID, RunID: in.runID(), Text: text, At: r.now().UTC()}
 	switch {
 	case failure != nil:
 		a.Text, a.Note = "", "the delegated run failed: "+clip(failure.Error())

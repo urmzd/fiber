@@ -8,9 +8,9 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // guardedCalls is a delegation tool that asks, per call, for the approval its
@@ -22,11 +22,11 @@ type guardedCalls struct {
 	self      bool
 }
 
-func (g guardedCalls) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
+func (g guardedCalls) Approval(call saigetypes.ToolCallPart) (native.ApprovalRequest, bool) {
 	if call.Arguments["agent"] != "guarded" {
-		return agentrt.ApprovalRequest{}, false
+		return native.ApprovalRequest{}, false
 	}
-	return agentrt.ApprovalRequest{Prompt: "Allow ops to call guarded?", Approvers: g.approvers, SelfApproval: g.self}, true
+	return native.ApprovalRequest{Prompt: "Allow ops to call guarded?", Approvers: g.approvers, SelfApproval: g.self}, true
 }
 
 // newGuarded is a parking world whose agent delegates through guardedCalls.
@@ -41,13 +41,13 @@ func newGuarded(t *testing.T, approvers []string, self bool) (*parking, guardedC
 	p := &parking{world: w, deploy: tool.countingTool, model: &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 		call("c1", "call_agent", map[string]any{"agent": "guarded"}), agenttest.TextResponse("Done."),
 	}}}
-	w.specs.set(agentrt.Spec{
-		Name: "ops", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "You delegate.",
+	w.specs.set(native.Spec{
+		Name: "ops", Provider: native.ProviderOffline, Model: "scripted", SystemPrompt: "You delegate.",
 		Tools: []string{"call_agent"},
 	})
 	p.exec = sandboxOf(t, w.specs, map[string]saigetypes.Provider{"ops": p.model, "docs-bot": bystander()},
-		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
-			return agentrt.StaticTools(tool), nil
+		runtime.WithCatalog(func(runtime.Request, func(event.Action) error) (native.Tools, error) {
+			return native.StaticTools(tool), nil
 		}))
 	return p, tool
 }
@@ -82,10 +82,10 @@ func TestAPerCallApprovalIsAnsweredOnlyByItsOwnApprovers(t *testing.T) {
 			p.workers(t, rt, 2, 0)
 			runID := p.accept(t, rt, requested("evt-1"))
 			q := p.parkedOn(t, rt, runID)
-			if q.Kind != payload.QuestionApproval || len(q.Approvers) != len(tc.approvers) || q.SelfApproval != tc.self {
+			if q.Kind != event.QuestionApproval || len(q.Approvers) != len(tc.approvers) || q.SelfApproval != tc.self {
 				t.Fatalf("parked on %+v, want an approval carrying the call's approvers", q)
 			}
-			err := p.answerAs(rt, runID, q.ID, tc.by, tc.by, payload.Answer{Decision: payload.DecisionApprove})
+			err := p.answerAs(rt, runID, q.ID, tc.by, tc.by, event.Answer{Decision: event.DecisionApprove})
 			if tc.allowed != (err == nil) || (err != nil && !errors.Is(err, runtime.ErrNotAllowed)) {
 				t.Fatalf("err = %v, want allowed=%v", err, tc.allowed)
 			}

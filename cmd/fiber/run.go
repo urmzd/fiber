@@ -20,7 +20,6 @@ import (
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // The scope and the person a local run belongs to. Both are fixed: nothing
@@ -337,7 +336,7 @@ func follow(ctx context.Context, app *fiber.App, trigger event.Envelope, agent s
 		defer cancel()
 	}
 	runID := runtime.RunKey(trigger.Tenant, trigger.ID, agent)
-	if _, err := topic.Run(agent, runID); err != nil {
+	if err := runtime.CheckRun(agent, runID); err != nil {
 		fmt.Fprintf(stderr, "fiber run: %v\n", err)
 		return exitBadInput
 	}

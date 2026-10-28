@@ -17,13 +17,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -34,7 +33,7 @@ import (
 // connector receives the run's events.
 func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	lookup := &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "lookup_runbook", Parameters: saigetypes.ParameterSchema{Type: "object"}}, Result: "restart it"}
-	house := func(spec agentrt.Spec) (saigetypes.Provider, error) {
+	house := func(spec native.Spec) (saigetypes.Provider, error) {
 		return &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 			agenttest.ToolCallResponse("c1", "lookup_runbook", map[string]any{"service": "api"}),
 			agenttest.TextResponse("house says: restart it"),
@@ -43,8 +42,8 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	box := &inbox{}
 	c := newApp(t, WithTenant("acme"),
 		WithModelProvider("house", house),
-		WithToolSource(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
-			return agentrt.StaticTools(lookup), nil
+		WithToolSource(func(runtime.Request, func(event.Action) error) (native.Tools, error) {
+			return native.StaticTools(lookup), nil
 		}),
 		WithConnector(box),
 	)
@@ -137,7 +136,7 @@ func declaredReachTheStores(t *testing.T, pool *pgxpool.Pool) {
 	_, url := fakeMCP(t)
 	opts := []Option{
 		WithTenant(tenant),
-		WithOpenAICompatible(agentrt.OpenAICompatible{Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1", KeyEnv: "FIREWORKS_API_KEY"}),
+		WithOpenAICompatible(native.OpenAICompatible{Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1", KeyEnv: "FIREWORKS_API_KEY"}),
 		issues(t, url),
 	}
 	if pool != nil {

@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -9,8 +9,8 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // callAgent is a delegation tool whose callee's policy decides, per call,
@@ -19,11 +19,11 @@ type callAgent struct {
 	*agenttest.MockTool
 }
 
-func (callAgent) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
+func (callAgent) Approval(call saigetypes.ToolCallPart) (native.ApprovalRequest, bool) {
 	if call.Arguments["agent"] != "guarded" {
-		return agentrt.ApprovalRequest{}, false
+		return native.ApprovalRequest{}, false
 	}
-	return agentrt.ApprovalRequest{
+	return native.ApprovalRequest{
 		Prompt:    "Allow ops to call guarded?",
 		AskedOf:   "role:admin",
 		Approvers: []string{"role:admin", " carol ", "carol"},
@@ -40,7 +40,7 @@ func newCallAgent() callAgent {
 type approvingFixture struct {
 	model  *agenttest.ScriptedProvider
 	tool   callAgent
-	runner *agentrt.Runner
+	runner *native.Runner
 }
 
 func newApprovingFixture(t *testing.T, approvals []string, script ...[]saigetypes.Delta) *approvingFixture {
@@ -49,9 +49,9 @@ func newApprovingFixture(t *testing.T, approvals []string, script ...[]saigetype
 	rev := offlineRevision(1, "You delegate.")
 	rev.Spec.Tools = []string{"call_agent"}
 	rev.Spec.Approvals = approvals
-	r, err := agentrt.New(rev,
-		agentrt.WithTools(agentrt.StaticTools(f.tool)),
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return f.model, nil }))
+	r, err := native.New(rev,
+		native.WithTools(native.StaticTools(f.tool)),
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return f.model, nil }))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -59,7 +59,7 @@ func newApprovingFixture(t *testing.T, approvals []string, script ...[]saigetype
 	return f
 }
 
-func (f *approvingFixture) run(t *testing.T, turn agentrt.Turn) agentrt.Result {
+func (f *approvingFixture) run(t *testing.T, turn native.Turn) native.Result {
 	t.Helper()
 	res, err := f.runner.Run(context.Background(), turn, nil)
 	if err != nil {
@@ -76,7 +76,7 @@ func callTo(agent string) []saigetypes.Delta {
 func TestAnUnguardedCallRunsWithoutAQuestion(t *testing.T) {
 	t.Parallel()
 	f := newApprovingFixture(t, nil, callTo("open"), agenttest.TextResponse("Done."))
-	res := f.run(t, agentrt.Turn{Text: "go", Park: true})
+	res := f.run(t, native.Turn{Text: "go", Park: true})
 	if res.Parked != nil {
 		t.Fatalf("an unguarded call parked on %+v", res.Parked.Question)
 	}
@@ -90,18 +90,18 @@ func TestAnUnguardedCallRunsWithoutAQuestion(t *testing.T) {
 func TestAGuardedCallParksAsAnApprovalWithItsApprovers(t *testing.T) {
 	t.Parallel()
 	f := newApprovingFixture(t, nil, callTo("guarded"))
-	res := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a1"})
+	res := f.run(t, native.Turn{Text: "go", Park: true, Accounting: "r/a1"})
 	if res.Parked == nil {
 		t.Fatal("a guarded call did not park")
 	}
 	q := res.Parked.Question
-	if q.Kind != payload.QuestionApproval || q.Tool == nil || q.Tool.Name != "call_agent" || q.Tool.CallID != "c1" || res.Parked.CallID != "c1" {
+	if q.Kind != event.QuestionApproval || q.Tool == nil || q.Tool.Name != "call_agent" || q.Tool.CallID != "c1" || res.Parked.CallID != "c1" {
 		t.Fatalf("question is %+v, want an approval of call_agent c1", q)
 	}
 	if q.Prompt != "Allow ops to call guarded?" || q.AskedOf != "role:admin" || strings.Join(q.Approvers, ",") != "role:admin,carol" || q.SelfApproval {
 		t.Errorf("question carries prompt %q asked_of %q approvers %v self %v", q.Prompt, q.AskedOf, q.Approvers, q.SelfApproval)
 	}
-	if q.Default == nil || q.Default.Decision != payload.DecisionDeny || !q.Default.Expired || q.ExpiresAt.IsZero() {
+	if q.Default == nil || q.Default.Decision != event.DecisionDeny || !q.Default.Expired || q.ExpiresAt.IsZero() {
 		t.Errorf("question default %+v expiry %v, want a deny on expiry", q.Default, q.ExpiresAt)
 	}
 	if len(f.tool.Calls) != 0 {
@@ -115,28 +115,28 @@ func TestAGuardedCallRunsOnlyOnApproval(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
-		answer func(q payload.Question) payload.Answer
+		answer func(q event.Question) event.Answer
 		runs   bool
 		told   string
 	}{
-		{"approved", func(q payload.Question) payload.Answer {
-			return payload.Answer{QuestionID: q.ID, Decision: payload.DecisionApprove, By: "carol"}
+		{"approved", func(q event.Question) event.Answer {
+			return event.Answer{QuestionID: q.ID, Decision: event.DecisionApprove, By: "carol"}
 		}, true, "the callee answered"},
-		{"denied", func(q payload.Question) payload.Answer {
-			return payload.Answer{QuestionID: q.ID, Decision: payload.DecisionDeny, By: "carol", Note: "not this week"}
+		{"denied", func(q event.Question) event.Answer {
+			return event.Answer{QuestionID: q.ID, Decision: event.DecisionDeny, By: "carol", Note: "not this week"}
 		}, false, "not this week"},
-		{"expired", func(q payload.Question) payload.Answer { return *q.Default }, false, "expired"},
+		{"expired", func(q event.Question) event.Answer { return *q.Default }, false, "expired"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newApprovingFixture(t, nil, callTo("guarded"), agenttest.TextResponse("Over."))
-			parked := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a1"})
+			parked := f.run(t, native.Turn{Text: "go", Park: true, Accounting: "r/a1"})
 			if parked.Parked == nil {
 				t.Fatal("did not park")
 			}
 			resume := *parked.Parked
-			resume.Answers = map[string]payload.Answer{"c1": tc.answer(parked.Parked.Question)}
-			res := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a2", Resume: &resume})
+			resume.Answers = map[string]event.Answer{"c1": tc.answer(parked.Parked.Question)}
+			res := f.run(t, native.Turn{Text: "go", Park: true, Accounting: "r/a2", Resume: &resume})
 			if res.Parked != nil {
 				t.Fatalf("the continuation parked again on %+v", res.Parked.Question)
 			}
@@ -154,7 +154,7 @@ func TestAGuardedCallRunsOnlyOnApproval(t *testing.T) {
 func TestAGuardedCallIsRefusedWhereNobodyCanBeAsked(t *testing.T) {
 	t.Parallel()
 	f := newApprovingFixture(t, nil, callTo("guarded"), agenttest.TextResponse("Could not."))
-	res := f.run(t, agentrt.Turn{Text: "go"})
+	res := f.run(t, native.Turn{Text: "go"})
 	if res.Parked != nil || len(f.tool.Calls) != 0 {
 		t.Fatalf("parked %v, call_agent ran %d times; want neither", res.Parked != nil, len(f.tool.Calls))
 	}
@@ -165,18 +165,18 @@ func TestAGuardedCallIsRefusedWhereNobodyCanBeAsked(t *testing.T) {
 func TestASpecApprovalAndAPerCallApprovalAskOnce(t *testing.T) {
 	t.Parallel()
 	f := newApprovingFixture(t, []string{"call_agent"}, callTo("guarded"), agenttest.TextResponse("Over."))
-	parked := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a1"})
+	parked := f.run(t, native.Turn{Text: "go", Park: true, Accounting: "r/a1"})
 	if parked.Parked == nil || parked.Parked.Question.Prompt != "Allow ops to call guarded?" || len(parked.Parked.Question.Approvers) == 0 {
 		t.Fatalf("parked on %+v, want the per-call question", parked.Parked)
 	}
 	resume := *parked.Parked
-	resume.Answers = map[string]payload.Answer{"c1": {QuestionID: parked.Parked.Question.ID, Decision: payload.DecisionApprove}}
-	if res := f.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a2", Resume: &resume}); res.Parked != nil || len(f.tool.Calls) != 1 {
+	resume.Answers = map[string]event.Answer{"c1": {QuestionID: parked.Parked.Question.ID, Decision: event.DecisionApprove}}
+	if res := f.run(t, native.Turn{Text: "go", Park: true, Accounting: "r/a2", Resume: &resume}); res.Parked != nil || len(f.tool.Calls) != 1 {
 		t.Fatalf("after approval: parked %v, ran %d times; want no park and one run", res.Parked != nil, len(f.tool.Calls))
 	}
 
 	open := newApprovingFixture(t, []string{"call_agent"}, callTo("open"))
-	res := open.run(t, agentrt.Turn{Text: "go", Park: true, Accounting: "r/a1"})
+	res := open.run(t, native.Turn{Text: "go", Park: true, Accounting: "r/a1"})
 	if res.Parked == nil || res.Parked.Question.Approvers != nil || len(open.tool.Calls) != 0 {
 		t.Fatalf("an unguarded call to a tool the spec guards: parked %+v, ran %d", res.Parked, len(open.tool.Calls))
 	}
@@ -188,8 +188,8 @@ type expiringCall struct {
 	wait time.Duration
 }
 
-func (e expiringCall) Approval(saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
-	return agentrt.ApprovalRequest{Approvers: []string{"role:admin"}, ExpiresIn: e.wait}, true
+func (e expiringCall) Approval(saigetypes.ToolCallPart) (native.ApprovalRequest, bool) {
+	return native.ApprovalRequest{Approvers: []string{"role:admin"}, ExpiresIn: e.wait}, true
 }
 
 // A tool's own wait sets when its question expires, never past the cap.
@@ -199,19 +199,19 @@ func TestAnApprovalWaitsAsLongAsTheToolSays(t *testing.T) {
 		wait, want time.Duration
 	}{
 		{2 * time.Hour, 2 * time.Hour},
-		{30 * 24 * time.Hour, agentrt.MaxApprovalWait},
+		{30 * 24 * time.Hour, native.MaxApprovalWait},
 	} {
 		tool := expiringCall{newCallAgent().MockTool, tc.wait}
 		model := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{callTo("any")}}
 		rev := offlineRevision(1, "You delegate.")
 		rev.Spec.Tools = []string{"call_agent"}
-		r, err := agentrt.New(rev,
-			agentrt.WithTools(agentrt.StaticTools(tool)),
-			agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }))
+		r, err := native.New(rev,
+			native.WithTools(native.StaticTools(tool)),
+			native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil }))
 		if err != nil {
 			t.Fatal(err)
 		}
-		res, err := r.Run(context.Background(), agentrt.Turn{Text: "go", Park: true, Accounting: "r/e1"}, nil)
+		res, err := r.Run(context.Background(), native.Turn{Text: "go", Park: true, Accounting: "r/e1"}, nil)
 		if err != nil || res.Parked == nil {
 			t.Fatalf("Run: %v, parked %v", err, res.Parked)
 		}

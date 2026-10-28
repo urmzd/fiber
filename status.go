@@ -9,7 +9,6 @@ import (
 
 	drun "github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 )
@@ -61,10 +60,10 @@ type Run struct {
 	StopReason string
 	StoppedBy  string
 	// Usage is what the run spent, nil while nothing is recorded.
-	Usage *payload.RunUsage
+	Usage *event.RunUsage
 	// Question is what the run is waiting on a person for, set while
 	// Status is StatusParked.
-	Question *payload.Question
+	Question *event.Question
 
 	CreatedAt time.Time
 	EndedAt   time.Time

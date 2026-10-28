@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -8,9 +8,8 @@ import (
 
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // askingTool is a lookup that, on the calls ask says, asks the turn to
@@ -22,7 +21,7 @@ import (
 // goroutine that receives it. Two requests before one model call are one
 // compaction, which is part of what the tests check.
 type askingTool struct {
-	compact chan<- agentrt.CompactRequest
+	compact chan<- native.CompactRequest
 	ask     func(call int) bool
 
 	mu    sync.Mutex
@@ -41,7 +40,7 @@ func (t *askingTool) Execute(ctx context.Context, _ map[string]any) (string, err
 	if t.ask(call) {
 		for range 2 {
 			select {
-			case t.compact <- agentrt.CompactRequest{By: "ada"}:
+			case t.compact <- native.CompactRequest{By: "ada"}:
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}
@@ -53,33 +52,33 @@ func (t *askingTool) Execute(ctx context.Context, _ map[string]any) (string, err
 // runAsking runs a tool loop whose tool asks for compaction on the calls ask
 // says, and returns the result, the context.compacted bodies the turn
 // published, and how many summaries the provider was asked for.
-func runAsking(t *testing.T, c agentrt.Compaction, turns int, ask func(int) bool) (agentrt.Result, []payload.Compaction, int) {
+func runAsking(t *testing.T, c native.Compaction, turns int, ask func(int) bool) (native.Result, []event.Compaction, int) {
 	t.Helper()
 	p := &loopProvider{turns: turns}
-	compact := make(chan agentrt.CompactRequest)
+	compact := make(chan native.CompactRequest)
 	rev := offlineRevision(1, "You look things up.")
 	rev.Spec.Tools = []string{"lookup"}
-	r, err := agentrt.New(rev,
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return p, nil }),
-		agentrt.WithTools(agentrt.StaticTools(&askingTool{compact: compact, ask: ask})),
-		agentrt.WithMaxIter(turns+5),
-		agentrt.WithCompaction(c),
+	r, err := native.New(rev,
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return p, nil }),
+		native.WithTools(native.StaticTools(&askingTool{compact: compact, ask: ask})),
+		native.WithMaxIter(turns+5),
+		native.WithCompaction(c),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	got, res := collect(t, r, agentrt.Turn{Text: "find the answer", Compact: compact})
+	got, res := collect(t, r, native.Turn{Text: "find the answer", Compact: compact})
 	if res.Text != "done" {
 		t.Fatalf("turn answered %q, want it to finish the loop", res.Text)
 	}
-	var published []payload.Compaction
+	var published []event.Compaction
 	for _, ch := range got {
-		if ch.Kind != envelope.KindCompacted {
+		if ch.Type() != event.TypeCompacted {
 			continue
 		}
-		var body payload.Compaction
-		if err := json.Unmarshal(ch.Payload, &body); err != nil {
-			t.Fatalf("decode %s: %v", ch.Kind, err)
+		var body event.Compaction
+		if err := json.Unmarshal(raw(ch), &body); err != nil {
+			t.Fatalf("decode %s: %v", ch.Type(), err)
 		}
 		published = append(published, body)
 	}
@@ -99,21 +98,21 @@ func TestARequestedCompactionHappensOnceAndIsPublished(t *testing.T) {
 	t.Parallel()
 
 	res, published, summaries := runAsking(t,
-		agentrt.Compaction{OnRequest: true, KeepTurns: 1}, 5,
+		native.Compaction{OnRequest: true, KeepTurns: 1}, 5,
 		func(call int) bool { return call == 3 })
 
 	if summaries != 1 || len(res.Compactions) != 1 {
 		t.Fatalf("turn wrote %d summaries and recorded %d compactions, want one of each", summaries, len(res.Compactions))
 	}
 	if len(published) != 1 {
-		t.Fatalf("turn published %d %s events, want 1", len(published), envelope.KindCompacted)
+		t.Fatalf("turn published %d %s events, want 1", len(published), event.TypeCompacted)
 	}
 	got := published[0]
 	if got != res.Compactions[0] {
 		t.Errorf("published %+v, but the result records %+v", got, res.Compactions[0])
 	}
-	if got.Trigger != agentrt.TriggerRequested || got.By != "ada" {
-		t.Errorf("compaction reports trigger %q by %q, want %q by %q", got.Trigger, got.By, agentrt.TriggerRequested, "ada")
+	if got.Trigger != native.TriggerRequested || got.By != "ada" {
+		t.Errorf("compaction reports trigger %q by %q, want %q by %q", got.Trigger, got.By, native.TriggerRequested, "ada")
 	}
 	if got.Summarized == 0 {
 		t.Errorf("compaction %+v summarized nothing", got)
@@ -128,11 +127,11 @@ func TestCompactionHappensOnlyWhenConfiguredAndAsked(t *testing.T) {
 
 	tests := []struct {
 		name string
-		c    agentrt.Compaction
+		c    native.Compaction
 		ask  func(int) bool
 	}{
-		{"asked, but requests are not taken", agentrt.Compaction{KeepTurns: 1}, func(int) bool { return true }},
-		{"requests are taken, nobody asks", agentrt.Compaction{OnRequest: true, KeepTurns: 1}, func(int) bool { return false }},
+		{"asked, but requests are not taken", native.Compaction{KeepTurns: 1}, func(int) bool { return true }},
+		{"requests are taken, nobody asks", native.Compaction{OnRequest: true, KeepTurns: 1}, func(int) bool { return false }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,12 +152,12 @@ func TestARequestIsNotHeldBackByTheBudgetsSpacing(t *testing.T) {
 
 	const keep = 2
 	res, _, _ := runAsking(t,
-		agentrt.Compaction{OnRequest: true, MaxInputTokens: 1, KeepTurns: keep}, 10,
+		native.Compaction{OnRequest: true, MaxInputTokens: 1, KeepTurns: keep}, 10,
 		func(call int) bool { return call >= 4 })
 
 	requested := 0
 	for _, c := range res.Compactions {
-		if c.Trigger == agentrt.TriggerRequested {
+		if c.Trigger == native.TriggerRequested {
 			requested++
 		}
 	}

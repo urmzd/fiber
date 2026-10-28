@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"encoding/json"
@@ -6,13 +6,12 @@ import (
 
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
-// A citation event has to carry everything a footnote needs — the marker, the
-// exact source text, and somewhere to go — or a reader cannot check the claim.
+// A citation event has to carry everything a footnote needs (the marker, the
+// exact source text, and somewhere to go) or a reader cannot check the claim.
 func TestCitationsCarryTheQuotedTextLabelAndProvenance(t *testing.T) {
 	t.Parallel()
 
@@ -39,7 +38,7 @@ func TestCitationsCarryTheQuotedTextLabelAndProvenance(t *testing.T) {
 		},
 	}
 
-	got := agentrt.Citations(ac)
+	got := native.Citations(ac)
 	if len(got) != 2 {
 		t.Fatalf("got %d citation events, want 2", len(got))
 	}
@@ -54,7 +53,7 @@ func TestCitationsCarryTheQuotedTextLabelAndProvenance(t *testing.T) {
 	if first.Index != 0 {
 		t.Errorf("index is %d, want 0", first.Index)
 	}
-	want := payload.Provenance{
+	want := event.Provenance{
 		DocumentUUID: "doc-1", DocumentTitle: "Runbook",
 		SourceURI:   "https://example.test/runbook#deploys",
 		SectionUUID: "sec-3", SectionHeading: "Deploys", SectionIndex: 3,
@@ -68,8 +67,8 @@ func TestCitationsCarryTheQuotedTextLabelAndProvenance(t *testing.T) {
 		t.Errorf("second index is %d, want 1", second.Index)
 	}
 	for _, c := range got {
-		if c.Kind != envelope.KindCitation {
-			t.Errorf("kind is %s, want %s", c.Kind, envelope.KindCitation)
+		if c.Type() != event.TypeCitation {
+			t.Errorf("kind is %s, want %s", c.Type(), event.TypeCitation)
 		}
 	}
 }
@@ -83,7 +82,7 @@ func TestUnlabelledCitationsAreNumberedByPosition(t *testing.T) {
 		{Text: "first"},
 		{Text: "second"},
 	}}
-	got := agentrt.Citations(ac)
+	got := native.Citations(ac)
 	if len(got) != 2 {
 		t.Fatalf("got %d citation events, want 2", len(got))
 	}
@@ -110,17 +109,17 @@ func TestEmptyRetrievalProducesNoCitations(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := agentrt.Citations(tc.in); len(got) != 0 {
+			if got := native.Citations(tc.in); len(got) != 0 {
 				t.Fatalf("got %d citation events, want none", len(got))
 			}
 		})
 	}
 }
 
-func decodeCitation(t *testing.T, c agentrt.Chunk) payload.Citation {
+func decodeCitation(t *testing.T, c event.Body) event.Citation {
 	t.Helper()
-	var out payload.Citation
-	if err := json.Unmarshal(c.Payload, &out); err != nil {
+	var out event.Citation
+	if err := json.Unmarshal(raw(c), &out); err != nil {
 		t.Fatalf("decode citation: %v", err)
 	}
 	return out

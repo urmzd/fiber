@@ -26,13 +26,11 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/thread/threadtest"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -85,8 +83,8 @@ func newThreads(t *testing.T) thread.Store {
 func exchange(t *testing.T, s thread.Store, key thread.Key, run, question, answer string) {
 	t.Helper()
 	_, err := s.Append(context.Background(), key,
-		thread.Entry{Role: thread.RoleUser, Text: question, RunID: run, Actor: envelope.Actor{ID: "U1"}},
-		thread.Entry{Role: thread.RoleAssistant, Text: answer, RunID: run, Actor: envelope.Actor{ID: key.Agent, Bot: true}},
+		thread.Entry{Role: thread.RoleUser, Text: question, RunID: run, Actor: event.Actor{ID: "U1"}},
+		thread.Entry{Role: thread.RoleAssistant, Text: answer, RunID: run, Actor: event.Actor{ID: key.Agent, Bot: true}},
 	)
 	if err != nil {
 		t.Fatalf("seed thread %s: %v", key, err)
@@ -114,7 +112,7 @@ func said(entries []thread.Entry) []string {
 	return out
 }
 
-func replayed(history []agentrt.Message) []string {
+func replayed(history []native.Message) []string {
 	out := make([]string, len(history))
 	for i, m := range history {
 		out[i] = string(m.Role) + ": " + m.Text
@@ -340,7 +338,7 @@ func TestACompletedRunAppendsItsExchangeExactlyOnce(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 	tg := tag("docs-bot", "Ev-once", "hello")
 	tg.Meta = map[string]string{"slack_ts": "1699.042"}
-	tg.Actor = envelope.Actor{ID: "U1", Display: "ada"}
+	tg.Actor = event.Actor{ID: "U1", Display: "ada"}
 	key := tg.key()
 
 	ctx := context.Background()
@@ -605,7 +603,7 @@ func TestAJournalThatLostWhatARunPinnedFailsTheRunTerminally(t *testing.T) {
 	if len(failed) == 0 {
 		t.Fatal("no failure was published")
 	}
-	body, err := decode[payload.Lifecycle](failed[0])
+	body, err := decode[lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -640,7 +638,7 @@ func TestAFailedJournalAppendIsRetriedWithoutPayingForTheModelAgain(t *testing.T
 	if len(failed) != 1 {
 		t.Fatalf("got %d failed events, want 1 for the attempt that could not record", len(failed))
 	}
-	if body, err := decode[payload.Lifecycle](failed[0]); err != nil || body.Terminal {
+	if body, err := decode[lifecycle](failed[0]); err != nil || body.Terminal {
 		t.Errorf("the failed append was reported as %+v, %v; want a retryable failure", body, err)
 	}
 	completed := h.bus.ofKind(event.TypeCompleted)
@@ -668,7 +666,7 @@ func TestTheThreadIsReconciledWithItsSurfaceBeforeHistoryIsPinned(t *testing.T) 
 
 	raise := func(who, text string) fixture {
 		tg := tag("docs-bot", "", text)
-		tg.Actor = envelope.Actor{ID: who, Display: who}
+		tg.Actor = event.Actor{ID: who, Display: who}
 		tg.ID = surface.Post(tg.Tenant, tg.Source, who, "@docs-bot "+text)
 		return tg
 	}
@@ -738,7 +736,7 @@ func TestTheSandboxReplaysHistoryToTheModelAndNotToADelegatedAgent(t *testing.T)
 	history := newSpecs()
 	history.revise("helper", "Help.")
 	history.revise("lead", "Lead.")
-	lead := history.edit("lead", func(s *agentrt.Spec) { s.Access.Spawn = []string{"helper"} })
+	lead := history.edit("lead", func(s *native.Spec) { s.Access.Spawn = []string{"helper"} })
 
 	var mu sync.Mutex
 	models := map[string]*agenttest.ScriptedProvider{}
@@ -750,7 +748,7 @@ func TestTheSandboxReplaysHistoryToTheModelAndNotToADelegatedAgent(t *testing.T)
 		"helper": {agenttest.TextResponse("Three tests fail.")},
 	}
 	s, err := runtime.NewSandbox(plane, tools, history, runtime.WithReplicas(1),
-		runtime.WithAgentOptions(agentrt.WithProvider(agentrt.ProviderOffline, func(spec agentrt.Spec) (saigetypes.Provider, error) {
+		runtime.WithAgentOptions(native.WithProvider(native.ProviderOffline, func(spec native.Spec) (saigetypes.Provider, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			p := &agenttest.ScriptedProvider{Responses: scripts[spec.Name]}
@@ -763,11 +761,11 @@ func TestTheSandboxReplaysHistoryToTheModelAndNotToADelegatedAgent(t *testing.T)
 
 	out, err := s.Execute(context.Background(), withPin(runtime.Request{
 		RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "How are the tests?",
-		History: []agentrt.Message{
-			{Role: agentrt.RoleUser, Text: "SECRET-OF-THE-THREAD: we ship on friday"},
-			{Role: agentrt.RoleAssistant, Text: "noted"},
+		History: []native.Message{
+			{Role: native.RoleUser, Text: "SECRET-OF-THE-THREAD: we ship on friday"},
+			{Role: native.RoleAssistant, Text: "noted"},
 		},
-	}, lead), func(context.Context, agentrt.Chunk) error { return nil })
+	}, lead), func(context.Context, event.Body) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

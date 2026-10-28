@@ -9,8 +9,8 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Tools resolves the names in Spec.Tools to executable tools.
@@ -46,13 +46,13 @@ var ErrNoSuchTool = fmt.Errorf("%w: no such tool", ErrInvalid)
 // after is called for every action that runs, successfully or not. pkg/runtime
 // passes a function that publishes run.action.taken.v1, which is what puts
 // "the work got done" on the bus next to the conversation.
-func ConnectorTools(reg *connector.Registry, target address.Address, after func(payload.Action) error) Tools {
+func ConnectorTools(reg *connector.Registry, target address.Address, after func(event.Action) error) Tools {
 	return ConnectorToolsForRun(reg, target, "", after)
 }
 
 // ConnectorToolsForRun also binds the durable run identity for actions whose
 // authorization must not be replayed from another run.
-func ConnectorToolsForRun(reg *connector.Registry, target address.Address, runID string, after func(payload.Action) error) Tools {
+func ConnectorToolsForRun(reg *connector.Registry, target address.Address, runID string, after func(event.Action) error) Tools {
 	return ToolsFunc(func(name string) (saigetypes.Tool, error) {
 		if reg == nil {
 			return nil, fmt.Errorf("%w: %q (no connector registry configured)", ErrNoSuchTool, name)
@@ -99,7 +99,7 @@ func StaticTools(tools ...saigetypes.Tool) Tools {
 // author writes and what every other tool protocol speaks), and saige's
 // ParameterSchema decodes that JSON directly. See parameterSchema for the
 // checks applied on top.
-func ActionTool(a connector.Action, target address.Address, after func(payload.Action) error) (saigetypes.Tool, error) {
+func ActionTool(a connector.Action, target address.Address, after func(event.Action) error) (saigetypes.Tool, error) {
 	schema, err := parameterSchema(a.Schema)
 	if err != nil {
 		return nil, fmt.Errorf("native: action %q: %w", a.Name, err)
@@ -117,7 +117,7 @@ func ActionTool(a connector.Action, target address.Address, after func(payload.A
 type actionTool struct {
 	action connector.Action
 	target address.Address
-	after  func(payload.Action) error
+	after  func(event.Action) error
 	def    saigetypes.ToolDef
 }
 
@@ -137,7 +137,7 @@ func (t *actionTool) Execute(ctx context.Context, args map[string]any) (string, 
 	}
 	res, invokeErr := t.action.Invoke(ctx, t.target, raw)
 
-	rec := payload.Action{
+	rec := event.Action{
 		Name:    t.action.Name,
 		Target:  t.target.String(),
 		Summary: res.Summary,

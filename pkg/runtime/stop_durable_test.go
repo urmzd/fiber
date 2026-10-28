@@ -26,18 +26,17 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
 
 // stopRecords returns the stop requests recorded on a run in the ledger.
-func (w *world) stopRecords(t *testing.T, runID string) []payload.StopRequest {
+func (w *world) stopRecords(t *testing.T, runID string) []event.StopRequest {
 	t.Helper()
 	_, records, err := w.ledger.Load(context.Background(), runID)
 	if errors.Is(err, drun.ErrNotFound) {
@@ -46,12 +45,12 @@ func (w *world) stopRecords(t *testing.T, runID string) []payload.StopRequest {
 	if err != nil {
 		t.Fatalf("Load(%s): %v", runID, err)
 	}
-	var out []payload.StopRequest
+	var out []event.StopRequest
 	for _, rec := range records {
 		if !strings.HasPrefix(rec.Key, "event:fiber.stop") {
 			continue
 		}
-		var body payload.StopRequest
+		var body event.StopRequest
 		if err := json.Unmarshal(rec.Output, &body); err != nil {
 			t.Fatalf("decode stop record: %v", err)
 		}
@@ -195,7 +194,7 @@ type stopsAsItFinishes struct {
 	stop func(runID string)
 }
 
-func (s *stopsAsItFinishes) Execute(_ context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (s *stopsAsItFinishes) Execute(_ context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	s.stop(req.RunID)
 	return runtime.Outcome{Text: "The whole answer.", Prompt: req.Text}, nil
 }
@@ -278,7 +277,7 @@ func TestAStopRacingCompletionEndsExactlyOneWayEverywhere(t *testing.T) {
 				t.Fatalf("run %d stopped but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Type, entries, out)
 			}
 		} else {
-			body, err := decode[payload.Lifecycle](last)
+			body, err := decode[lifecycle](last)
 			if err != nil || len(terminal) != 1 || last.Type != event.TypeCompleted || body.Text != out.Text ||
 				entries[1] != "assistant: "+out.Text {
 				t.Fatalf("run %d completed but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Type, entries, out)
@@ -483,7 +482,7 @@ type panicky struct {
 	runs int
 }
 
-func (p *panicky) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (p *panicky) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	p.mu.Lock()
 	p.runs++
 	first := p.runs == 1
@@ -543,7 +542,7 @@ func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 		w.stop(t, rt, "acme", runID, "", "")
 		w.work(t, rt, nil)
 		out := w.result(t, rt, runID)
-		if out.Stopped == nil || out.Stopped.Reason != agentrt.DefaultStopReason {
+		if out.Stopped == nil || out.Stopped.Reason != native.DefaultStopReason {
 			t.Fatalf("Output.Stopped = %+v, want the default reason", out.Stopped)
 		}
 		if got := entriesOf(t, w.threads, tg, runID); len(got) != 2 || got[0] != want {
@@ -561,7 +560,7 @@ func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 		exec.inFlight(t)
 		w.stop(t, rt, "acme", runID, "", "")
 		out := w.result(t, rt, runID)
-		if out.Stopped == nil || out.Stopped.Reason != agentrt.DefaultStopReason {
+		if out.Stopped == nil || out.Stopped.Reason != native.DefaultStopReason {
 			t.Fatalf("Output.Stopped = %+v, want the default reason", out.Stopped)
 		}
 		if got := entriesOf(t, w.threads, tg, runID); len(got) != 2 || got[0] != want {
@@ -582,7 +581,7 @@ func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 		}
 		w.stop(t, rt, "acme", runID, "", "")
 		out := w.result(t, rt, runID)
-		if out.Stopped == nil || out.Stopped.Reason != agentrt.DefaultStopReason {
+		if out.Stopped == nil || out.Stopped.Reason != native.DefaultStopReason {
 			t.Fatalf("Output.Stopped = %+v, want the default reason", out.Stopped)
 		}
 		if got := entriesOf(t, w.threads, tg, runID); len(got) != 2 || got[0] != want {
@@ -602,7 +601,7 @@ func sandboxWithPlane(t *testing.T, sp *specs, model saigetypes.Provider) (*runt
 	tools := tool.NewRegistry()
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	s, err := runtime.NewSandbox(plane, tools, sp, runtime.WithAgentOptions(
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil })))
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil })))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,7 +671,7 @@ func TestCancellingAWaitingTurnCancelsItsTask(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := s.Execute(ctx, withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x"}, rev),
-			func(context.Context, agentrt.Chunk) error { return nil })
+			func(context.Context, event.Body) error { return nil })
 		done <- err
 	}()
 	select {
@@ -728,18 +727,18 @@ func newCauseRecorder() *causeRecorder {
 	return &causeRecorder{started: make(chan struct{}), cause: make(chan error, 1)}
 }
 
-func (c *causeRecorder) delegate(ctx context.Context, _ runtime.Request, _, _ string, _ func(payload.Action) error) (string, error) {
+func (c *causeRecorder) delegate(ctx context.Context, _ runtime.Request, _, _ string, _ func(event.Action) error) (string, error) {
 	close(c.started)
 	<-ctx.Done()
 	c.cause <- context.Cause(ctx)
 	return "", ctx.Err()
 }
 
-func leadWithSpawn(sp *specs) agentrt.Revision {
+func leadWithSpawn(sp *specs) native.Revision {
 	sp.revise("helper", "Help.")
-	return sp.set(agentrt.Spec{
-		Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
-		Access: agentrt.Access{Spawn: []string{"helper"}},
+	return sp.set(native.Spec{
+		Name: "lead", Provider: native.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
+		Access: native.Access{Spawn: []string{"helper"}},
 	})
 }
 
@@ -785,7 +784,7 @@ func TestADelegatorCanTellAStopFromAnyOtherCancellation(t *testing.T) {
 		go func() {
 			defer close(done)
 			_, _ = exec.Execute(ctx, withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x"}, lead),
-				func(context.Context, agentrt.Chunk) error { return nil })
+				func(context.Context, event.Body) error { return nil })
 		}()
 		<-rec.started
 		cancel()

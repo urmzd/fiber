@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"encoding/json"
@@ -8,30 +8,29 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
-func decodeCall(t *testing.T, c agentrt.Chunk) payload.ToolCall {
+func decodeCall(t *testing.T, c event.Body) event.ToolCall {
 	t.Helper()
-	if c.Kind != envelope.KindToolCall {
-		t.Fatalf("kind is %s, want %s", c.Kind, envelope.KindToolCall)
+	if c.Type() != event.TypeToolCall {
+		t.Fatalf("kind is %s, want %s", c.Type(), event.TypeToolCall)
 	}
-	var body payload.ToolCall
-	if err := json.Unmarshal(c.Payload, &body); err != nil {
+	var body event.ToolCall
+	if err := json.Unmarshal(raw(c), &body); err != nil {
 		t.Fatalf("decode tool call: %v", err)
 	}
 	return body
 }
 
-func decodeDone(t *testing.T, c agentrt.Chunk) payload.ToolDone {
+func decodeDone(t *testing.T, c event.Body) event.ToolDone {
 	t.Helper()
-	if c.Kind != envelope.KindToolDone {
-		t.Fatalf("kind is %s, want %s", c.Kind, envelope.KindToolDone)
+	if c.Type() != event.TypeToolDone {
+		t.Fatalf("kind is %s, want %s", c.Type(), event.TypeToolDone)
 	}
-	var body payload.ToolDone
-	if err := json.Unmarshal(c.Payload, &body); err != nil {
+	var body event.ToolDone
+	if err := json.Unmarshal(raw(c), &body); err != nil {
 		t.Fatalf("decode tool done: %v", err)
 	}
 	return body
@@ -67,7 +66,7 @@ func TestToolEventsCarryTheCallsArguments(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tr := agentrt.NewTranslator()
+			tr := native.NewTranslator()
 			for _, d := range tc.model {
 				if c, ok := tr.Delta(d); ok {
 					if body := decodeCall(t, c); body.Arguments != nil {
@@ -98,7 +97,7 @@ func TestToolEventsCarryTheCallsArguments(t *testing.T) {
 func TestToolDoneCarriesTheArgumentsTheToolRanWith(t *testing.T) {
 	t.Parallel()
 
-	tr := agentrt.NewTranslator()
+	tr := native.NewTranslator()
 	tr.Delta(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "deploy"})
 	tr.Delta(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}})
 	tr.Delta(saigetypes.ToolExecStartDelta{ToolCallID: "c1", Name: "deploy"})
@@ -115,8 +114,8 @@ func TestToolDoneCarriesTheArgumentsTheToolRanWith(t *testing.T) {
 func TestOversizedToolArgumentsAreLeftOutAndSized(t *testing.T) {
 	t.Parallel()
 
-	big := strings.Repeat("x", payload.MaxToolArguments)
-	tr := agentrt.NewTranslator()
+	big := strings.Repeat("x", event.MaxToolArguments)
+	tr := native.NewTranslator()
 	tr.Delta(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "write"})
 	tr.Delta(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "write", Arguments: map[string]any{"body": big}}})
 
@@ -144,9 +143,9 @@ func TestToolArgumentsAreScrubbedBeforeTheyArePublished(t *testing.T) {
 	}
 	rev := offlineRevision(1, "")
 	rev.Spec.Tools = []string{"login"}
-	r, err := agentrt.New(rev,
-		agentrt.WithTools(agentrt.StaticTools(tool)),
-		agentrt.WithToolArguments(func(name string, args json.RawMessage) json.RawMessage {
+	r, err := native.New(rev,
+		native.WithTools(native.StaticTools(tool)),
+		native.WithToolArguments(func(name string, args json.RawMessage) json.RawMessage {
 			if name != "login" {
 				return args
 			}
@@ -158,37 +157,37 @@ func TestToolArgumentsAreScrubbedBeforeTheyArePublished(t *testing.T) {
 			out, _ := json.Marshal(m)
 			return out
 		}),
-		agentrt.WithScript(
+		native.WithScript(
 			agenttest.ToolCallResponse("c1", "login", map[string]any{"user": "ada", "password": "hunter2"}),
 			agenttest.TextResponse("done"),
 		))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	got, _ := collect(t, r, agentrt.Turn{Text: "log in"})
+	got, _ := collect(t, r, native.Turn{Text: "log in"})
 
 	const want = `{"password":"[redacted]","user":"ada"}`
 	var seen int
 	for _, c := range got {
 		var args json.RawMessage
-		switch c.Kind {
-		case envelope.KindToolCall:
+		switch c.Type() {
+		case event.TypeToolCall:
 			body := decodeCall(t, c)
-			if body.Phase != payload.PhaseExecuting {
+			if body.Phase != event.PhaseExecuting {
 				continue
 			}
 			args = body.Arguments
-		case envelope.KindToolDone:
+		case event.TypeToolDone:
 			args = decodeDone(t, c).Arguments
 		default:
 			continue
 		}
 		seen++
 		if string(args) != want {
-			t.Errorf("%s carries %s, want %s", c.Kind, args, want)
+			t.Errorf("%s carries %s, want %s", c.Type(), args, want)
 		}
-		if strings.Contains(string(c.Payload), "hunter2") {
-			t.Errorf("%s published the secret: %s", c.Kind, c.Payload)
+		if strings.Contains(string(raw(c)), "hunter2") {
+			t.Errorf("%s published the secret: %s", c.Type(), raw(c))
 		}
 	}
 	if seen != 2 {
@@ -204,12 +203,12 @@ func TestToolArgumentsAreScrubbedBeforeTheyArePublished(t *testing.T) {
 func TestAZeroTranslatorStillTranslates(t *testing.T) {
 	t.Parallel()
 
-	var tr agentrt.Translator
+	var tr native.Translator
 	tr.Delta(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "grep"})
 	tr.Delta(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "grep", Arguments: map[string]any{"path": "."}}})
 	c, ok := tr.Delta(saigetypes.ToolExecEndDelta{ToolCallID: "c1", Name: "grep"})
 	if !ok || string(decodeDone(t, c).Arguments) != `{"path":"."}` {
-		t.Fatalf("zero translator produced %s, %v", c.Payload, ok)
+		t.Fatalf("zero translator produced %s, %v", raw(c), ok)
 	}
 }
 
@@ -219,7 +218,7 @@ func TestAZeroTranslatorStillTranslates(t *testing.T) {
 func TestTheExecutingEventKeepsTheModelsArgumentsWhenTheToolRanFirst(t *testing.T) {
 	t.Parallel()
 
-	tr := agentrt.NewTranslator()
+	tr := native.NewTranslator()
 	tr.Delta(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "deploy"})
 	tr.Delta(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "deploy", Arguments: map[string]any{"env": "prod"}}})
 	tr.Ran("c1", "deploy", map[string]any{"env": "staging"})
@@ -243,7 +242,7 @@ func TestANestedCallsArgumentsAreKeptApartFromItsParents(t *testing.T) {
 	nested := func(d saigetypes.Delta) saigetypes.Delta {
 		return saigetypes.ToolExecDelta{ToolCallID: "c1", Inner: d}
 	}
-	tr := agentrt.NewTranslator()
+	tr := native.NewTranslator()
 	tr.Delta(saigetypes.PartStart{Index: 0, Kind: saigetypes.KindToolCall, ID: "c1", Name: "delegate"})
 	tr.Delta(saigetypes.PartEnd{Index: 0, Part: saigetypes.ToolCallPart{ID: "c1", Name: "delegate", Arguments: map[string]any{"who": "parent"}}})
 	tr.Delta(saigetypes.ToolExecStartDelta{ToolCallID: "c1", Name: "delegate"})

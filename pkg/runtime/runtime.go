@@ -5,7 +5,7 @@
 //
 //	anchor  the run survives a crash and replays from its ledger
 //	playscape  the turn executes inside a sandbox that enforces the agent's policy
-//	saige     the turn is an agent loop (through pkg/agentrt)
+//	saige     the turn is an agent loop (through pkg/turn/native)
 //	pkg/bus   every event fans out live to observers and sinks
 //
 // # Idempotency
@@ -132,15 +132,13 @@ import (
 	"github.com/urmzd/anchor"
 	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/event/legacy"
 	"github.com/urmzd/fiber/pkg/internal/pgrename"
 	"github.com/urmzd/fiber/pkg/thread"
-	"github.com/urmzd/fiber/pkg/topic"
+	turnrt "github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 
 	"github.com/urmzd/fiber/pkg/attachment"
 )
@@ -193,24 +191,6 @@ type Definitions interface {
 	Resolve(ctx context.Context, tenant, name string) (definition.Pin, error)
 	ResolveAt(ctx context.Context, tenant, name, version string) (definition.Pin, error)
 	Verify(ctx context.Context, tenant string, pin definition.Pin) (definition.Loaded, error)
-}
-
-// Executor runs one turn in isolation and streams what it produces.
-//
-// It is an interface because isolation is a deployment decision: Sandbox runs
-// the turn as a playscape task under the pinned definition's NGAC policy, and that
-// is the implementation a deployment should use. A caller that has already
-// isolated its process differently can supply another.
-//
-// emit is called on the caller's goroutine, in order. Returning an error from it
-// aborts the turn.
-//
-// ctx carries the actor the run acts for (envelope.ActorFrom), read from the
-// run's durable record. An executor that hands the turn to another goroutine
-// or process carries that actor across itself, as Sandbox does, and never
-// takes one from the turn's input.
-type Executor interface {
-	Execute(ctx context.Context, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error)
 }
 
 // Input is a run's durable input: the event that triggered it, the agent it
@@ -274,20 +254,21 @@ type Output struct {
 	// says why and by whom. Text is then the partial answer and LastSeq is
 	// the sequence of the stopped event. The ledger records such a run as
 	// succeeded: it ended, it did not fail, and it is never retried.
-	Stopped *agentrt.Stop `json:"stopped,omitempty"`
+	Stopped *native.Stop `json:"stopped,omitempty"`
 	// Usage is what the run spent: every model call of every attempt, and
 	// everything it delegated, each counted once (see usage.go). It is in
 	// the ledger with the rest of the output, so it survives a restart. Nil
 	// when the run made no model call, and for an output recorded before
 	// usage was.
-	Usage *payload.RunUsage `json:"usage,omitempty"`
+	Usage *event.RunUsage `json:"usage,omitempty"`
 }
 
-// Request is one turn handed to an Executor: the trigger's content, plus the
-// exact definition to run it with.
+// Request is one turn as the runtime runs it: the trigger's content, plus the
+// exact definition to run it with. A turn.Runtime reads it from its context
+// with RequestFrom.
 //
 // Definition is a resolved, pinned value rather than a name and a version. An
-// executor must not re-resolve it: it may be running in a sandbox, in another
+// turn runtime must not re-resolve it: it may be running in a sandbox, in another
 // process, or on another machine, and "the definition to run" is not a question
 // it is allowed to answer.
 type Request struct {
@@ -312,15 +293,15 @@ type Request struct {
 	// Meta is trigger context.
 	Meta map[string]string `json:"meta,omitempty"`
 	// History is the thread's conversation so far, oldest first, as pinned at
-	// accept time. Like Definition it is a resolved value: an executor replays
+	// accept time. Like Definition it is a resolved value: a turn replays
 	// it and must not go looking for a newer one.
-	History []agentrt.Message `json:"history,omitempty"`
+	History []native.Message `json:"history,omitempty"`
 
 	// Attachments are the files that arrived with the trigger, as references. A
 	// delegated sub-task inherits its parent's, under the same tenant.
 	Attachments []attachment.Attachment `json:"attachments,omitempty"`
 	// Definition is the pinned definition to execute, compiled for a turn.
-	Definition agentrt.Revision `json:"definition"`
+	Definition native.Revision `json:"definition"`
 	// Pin is what Definition was verified against.
 	Pin definition.Pin `json:"pin"`
 	// Policy is the pinned definition's policy: the sandbox's NGAC grants
@@ -330,12 +311,12 @@ type Request struct {
 	// in, so a delegated sub-task can be awaited in the right place.
 	Service string `json:"service,omitempty"`
 	// Accounting is the prefix the turn's model calls are keyed under when
-	// saige reports no key of its own (see agentrt.Turn.Accounting). Empty
+	// saige reports no key of its own (see native.Turn.Accounting). Empty
 	// for a durable run, which is keyed "<run>/a<attempt>"; a delegated
 	// sub-task is handed its parent's prefix extended by its own name.
 	Accounting string `json:"accounting,omitempty"`
 	// Park lets the turn end at a question for a person (see
-	// agentrt.Turn.Park). The runtime sets it for a durable run when it can
+	// native.Turn.Park). The runtime sets it for a durable run when it can
 	// record a question and its answer, which takes WithStopLedger. A
 	// delegated sub-task never has it.
 	Park bool `json:"park,omitempty"`
@@ -344,7 +325,7 @@ type Request struct {
 	// Resume continues a turn that parked, with the answers its pending tool
 	// calls have. Like Definition and History it is a resolved value, read
 	// from the run's records.
-	Resume *agentrt.Parked `json:"resume,omitempty"`
+	Resume *native.Parked `json:"resume,omitempty"`
 	// ChildRuns makes a delegation a child run the turn parks on, rather
 	// than work it waits for (WithChildRuns). Only a durable run that can
 	// park has it.
@@ -357,14 +338,14 @@ func (r Request) Agent() string { return r.Definition.Spec.Name }
 // Version returns the pinned definition version.
 func (r Request) Version() string { return r.Definition.Version }
 
-// Outcome is what an Executor produced.
+// Outcome is what one turn produced.
 type Outcome struct {
 	// Text is the agent's final answer.
 	Text string `json:"text"`
 	// Prompt is the request message exactly as the model was sent it:
 	// trigger metadata, retrieved passages, and the request's text. It is what
 	// the thread journal records as the user's message, so that the next run
-	// in the thread replays the same bytes this one sent. An executor that
+	// in the thread replays the same bytes this one sent. A turn that
 	// leaves it empty has the trigger as the catalog renders it recorded
 	// instead, which keeps the conversation and gives up the shared request
 	// prefix.
@@ -381,26 +362,26 @@ type Outcome struct {
 	StoreError string `json:"store_error,omitempty"`
 	// Stopped is set when the turn ended because it was asked to stop. Text
 	// is then what had been answered so far, which may be nothing. An
-	// executor sets it instead of returning an error: a stopped turn must not
+	// turn sets it instead of returning an error: a stopped turn must not
 	// be retried.
-	Stopped *agentrt.Stop `json:"stopped,omitempty"`
-	// StopRecorded is set by the runtime, never by an executor: a stop
+	Stopped *native.Stop `json:"stopped,omitempty"`
+	// StopRecorded is set by the runtime, never by a turn: a stop
 	// request is recorded on the run in the ledger (see WithStopLedger),
 	// whether or not the turn was stopped by it, so the workflow body claims
 	// that record and the ledger has no record left over that no call read.
 	StopRecorded bool `json:"stop_recorded,omitempty"`
-	// Usage is set by the runtime, never by an executor: what the run spent
+	// Usage is set by the runtime, never by a turn: what the run spent
 	// up to and including this outcome, counted from the usage events the
-	// attempts published (see usage.go). Whatever an executor puts here is
+	// attempts published (see usage.go). Whatever a turn puts here is
 	// replaced.
-	Usage *payload.RunUsage `json:"usage,omitempty"`
+	Usage *event.RunUsage `json:"usage,omitempty"`
 	// UsageAttempts is set by the runtime: the earlier attempts whose usage
 	// records Usage counts, which the workflow body claims.
 	UsageAttempts []int `json:"usage_attempts,omitempty"`
 	// Parked is set when the turn ended at a question for a person. Text is
-	// then what it had said so far. An executor sets it from
-	// agentrt.Result.Parked.
-	Parked *agentrt.Parked `json:"parked,omitempty"`
+	// then what it had said so far. A turn sets it from
+	// native.Result.Parked.
+	Parked *native.Parked `json:"parked,omitempty"`
 }
 
 // Acceptance is what a caller learns when a run is accepted. It carries the
@@ -446,7 +427,7 @@ type Runtime struct {
 	client *anchor.Client
 	defs   Definitions
 	bus    Bus
-	exec   Executor
+	rt     turnrt.Runtime
 	stride uint64
 	logger *slog.Logger
 	now    func() time.Time
@@ -482,6 +463,18 @@ type Runtime struct {
 
 // Option configures a Runtime.
 type Option func(*Runtime)
+
+// WithRuntime sets what runs each turn. Without it, or with nil, a turn runs
+// the native saige runtime inside a local playscape sandbox
+// (sandbox.Sandboxed(native)). A Sandbox is the runtime a deployment with
+// connector tools, delegation and child runs uses.
+func WithRuntime(rt turnrt.Runtime) Option {
+	return func(r *Runtime) {
+		if rt != nil {
+			r.rt = rt
+		}
+	}
+}
 
 // WithStride sets the per-attempt sequence band size (default DefaultStride).
 func WithStride(n uint64) Option {
@@ -553,10 +546,10 @@ func WithMessageID(fn func(event.Envelope) string) Option {
 //
 // The durable activities are registered in a registry OWNED BY THIS INSTANCE
 // rather than anchor's default one. Two runtimes in one process (a test suite,
-// a fleet serving two tenants' agents with different executors) would otherwise
+// a fleet serving two tenants' agents with different turn runtimes) would otherwise
 // panic on a duplicate activity name at construction. Pass Registry() to the
 // worker that consumes these runs.
-func New(client *anchor.Client, defs Definitions, b Bus, exec Executor, opts ...Option) (*Runtime, error) {
+func New(client *anchor.Client, defs Definitions, b Bus, opts ...Option) (*Runtime, error) {
 	switch {
 	case client == nil:
 		return nil, fmt.Errorf("%w: no anchor client", ErrInvalid)
@@ -564,14 +557,11 @@ func New(client *anchor.Client, defs Definitions, b Bus, exec Executor, opts ...
 		return nil, fmt.Errorf("%w: no definitions; a run cannot pin a definition it cannot resolve", ErrInvalid)
 	case b == nil:
 		return nil, fmt.Errorf("%w: no bus; a run whose events nobody can see has not done its job", ErrInvalid)
-	case exec == nil:
-		return nil, fmt.Errorf("%w: no executor", ErrInvalid)
 	}
 	r := &Runtime{
 		client:   client,
 		defs:     defs,
 		bus:      b,
-		exec:     exec,
 		stride:   DefaultStride,
 		logger:   slog.Default(),
 		now:      time.Now,
@@ -580,7 +570,7 @@ func New(client *anchor.Client, defs Definitions, b Bus, exec Executor, opts ...
 		stopGrace: DefaultStopGrace,
 		stopPoll:  DefaultStopPoll,
 
-		questionTTL: agentrt.DefaultQuestionTTL,
+		questionTTL: native.DefaultQuestionTTL,
 	}
 	// Stopping needs the reading half of the bus. It is discovered rather
 	// than configured, as a connector's roles are: every backend in pkg/bus
@@ -588,6 +578,9 @@ func New(client *anchor.Client, defs Definitions, b Bus, exec Executor, opts ...
 	r.control, _ = b.(Subscriber)
 	for _, o := range opts {
 		o(r)
+	}
+	if r.rt == nil {
+		r.rt = defaultRuntime()
 	}
 	if r.control == nil {
 		// Said once, here, rather than discovered at the first stop: a bus
@@ -658,11 +651,11 @@ func (r *Runtime) Accept(ctx context.Context, trigger event.Envelope, subscriber
 // version, for a child run.
 func (r *Runtime) start(ctx context.Context, in Input, version string) (Acceptance, error) {
 	id := in.Trigger.ID
-	if in.Subscriber == topic.ControlName {
+	if in.Subscriber == ReservedName {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", id, ErrInvalid, in.Subscriber)
 	}
 	runID := in.runID()
-	if _, err := topic.Run(in.Subscriber, runID); err != nil {
+	if err := CheckRun(in.Subscriber, runID); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", id, err)
 	}
 	var (
@@ -754,7 +747,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		parks++
 		at.answer = res.Answer
 		next := *out.Parked
-		next.Answers = make(map[string]payload.Answer, len(out.Parked.Answers)+1)
+		next.Answers = make(map[string]event.Answer, len(out.Parked.Answers)+1)
 		for k, v := range out.Parked.Answers {
 			next.Answers[k] = v
 		}
@@ -809,7 +802,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// recorded outcome, so a replay announces the same stop.
 		if err := at.publish(ctx, event.Stopped{
 			Attempt: attempt, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
-			Usage: eventUsage(out.Usage),
+			Usage: out.Usage,
 		}); err != nil {
 			return Output{}, err
 		}
@@ -821,7 +814,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	}
 
 	if err := at.publish(ctx, event.Completed{
-		Attempt: attempt, Text: out.Text, Usage: eventUsage(out.Usage),
+		Attempt: attempt, Text: out.Text, Usage: out.Usage,
 	}); err != nil {
 		return Output{}, err
 	}
@@ -865,7 +858,7 @@ type attemptLog struct {
 	opened  bool
 	// answer is the answer this attempt resumed with, carried on its
 	// resumed event.
-	answer *payload.Answer
+	answer *event.Answer
 }
 
 type openerKey struct{}
@@ -880,7 +873,7 @@ func (a *attemptLog) open(ctx context.Context) error {
 		// Attempt 1 started the work; every later attempt resumed it, whether
 		// it was parked on a question or interrupted by a crash. The answer,
 		// when there is one, says which.
-		body = event.Resumed{Attempt: a.attempt, Answer: eventAnswer(a.answer)}
+		body = event.Resumed{Attempt: a.attempt, Answer: a.answer}
 	}
 	if err := a.r.publish(ctx, a.in, a.band.open, body); err != nil {
 		return err
@@ -925,7 +918,7 @@ func (r *Runtime) runResume(ctx context.Context, c Continue) (Outcome, error) {
 
 // executeAgent is the agent activity's body, for a fresh turn or for the
 // continuation of a parked one.
-func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Parked) (Outcome, error) {
+func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *native.Parked) (Outcome, error) {
 	// This attempt is doing real work: it says so before anything else.
 	if open, ok := ctx.Value(openerKey{}).(func(context.Context) error); ok {
 		if err := open(ctx); err != nil {
@@ -988,16 +981,12 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	execCtx = context.WithValue(execCtx, childQuestionKey{}, r.childQuestion(in.Trigger.Tenant, req.RunID))
 	// The turn acts for the actor on the run's record, read here and not
 	// from anything the turn produces, so a model cannot name someone else.
-	// It travels in the context rather than in the Request: an executor
+	// It travels in the context rather than in the Request: a turn
 	// that acts for a person (a tool source opening a session with that
-	// person's own credential) reads envelope.ActorFrom, and the Request,
+	// person's own credential) reads event.ActorFrom, and the Request,
 	// which a sandbox serializes into its task, never carries it.
-	execCtx = envelope.WithActor(execCtx, in.Actor())
-	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
-		body, err := agentrt.BodyOf(c)
-		if err != nil {
-			return fmt.Errorf("runtime: run %s: %w", req.RunID, err)
-		}
+	execCtx = event.WithActor(execCtx, in.Actor())
+	out, err := r.execute(execCtx, in, req, func(ctx context.Context, body event.Body) error {
 		// A call is counted when it is reported, before it is published:
 		// the tokens were spent whether or not the bus takes the event.
 		meter.observe(body)
@@ -1024,7 +1013,7 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	if err != nil {
 		return out, fmt.Errorf("runtime: run %s: agent %q version %s: %w", req.RunID, rev.Spec.Name, rev.Version, err)
 	}
-	var tally payload.Tally
+	var tally event.Tally
 	for i := range prior {
 		prior[i].into(&tally)
 	}
@@ -1062,8 +1051,8 @@ func (r *Runtime) pinned(ctx context.Context, in Input) (definition.Loaded, erro
 }
 
 // pinnedOf is a verified pin as the definition a turn runs.
-func pinnedOf(l definition.Loaded) agentrt.Revision {
-	return agentrt.Revision{Name: l.Pin.Name, Version: l.Pin.Version, Digest: l.Pin.Digest, Spec: l.Agent.Spec}
+func pinnedOf(l definition.Loaded) native.Revision {
+	return native.Revision{Name: l.Pin.Name, Version: l.Pin.Version, Digest: l.Pin.Digest, Spec: l.Agent.Spec}
 }
 
 // pinHistory returns the sequence number a run is pinned to: the head of its
@@ -1106,7 +1095,7 @@ func (r *Runtime) pinHistory(ctx context.Context, in Input, runID string) (uint6
 // moved: replaying identical code against a journal that lost entries cannot
 // bring them back, and running with a shorter history would be an agent that
 // forgot without saying so.
-func (r *Runtime) pinnedHistory(ctx context.Context, in Input) ([]agentrt.Message, error) {
+func (r *Runtime) pinnedHistory(ctx context.Context, in Input) ([]native.Message, error) {
 	if in.HistorySeq == 0 {
 		return nil, nil
 	}
@@ -1135,10 +1124,10 @@ func (r *Runtime) pinnedHistory(ctx context.Context, in Input) ([]agentrt.Messag
 // journal by reconciliation: a thread has several people in it, and "ship it"
 // reads differently depending on who said it. The label is a function of the
 // stored entry alone, so it renders the same on every run.
-func historyOf(entries []thread.Entry) []agentrt.Message {
-	out := make([]agentrt.Message, 0, len(entries))
+func historyOf(entries []thread.Entry) []native.Message {
+	out := make([]native.Message, 0, len(entries))
 	for _, e := range entries {
-		m := agentrt.Message{Role: agentrt.Role(e.Role), Text: e.Text}
+		m := native.Message{Role: native.Role(e.Role), Text: e.Text}
 		if e.Role == thread.RoleUser {
 			m.Attachments = e.Attachments
 		}
@@ -1195,7 +1184,7 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	if strings.TrimSpace(answer) != "" {
 		entries = append(entries, thread.Entry{
 			Role: thread.RoleAssistant, Text: answer,
-			Actor: envelope.Actor{ID: in.Subscriber, Bot: true},
+			Actor: event.Actor{ID: in.Subscriber, Bot: true},
 			RunID: runID, At: r.now(),
 		})
 	}

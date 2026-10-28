@@ -29,14 +29,12 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/durable"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -219,7 +217,7 @@ func (w *world) restarted() *world {
 	return &again
 }
 
-func (w *world) runtime(t *testing.T, exec runtime.Executor, opts ...runtime.Option) *runtime.Runtime {
+func (w *world) runtime(t *testing.T, exec runtime.Fake, opts ...runtime.Option) *runtime.Runtime {
 	t.Helper()
 	base := []runtime.Option{runtime.WithThreads(w.threads)}
 	if w.log != nil {
@@ -232,7 +230,7 @@ func (w *world) runtime(t *testing.T, exec runtime.Executor, opts ...runtime.Opt
 		}
 	}
 	opts = append(base, opts...)
-	rt, err := runtime.New(anchor.New(w.ledger, w.queue), w.specs, w.bus, exec, opts...)
+	rt, err := runtime.New(anchor.New(w.ledger, w.queue), w.specs, w.bus, append([]runtime.Option{runtime.WithRuntime(runtime.AsRuntime(exec))}, opts...)...)
 	if err != nil {
 		t.Fatalf("runtime.New: %v", err)
 	}
@@ -324,7 +322,7 @@ func newPatient(says ...string) *patient {
 	return &patient{says: says, waiting: make(chan struct{}), finish: make(chan struct{})}
 }
 
-func (p *patient) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (p *patient) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	p.mu.Lock()
 	p.runs++
 	fail := p.failures > 0
@@ -337,17 +335,13 @@ func (p *patient) Execute(ctx context.Context, req runtime.Request, emit func(co
 	}
 
 	for _, s := range p.says {
-		b, err := payload.Encode(payload.Text{Text: s})
-		if err != nil {
-			return runtime.Outcome{}, err
-		}
-		if err := emit(ctx, agentrt.Chunk{Kind: envelope.KindText, Payload: b}); err != nil {
+		if err := emit(ctx, event.Text{Text: s}); err != nil {
 			return runtime.Outcome{}, err
 		}
 	}
 	p.once.Do(func() { close(p.waiting) })
 
-	var signal <-chan agentrt.Stop
+	var signal <-chan native.Stop
 	if !p.deaf {
 		signal = runtime.StopSignal(ctx)
 	}
@@ -445,7 +439,7 @@ func sandboxOf(t *testing.T, sp *specs, models map[string]saigetypes.Provider, o
 	tools := tool.NewRegistry()
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	opts = append([]runtime.SandboxOption{runtime.WithAgentOptions(
-		agentrt.WithProvider(agentrt.ProviderOffline, func(spec agentrt.Spec) (saigetypes.Provider, error) {
+		native.WithProvider(native.ProviderOffline, func(spec native.Spec) (saigetypes.Provider, error) {
 			p, ok := models[spec.Name]
 			if !ok {
 				return nil, fmt.Errorf("no model for %q", spec.Name)
@@ -459,9 +453,9 @@ func sandboxOf(t *testing.T, sp *specs, models map[string]saigetypes.Provider, o
 	return s
 }
 
-func stoppedBody(t *testing.T, e event.Envelope) payload.Stopped {
+func stoppedBody(t *testing.T, e event.Envelope) event.Stopped {
 	t.Helper()
-	body, err := decode[payload.Stopped](e)
+	body, err := decode[event.Stopped](e)
 	if err != nil {
 		t.Fatalf("decode %s: %v", e.Type, err)
 	}
@@ -486,7 +480,7 @@ func ended(t *testing.T, events []event.Envelope) event.Envelope {
 		case event.TypeCompleted:
 			t.Fatalf("a stopped run published lifecycle.completed: %v", kinds)
 		case event.TypeFailed:
-			body, err := decode[payload.Lifecycle](e)
+			body, err := decode[lifecycle](e)
 			if err != nil || body.Terminal {
 				t.Fatalf("a stopped run published a terminal lifecycle.failed: %v", kinds)
 			}
@@ -535,7 +529,7 @@ func TestAStoppedRunKeepsItsPartialAnswerAndTheNextTurnIsShownIt(t *testing.T) {
 	w.stop(t, rt, "acme", runID, "Stopped by a user", "slack:U1")
 
 	out := w.result(t, rt, runID)
-	if out.Stopped == nil || *out.Stopped != (agentrt.Stop{Reason: "Stopped by a user", By: "slack:U1"}) {
+	if out.Stopped == nil || *out.Stopped != (native.Stop{Reason: "Stopped by a user", By: "slack:U1"}) {
 		t.Fatalf("Output.Stopped = %+v, want the reason and the asker", out.Stopped)
 	}
 	if out.Text != "The deploy failed because" {
@@ -554,7 +548,7 @@ func TestAStoppedRunKeepsItsPartialAnswerAndTheNextTurnIsShownIt(t *testing.T) {
 		t.Errorf("lifecycle.stopped usage = %+v, want the one call that was cut short", body.Usage)
 	}
 	body.Usage = nil
-	want := payload.Stopped{Attempt: 1, Reason: "Stopped by a user", By: "slack:U1", Text: "The deploy failed because"}
+	want := event.Stopped{Attempt: 1, Reason: "Stopped by a user", By: "slack:U1", Text: "The deploy failed because"}
 	if body != want {
 		t.Errorf("lifecycle.stopped = %+v, want %+v", body, want)
 	}
@@ -969,9 +963,9 @@ func TestStoppingAParentCancelsTheSubTaskItIsWaitingOn(t *testing.T) {
 	w := newWorld(t)
 	w.specs.revise("helper", "Help.")
 	// The spawn grant is on the stored version, so the pinned lookup sees it.
-	w.specs.set(agentrt.Spec{
-		Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
-		Access: agentrt.Access{Spawn: []string{"helper"}},
+	w.specs.set(native.Spec{
+		Name: "lead", Provider: native.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
+		Access: native.Access{Spawn: []string{"helper"}},
 	})
 
 	helper := newHeldModel("Counting")
@@ -1060,7 +1054,7 @@ func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testin
 	if e.Seq != 0 {
 		t.Error("the request is sequenced; a consumer tracking sequences per run would confuse it with the run's own events")
 	}
-	body, err := decode[payload.StopRequest](e)
+	body, err := decode[event.StopRequest](e)
 	if err != nil {
 		t.Fatal(err)
 	}

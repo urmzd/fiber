@@ -151,7 +151,7 @@ func ollamaProvider(spec Spec) (saigetypes.Provider, error) {
 // EnvOpenAIBaseURL and EnvOpenAIKey. A deployment that talks to more servers
 // registers each under its own name with WithOpenAICompatible:
 //
-//	agentrt.WithOpenAICompatible(agentrt.OpenAICompatible{
+//	native.WithOpenAICompatible(native.OpenAICompatible{
 //		Name:    "vllm",
 //		BaseURL: "http://gpu-box:8000/v1",
 //	})

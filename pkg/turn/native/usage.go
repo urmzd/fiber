@@ -6,7 +6,7 @@ import (
 
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // DefaultAccounting is the prefix a turn keys its calls under when the caller
@@ -103,9 +103,9 @@ func (a *accountant) capsFor(responseModel string) (saigetypes.ModelCapabilities
 // call it replayed. Those tokens were not spent again: the call is reported
 // with zero tokens, zero requests and no cost, and flagged, which is how saige
 // itself settles it.
-func (a *accountant) call(d saigetypes.UsageDelta) payload.UsageCall {
+func (a *accountant) call(d saigetypes.UsageDelta) event.UsageCall {
 	a.calls++
-	c := payload.UsageCall{
+	c := event.UsageCall{
 		// Always this turn's own key, never saige's: saige keeps its id
 		// stable across a durable replay of its own, so two attempts' real
 		// calls could share it and be counted once.
@@ -137,7 +137,7 @@ func (a *accountant) call(d saigetypes.UsageDelta) payload.UsageCall {
 		if currency == "" {
 			currency = saigetypes.DefaultCurrency
 		}
-		c.Cost = &payload.Cost{Micros: int64(p.Cost(billed)), Currency: currency, AsOf: p.AsOf}
+		c.Cost = &event.Cost{Micros: int64(p.Cost(billed)), Currency: currency, AsOf: p.AsOf}
 	}
 	return c
 }

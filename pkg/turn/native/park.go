@@ -14,7 +14,7 @@ import (
 	"github.com/urmzd/saige/agent/provider/wrapper"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Parking a turn on a person.
@@ -79,7 +79,7 @@ const MaxOptions = 32
 // needs to continue it.
 type Parked struct {
 	// Question is what the turn is waiting on a person for.
-	Question payload.Question `json:"question"`
+	Question event.Question `json:"question"`
 	// Prompt is the request the turn sent, exactly: a continuation sends it
 	// again rather than rendering or retrieving anew.
 	Prompt string `json:"prompt"`
@@ -104,14 +104,14 @@ type Parked struct {
 	Pending json.RawMessage `json:"pending"`
 	// Answers are the answers the pending batch already has, by tool call
 	// id: earlier questions about the same message.
-	Answers map[string]payload.Answer `json:"answers,omitempty"`
+	Answers map[string]event.Answer `json:"answers,omitempty"`
 }
 
 // parkedReason is what the hooks that end a turn at its question tell saige.
 // It never reaches a caller: the turn reports Result.Parked instead.
 const parkedReason = "waiting on a person"
 
-// AskPersonTool returns the ask_person tool. agentrt registers it for any
+// AskPersonTool returns the ask_person tool. native registers it for any
 // agent whose spec names it; a host can register it in a catalog of its own
 // too.
 func AskPersonTool() saigetypes.Tool { return askPerson{} }
@@ -151,7 +151,7 @@ func (askPerson) Execute(ctx context.Context, args map[string]any) (string, erro
 		return "", err
 	}
 	info, _ := saigetypes.ToolCallInfoFromContext(ctx)
-	answers, _ := ctx.Value(answersKey{}).(map[string]payload.Answer)
+	answers, _ := ctx.Value(answersKey{}).(map[string]event.Answer)
 	a, ok := answers[info.ID]
 	if !ok {
 		return "", errors.New("no person can be asked from here; carry on without the answer")
@@ -177,7 +177,7 @@ type ApprovalRequest struct {
 	// Prompt is the question, for a person. Empty asks "Allow <agent> to
 	// call <tool>?".
 	Prompt string
-	// AskedOf is a hint at who should answer, as on payload.Question. It
+	// AskedOf is a hint at who should answer, as on event.Question. It
 	// admits nobody.
 	AskedOf string
 	// Approvers, when set, are the only people who may answer this call's
@@ -215,7 +215,7 @@ type Approving interface {
 // PersonScoped is a tool that may run with the credential of the person the
 // turn acts for, as a person-scoped MCP provider's tools do (pkg/mcptools).
 // ActsForPerson reports whether it does. An approval of a call to one says
-// so (payload.QuestionTool.ActsForPerson), and the runtime takes edited
+// so (event.QuestionTool.ActsForPerson), and the runtime takes edited
 // arguments for it only from that person.
 type PersonScoped interface {
 	ActsForPerson() bool
@@ -288,17 +288,17 @@ func cleanApprovers(in []string) []string {
 // call to it, as at a question, with the question AwaitQuestion describes,
 // and the continuation runs the call with the answer it was given (AnswerFor).
 type Awaiting interface {
-	AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool)
+	AwaitQuestion(call saigetypes.ToolCallPart) (event.Question, bool)
 }
 
 // AnswerFor returns the answer the tool call ctx belongs to was continued
 // with, for an Awaiting tool's Execute.
-func AnswerFor(ctx context.Context) (payload.Answer, bool) {
+func AnswerFor(ctx context.Context) (event.Answer, bool) {
 	info, ok := saigetypes.ToolCallInfoFromContext(ctx)
 	if !ok {
-		return payload.Answer{}, false
+		return event.Answer{}, false
 	}
-	answers, _ := ctx.Value(answersKey{}).(map[string]payload.Answer)
+	answers, _ := ctx.Value(answersKey{}).(map[string]event.Answer)
 	a, ok := answers[awaitKey(info.ID)]
 	return a, ok
 }
@@ -390,11 +390,11 @@ type parker struct {
 	scope   string
 	ttl     time.Duration
 	now     func() time.Time
-	answers map[string]payload.Answer
+	answers map[string]event.Answer
 
 	mu       sync.Mutex
 	parking  bool
-	question *payload.Question
+	question *event.Question
 	callID   string
 	pending  *saigetypes.AssistantMessage
 	batch    map[string]bool
@@ -438,7 +438,7 @@ func (p *parker) afterModel(msg saigetypes.AssistantMessage) {
 			calls = append(calls, tc)
 		}
 	}
-	var q *payload.Question
+	var q *event.Question
 	var callID string
 	for _, tc := range calls {
 		if _, answered := p.answers[tc.ID]; !answered {
@@ -472,24 +472,24 @@ func (p *parker) afterModel(msg saigetypes.AssistantMessage) {
 }
 
 // need reports the question a call puts to a person, if it puts one.
-func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
+func (p *parker) need(tc saigetypes.ToolCallPart) (event.Question, bool) {
 	now := p.now().UTC()
-	q := payload.Question{Agent: p.agent, At: now, ExpiresAt: now.Add(p.ttl)}
+	q := event.Question{Agent: p.agent, At: now, ExpiresAt: now.Add(p.ttl)}
 	if tc.Name == AskPersonToolName {
 		a, err := parseAsk(tc.Arguments)
 		if err != nil {
-			return payload.Question{}, false
+			return event.Question{}, false
 		}
 		q.Prompt, q.AskedOf = a.question, a.askedOf
 		if len(a.options) > 0 {
-			q.Kind, q.Options = payload.QuestionChoice, a.options
+			q.Kind, q.Options = event.QuestionChoice, a.options
 			if a.def != "" {
-				q.Default = &payload.Answer{Choice: a.def, Expired: true}
+				q.Default = &event.Answer{Choice: a.def, Expired: true}
 			}
 		} else {
-			q.Kind = payload.QuestionReply
+			q.Kind = event.QuestionReply
 			if a.def != "" {
-				q.Default = &payload.Answer{Text: a.def, Expired: true}
+				q.Default = &event.Answer{Text: a.def, Expired: true}
 			}
 		}
 		q.ID = saigetypes.InterruptID(p.scope, nil, q.Kind, tc.ID)
@@ -500,7 +500,7 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 	}
 	if a, t, ok := approvingOf(p.tools, tc.Name); ok {
 		if req, ok := a.Approval(tc); ok {
-			q.Kind = payload.QuestionApproval
+			q.Kind = event.QuestionApproval
 			q.Prompt, q.AskedOf = clipText(req.Prompt), clipText(req.AskedOf)
 			q.Approvers = cleanApprovers(req.Approvers)
 			q.SelfApproval = req.SelfApproval && len(q.Approvers) > 0
@@ -512,13 +512,13 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 	}
 	t, ok := p.tools.Get(tc.Name)
 	if !ok {
-		return payload.Question{}, false
+		return event.Question{}, false
 	}
 	marked, ok := t.(*saigetypes.MarkedTool)
 	if !ok || len(marked.Markers) == 0 {
-		return payload.Question{}, false
+		return event.Question{}, false
 	}
-	q.Kind = payload.QuestionApproval
+	q.Kind = event.QuestionApproval
 	for _, m := range marked.Markers {
 		if q.Prompt == "" {
 			q.Prompt = clipText(m.Message)
@@ -532,37 +532,37 @@ func (p *parker) need(tc saigetypes.ToolCallPart) (payload.Question, bool) {
 
 // approval completes an approval question about tc: the default prompt, the
 // call, its id, and a denial as the default on expiry.
-func (p *parker) approval(q payload.Question, tc saigetypes.ToolCallPart, t saigetypes.Tool) payload.Question {
+func (p *parker) approval(q event.Question, tc saigetypes.ToolCallPart, t saigetypes.Tool) event.Question {
 	if q.Prompt == "" {
 		q.Prompt = fmt.Sprintf("Allow %s to call %s?", p.agent, tc.Name)
 	}
 	args, _ := json.Marshal(tc.Arguments)
 	schema, _ := json.Marshal(t.Definition().Parameters)
-	q.Tool = &payload.QuestionTool{Name: tc.Name, CallID: tc.ID, Arguments: args, Schema: schema, ActsForPerson: actsForPerson(t)}
+	q.Tool = &event.QuestionTool{Name: tc.Name, CallID: tc.ID, Arguments: args, Schema: schema, ActsForPerson: actsForPerson(t)}
 	q.ID = saigetypes.InterruptID(p.scope, nil, q.Kind, tc.ID)
-	q.Default = &payload.Answer{QuestionID: q.ID, Decision: payload.DecisionDeny, Expired: true,
+	q.Default = &event.Answer{QuestionID: q.ID, Decision: event.DecisionDeny, Expired: true,
 		Note: "nobody answered before the question expired"}
 	return q
 }
 
 // await reports the wait a call to an Awaiting tool parks on.
-func (p *parker) await(tc saigetypes.ToolCallPart) (payload.Question, bool) {
+func (p *parker) await(tc saigetypes.ToolCallPart) (event.Question, bool) {
 	t, ok := p.tools.Get(tc.Name)
 	if !ok {
-		return payload.Question{}, false
+		return event.Question{}, false
 	}
 	if marked, ok := t.(*saigetypes.MarkedTool); ok {
 		t = marked.Inner
 	}
 	aw, ok := t.(Awaiting)
 	if !ok {
-		return payload.Question{}, false
+		return event.Question{}, false
 	}
 	q, ok := aw.AwaitQuestion(tc)
 	if !ok {
-		return payload.Question{}, false
+		return event.Question{}, false
 	}
-	q.Kind = payload.QuestionDelegation
+	q.Kind = event.QuestionDelegation
 	q.Agent, q.At = p.agent, p.now().UTC()
 	q.ExpiresAt, q.Default = time.Time{}, nil
 	q.ID = saigetypes.InterruptID(p.scope, nil, q.Kind, tc.ID)
@@ -583,7 +583,7 @@ func (p *parker) holds(callID string) bool {
 }
 
 // answer returns the answer a call was continued with.
-func (p *parker) answer(callID string) (payload.Answer, bool) {
+func (p *parker) answer(callID string) (event.Answer, bool) {
 	a, ok := p.answers[callID]
 	return a, ok
 }
@@ -608,8 +608,8 @@ func (p *parker) decide(callID string) saige.Resolution {
 }
 
 // resolution is what saige is told about a marked call that has an answer.
-func resolution(a payload.Answer) (saige.Resolution, error) {
-	if a.Decision != payload.DecisionApprove {
+func resolution(a event.Answer) (saige.Resolution, error) {
+	if a.Decision != event.DecisionApprove {
 		msg := strings.TrimSpace(a.Note)
 		if msg == "" {
 			msg = "the person declined"
@@ -679,7 +679,7 @@ func (p *parker) parked(branch []saigetypes.Message, base int, whole bool) (*Par
 	}
 	out.Pending = pending
 	if len(p.answers) > 0 {
-		out.Answers = make(map[string]payload.Answer, len(p.answers))
+		out.Answers = make(map[string]event.Answer, len(p.answers))
 		for k, v := range p.answers {
 			out.Answers[k] = v
 		}

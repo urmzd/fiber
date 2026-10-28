@@ -17,12 +17,10 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -50,14 +48,14 @@ func spending(deltas []saigetypes.Delta, in, out int) []saigetypes.Delta {
 }
 
 // usageOf returns the usage.call bodies a run published, in order.
-func usageOf(t *testing.T, events []event.Envelope) []payload.UsageCall {
+func usageOf(t *testing.T, events []event.Envelope) []event.UsageCall {
 	t.Helper()
-	var out []payload.UsageCall
+	var out []event.UsageCall
 	for _, e := range events {
 		if e.Type != event.TypeUsageCall {
 			continue
 		}
-		c, err := decode[payload.UsageCall](e)
+		c, err := decode[event.UsageCall](e)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -67,19 +65,19 @@ func usageOf(t *testing.T, events []event.Envelope) []payload.UsageCall {
 }
 
 // tallied is what a subscriber rebuilds from a run's usage events.
-func tallied(t *testing.T, events []event.Envelope) payload.RunUsage {
+func tallied(t *testing.T, events []event.Envelope) event.RunUsage {
 	t.Helper()
-	var tally payload.Tally
+	var tally event.Tally
 	for _, e := range events {
 		switch e.Type {
 		case event.TypeUsageCall:
-			c, err := decode[payload.UsageCall](e)
+			c, err := decode[event.UsageCall](e)
 			if err != nil {
 				t.Fatal(err)
 			}
 			tally.Call(c)
 		case event.TypeUsageChild:
-			c, err := decode[payload.UsageChild](e)
+			c, err := decode[event.UsageChild](e)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -89,7 +87,7 @@ func tallied(t *testing.T, events []event.Envelope) payload.RunUsage {
 	return tally.Usage()
 }
 
-func sameUsage(a, b payload.Usage) bool { return reflect.DeepEqual(a, b) }
+func sameUsage(a, b event.Usage) bool { return reflect.DeepEqual(a, b) }
 
 func usageRecords(t *testing.T, w *world, runID string) []string {
 	t.Helper()
@@ -119,22 +117,19 @@ type spender struct {
 	runs int
 }
 
-func (s *spender) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (s *spender) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	s.mu.Lock()
 	s.runs++
 	n := s.runs
 	s.mu.Unlock()
 
-	body, err := payload.Encode(payload.UsageCall{
+	body := event.UsageCall{
 		AccountingID: req.RunID + "/a" + strconv.Itoa(req.Attempt) + "/1",
 		Agent:        req.Agent(), Model: "claude-test", Requests: 1,
 		PromptTokens: 100 * n, CompletionTokens: 10 * n,
-		Cost: &payload.Cost{Micros: int64(1000 * n), Currency: "USD", AsOf: "2026-07-24"},
-	})
-	if err != nil {
-		return runtime.Outcome{}, err
+		Cost: &event.Cost{Micros: int64(1000 * n), Currency: "USD", AsOf: "2026-07-24"},
 	}
-	if err := emit(ctx, agentrt.Chunk{Kind: envelope.KindUsageCall, Payload: body}); err != nil {
+	if err := emit(ctx, body); err != nil {
 		return runtime.Outcome{}, err
 	}
 	if n <= s.fail {
@@ -215,7 +210,7 @@ func TestTheRunsTotalIsTheSumOfItsCallEvents(t *testing.T) {
 	if ctx := out.Usage.Context; ctx == nil || ctx.Window != 200_000 || ctx.Tokens != 12_000 {
 		t.Errorf("Output.Usage.Context = %+v, want 12000 of 200000", ctx)
 	}
-	completed, err := decode[payload.Lifecycle](events[len(events)-1])
+	completed, err := decode[lifecycle](events[len(events)-1])
 	if err != nil || events[len(events)-1].Type != event.TypeCompleted {
 		t.Fatalf("the last event is %s (%v), want completed", events[len(events)-1].Type, err)
 	}
@@ -369,8 +364,8 @@ func chain(sp *specs) {
 	for _, agent := range []string{"assistant", "helper", "lead"} {
 		sp.revise(agent, agent+".")
 	}
-	sp.edit("helper", func(s *agentrt.Spec) { s.Access.Spawn = []string{"assistant"} })
-	sp.edit("lead", func(s *agentrt.Spec) { s.Access.Spawn = []string{"helper"} })
+	sp.edit("helper", func(s *native.Spec) { s.Access.Spawn = []string{"assistant"} })
+	sp.edit("lead", func(s *native.Spec) { s.Access.Spawn = []string{"helper"} })
 }
 
 // chainModels gives each agent a model that delegates to the next agent once
@@ -401,7 +396,7 @@ func TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting(t *testing.T) {
 	chain(w.specs)
 
 	var rt *runtime.Runtime
-	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
+	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(event.Action) error) (string, error) {
 		acc, err := accept(ctx, rt, tag(target, parent.RunID+"-"+target, text))
 		if err != nil {
 			return "", err
@@ -443,7 +438,7 @@ func TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting(t *testing.T) {
 		if u == nil {
 			t.Fatalf("%s: Output.Usage is nil", tc.name)
 		}
-		check := func(part string, got payload.Usage, want [2]int) {
+		check := func(part string, got event.Usage, want [2]int) {
 			if got.ModelCalls != want[0] || got.PromptTokens != want[1] {
 				t.Errorf("%s %s = %d calls, %d tokens in; want %d and %d", tc.name, part, got.ModelCalls, got.PromptTokens, want[0], want[1])
 			}
@@ -598,12 +593,12 @@ func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
 	w.concurrency = 4
 	w.specs.revise("lead", "Lead.")
 	w.specs.revise("helper", "Help.")
-	w.specs.edit("lead", func(s *agentrt.Spec) { s.Access.Spawn = []string{"helper"} })
+	w.specs.edit("lead", func(s *native.Spec) { s.Access.Spawn = []string{"helper"} })
 
 	var rt *runtime.Runtime
 	refusals := map[string]error{}
 	var mu sync.Mutex
-	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
+	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(event.Action) error) (string, error) {
 		foreign := tag(target, "evt-foreign", "theirs")
 		foreign.Tenant = "globex"
 		facc, err := accept(ctx, rt, foreign)

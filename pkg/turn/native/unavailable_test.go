@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"bytes"
@@ -12,12 +12,12 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // spyRequests records every model request and answers each with text.
-func spyRequests(seen *[][]saigetypes.ToolDef, msgs *[]saigetypes.Message) agentrt.ProviderFunc {
-	return func(agentrt.Spec) (saigetypes.Provider, error) {
+func spyRequests(seen *[][]saigetypes.ToolDef, msgs *[]saigetypes.Message) native.ProviderFunc {
+	return func(native.Spec) (saigetypes.Provider, error) {
 		return providerFunc(func(_ context.Context, m []saigetypes.Message, tools []saigetypes.ToolDef) (<-chan saigetypes.Delta, error) {
 			*seen = append(*seen, tools)
 			*msgs = m
@@ -39,23 +39,23 @@ func TestAnUnresolvableToolIsDroppedAndTheModelIsTold(t *testing.T) {
 	rev := offlineRevision(1, "You look things up.")
 	rev.Spec.Provider = "spy"
 	rev.Spec.Tools = []string{"lookup", "jira_transition", "mcp_disabled"}
-	catalog := agentrt.ToolsFunc(func(name string) (saigetypes.Tool, error) {
+	catalog := native.ToolsFunc(func(name string) (saigetypes.Tool, error) {
 		switch name {
 		case "lookup":
 			return lookupTool("lookup"), nil
 		case "mcp_disabled":
 			return nil, errors.New("held back: pending review on host internal-mcp.corp")
 		}
-		return nil, fmt.Errorf("%w: %q", agentrt.ErrNoSuchTool, name)
+		return nil, fmt.Errorf("%w: %q", native.ErrNoSuchTool, name)
 	})
-	r, err := agentrt.New(rev,
-		agentrt.WithProvider("spy", spyRequests(&tools, &msgs)),
-		agentrt.WithTools(catalog),
-		agentrt.WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	r, err := native.New(rev,
+		native.WithProvider("spy", spyRequests(&tools, &msgs)),
+		native.WithTools(catalog),
+		native.WithLogger(slog.New(slog.NewTextHandler(&logs, nil))))
 	if err != nil {
 		t.Fatalf("New = %v, want the run to go ahead without the missing tools", err)
 	}
-	_, res := collect(t, r, agentrt.Turn{Text: "move the ticket"})
+	_, res := collect(t, r, native.Turn{Text: "move the ticket"})
 	if res.Text != "ok" {
 		t.Fatalf("answer %q, want the model's", res.Text)
 	}
@@ -99,12 +99,12 @@ func TestAFullyResolvedRunnerSendsThePromptUntouched(t *testing.T) {
 	rev := offlineRevision(1, "You look things up.")
 	rev.Spec.Provider = "spy"
 	rev.Spec.Tools = []string{"lookup"}
-	r, err := agentrt.New(rev, agentrt.WithProvider("spy", spyRequests(&tools, &msgs)),
-		agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup"))))
+	r, err := native.New(rev, native.WithProvider("spy", spyRequests(&tools, &msgs)),
+		native.WithTools(native.StaticTools(lookupTool("lookup"))))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	collect(t, r, agentrt.Turn{Text: "hi"})
+	collect(t, r, native.Turn{Text: "hi"})
 	for _, m := range msgs {
 		if got := renderMessages([]saigetypes.Message{m}); m.Role() == saigetypes.RoleSystem &&
 			(!strings.Contains(got, `"You look things up."`) || strings.Contains(got, "unavailable")) {
@@ -125,7 +125,7 @@ func TestAnApprovalOnADroppedToolDoesNotFailTheRun(t *testing.T) {
 	rev := offlineRevision(1, "You deploy.")
 	rev.Spec.Tools = []string{"deploy"}
 	rev.Spec.Approvals = []string{"deploy"}
-	r, err := agentrt.New(rev, agentrt.WithTools(agentrt.StaticTools()))
+	r, err := native.New(rev, native.WithTools(native.StaticTools()))
 	if err != nil {
 		t.Fatalf("New = %v, want the run to go ahead without deploy", err)
 	}
@@ -134,7 +134,7 @@ func TestAnApprovalOnADroppedToolDoesNotFailTheRun(t *testing.T) {
 	}
 
 	rev.Spec.Approvals = []string{"rollback"}
-	if _, err := agentrt.New(rev, agentrt.WithTools(agentrt.StaticTools())); !errors.Is(err, agentrt.ErrInvalid) {
+	if _, err := native.New(rev, native.WithTools(native.StaticTools())); !errors.Is(err, native.ErrInvalid) {
 		t.Errorf("an approval for an ungranted tool: New = %v, want ErrInvalid", err)
 	}
 }
@@ -146,12 +146,12 @@ func TestStrictToolsFailsOnTheFirstUnresolvableTool(t *testing.T) {
 
 	rev := offlineRevision(1, "")
 	rev.Spec.Tools = []string{"lookup", "jira_transition"}
-	_, err := agentrt.New(rev, agentrt.WithStrictTools(),
-		agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup"))))
-	if !errors.Is(err, agentrt.ErrNoSuchTool) || !strings.Contains(err.Error(), "jira_transition") {
+	_, err := native.New(rev, native.WithStrictTools(),
+		native.WithTools(native.StaticTools(lookupTool("lookup"))))
+	if !errors.Is(err, native.ErrNoSuchTool) || !strings.Contains(err.Error(), "jira_transition") {
 		t.Fatalf("New = %v, want ErrNoSuchTool naming jira_transition", err)
 	}
-	if !errors.Is(err, agentrt.ErrInvalid) {
+	if !errors.Is(err, native.ErrInvalid) {
 		t.Fatalf("New = %v, want it to match ErrInvalid too", err)
 	}
 }
@@ -174,24 +174,24 @@ func TestADroppedGrantsNoteForTheModelFollowsItsName(t *testing.T) {
 	var msgs []saigetypes.Message
 	rev := offlineRevision(1, "You triage.")
 	rev.Spec.Provider = "spy"
-	rev.Spec.Tools = []string{"lookup", agentrt.MCPGroup("issues"), "jira_transition"}
-	catalog := groupCatalog{Tools: agentrt.ToolsFunc(func(name string) (saigetypes.Tool, error) {
+	rev.Spec.Tools = []string{"lookup", native.MCPGroup("issues"), "jira_transition"}
+	catalog := groupCatalog{Tools: native.ToolsFunc(func(name string) (saigetypes.Tool, error) {
 		if name == "lookup" {
 			return lookupTool("lookup"), nil
 		}
-		return nil, fmt.Errorf("%w: %q on host jira.internal.corp", agentrt.ErrNoSuchTool, name)
+		return nil, fmt.Errorf("%w: %q on host jira.internal.corp", native.ErrNoSuchTool, name)
 	})}
 	refusal := notedErr{
 		operator: `mcptools: provider "issues" on mcp.internal.corp: ana has no credential`,
 		model:    "it needs a credential of your own,\n which you have not connected.",
 	}
-	r, err := agentrt.New(rev,
-		agentrt.WithProvider("spy", spyRequests(&tools, &msgs)),
-		agentrt.WithTools(noted{groupCatalog: catalog, err: refusal}))
+	r, err := native.New(rev,
+		native.WithProvider("spy", spyRequests(&tools, &msgs)),
+		native.WithTools(noted{groupCatalog: catalog, err: refusal}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	collect(t, r, agentrt.Turn{Text: "triage"})
+	collect(t, r, native.Turn{Text: "triage"})
 
 	var system string
 	for _, m := range msgs {
@@ -221,6 +221,6 @@ type noted struct {
 	err error
 }
 
-func (n noted) ToolGroup(name string) (agentrt.ToolGroup, error) {
-	return agentrt.ToolGroup{}, fmt.Errorf("%w: %q: %w", agentrt.ErrNoSuchToolGroup, name, n.err)
+func (n noted) ToolGroup(name string) (native.ToolGroup, error) {
+	return native.ToolGroup{}, fmt.Errorf("%w: %q: %w", native.ErrNoSuchToolGroup, name, n.err)
 }

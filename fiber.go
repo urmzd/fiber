@@ -46,8 +46,6 @@ import (
 	"github.com/urmzd/anchor/pkg/worker"
 	"github.com/urmzd/playscape/pkg/metrics"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
@@ -55,12 +53,15 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/egress"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
@@ -106,7 +107,7 @@ func WithConcurrency(n int) Option { return func(o *options) { o.Concurrency = n
 // WithCompaction sets the history compaction every agent runs with. The zero
 // value never compacts; OnRequest lets a host ask a running turn to compact
 // (App.Compact).
-func WithCompaction(c agentrt.Compaction) Option { return func(o *options) { o.Compaction = c } }
+func WithCompaction(c native.Compaction) Option { return func(o *options) { o.Compaction = c } }
 
 // WithAuthor chooses what the built-in author agent runs on. Without it the
 // agent is seeded on the offline provider.
@@ -161,10 +162,10 @@ func WithBlobs(s blob.Store) Option { return func(o *options) { o.Blobs = s } }
 // WithToolProviders sets the MCP tool provider store.
 func WithToolProviders(s toolprovider.Store) Option { return func(o *options) { o.Tools = s } }
 
-// WithExecutor replaces the playscape sandbox a turn runs in. Model
+// WithTurnRuntime replaces the playscape sandbox a turn runs in. Model
 // providers, tool sources, compaction and knowledge are wired into the
-// sandbox, so an executor passed here brings its own.
-func WithExecutor(x runtime.Executor) Option { return func(o *options) { o.Executor = x } }
+// sandbox, so a turn runtime passed here brings its own.
+func WithTurnRuntime(rt turn.Runtime) Option { return func(o *options) { o.Runtime = rt } }
 
 // WithRuntimeOptions adds options to the durable runtime, after the App's
 // own, so they can override them.
@@ -188,14 +189,14 @@ func WithEgressOptions(opts ...egress.Option) Option {
 // WithModelProvider makes a model provider selectable by name: a spec whose
 // provider is name runs on what fn builds. The registry New builds accepts
 // specs naming it, and a built-in of the same name is replaced.
-func WithModelProvider(name string, fn agentrt.ProviderFunc) Option {
+func WithModelProvider(name string, fn native.ProviderFunc) Option {
 	return func(o *options) {
 		if name == "" || fn == nil {
 			return
 		}
 		o.Providers = maps.Clone(o.Providers)
 		if o.Providers == nil {
-			o.Providers = map[string]agentrt.ProviderFunc{}
+			o.Providers = map[string]native.ProviderFunc{}
 		}
 		o.Providers[name] = fn
 	}
@@ -204,7 +205,7 @@ func WithModelProvider(name string, fn agentrt.ProviderFunc) Option {
 // WithOpenAICompatible registers an OpenAI-compatible endpoint under ep.Name.
 // It is WithModelProvider with ep.Provider(); the key is read from the
 // environment variable ep.KeyEnv names when an agent is built.
-func WithOpenAICompatible(ep agentrt.OpenAICompatible) Option {
+func WithOpenAICompatible(ep native.OpenAICompatible) Option {
 	return WithModelProvider(ep.Name, ep.Provider())
 }
 
@@ -222,8 +223,8 @@ func WithToolSource(c runtime.Catalog) Option {
 // WithTools adds a fixed set of tools, resolved by name for every turn. It is
 // WithToolSource for tools that need nothing from the run.
 func WithTools(tools ...saigetypes.Tool) Option {
-	static := agentrt.StaticTools(tools...)
-	return WithToolSource(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
+	static := native.StaticTools(tools...)
+	return WithToolSource(func(runtime.Request, func(event.Action) error) (native.Tools, error) {
 		return static, nil
 	})
 }

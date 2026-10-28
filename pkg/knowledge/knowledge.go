@@ -6,7 +6,7 @@
 // this text", and refuses to answer anything else. Where documents come from
 // (a crawler, a connector, a CLI) is the caller's concern: this package is
 // handed content and never fetches it. What a model does with the passages
-// belongs to pkg/agentrt, which turns them into a prompt and into citation
+// belongs to pkg/turn/native, which turns them into a prompt and into citation
 // events; Retriever in this package is the adapter between the two.
 //
 // # Why hybrid

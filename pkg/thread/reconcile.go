@@ -8,7 +8,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Message is one message as its surface holds it now.
@@ -22,7 +22,7 @@ type Message struct {
 	// files (a reaction, a join) is not journaled.
 	Text string
 	// Actor is who posted it.
-	Actor envelope.Actor
+	Actor event.Actor
 	// At is when it was posted.
 	At time.Time
 	// Files brings in the files posted with the message, as attachment

@@ -12,7 +12,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 )
 
@@ -26,15 +26,15 @@ func slackThread(agent string) thread.Key {
 }
 
 func user(run, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleUser, Text: text, RunID: run, Actor: envelope.Actor{ID: "U1", Display: "ada"}}
+	return thread.Entry{Role: thread.RoleUser, Text: text, RunID: run, Actor: event.Actor{ID: "U1", Display: "ada"}}
 }
 
 func assistant(run, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleAssistant, Text: text, RunID: run, Actor: envelope.Actor{ID: "docs-bot", Bot: true}}
+	return thread.Entry{Role: thread.RoleAssistant, Text: text, RunID: run, Actor: event.Actor{ID: "docs-bot", Bot: true}}
 }
 
 func posted(id, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleUser, Text: text, SurfaceID: id, Actor: envelope.Actor{ID: "U2", Display: "grace"}}
+	return thread.Entry{Role: thread.RoleUser, Text: text, SurfaceID: id, Actor: event.Actor{ID: "U2", Display: "grace"}}
 }
 
 func mustAppend(t *testing.T, s thread.Store, key thread.Key, entries ...thread.Entry) []thread.Entry {
@@ -117,7 +117,7 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("history differs from what Append returned:\n got %+v\nwant %+v", got, append(first, second...))
 		}
 		if e := got[0]; e.Role != thread.RoleUser || e.Text != "how do I deploy?" || e.RunID != "run-1" ||
-			e.SurfaceID != "1699.002" || !e.At.Equal(said) || e.Actor != (envelope.Actor{ID: "U1", Display: "ada"}) {
+			e.SurfaceID != "1699.002" || !e.At.Equal(said) || e.Actor != (event.Actor{ID: "U1", Display: "ada"}) {
 			t.Errorf("entry 1 did not round-trip: %+v", e)
 		}
 		if e := got[1]; e.Role != thread.RoleAssistant || !e.Actor.Bot || e.At.IsZero() {

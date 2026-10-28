@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"bytes"
@@ -15,9 +15,8 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 	ragtypes "github.com/urmzd/saige/rag/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // loopProvider is a model that calls a tool for a fixed number of turns and
@@ -148,20 +147,20 @@ func lookupTool(name string) saigetypes.Tool {
 // runLoop runs one turn of a tool-calling agent against p and returns the
 // requests it sent that were turns of the loop, plus how many requests before
 // each one were summaries.
-func runLoop(t *testing.T, p *loopProvider, opts ...agentrt.Option) (model []saigetypes.Request, summariesBefore []int, res agentrt.Result) {
+func runLoop(t *testing.T, p *loopProvider, opts ...native.Option) (model []saigetypes.Request, summariesBefore []int, res native.Result) {
 	t.Helper()
 	rev := offlineRevision(1, "You look things up.")
 	rev.Spec.Tools = []string{"lookup"}
-	opts = append([]agentrt.Option{
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return p, nil }),
-		agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup"))),
-		agentrt.WithMaxIter(p.turns + 5),
+	opts = append([]native.Option{
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return p, nil }),
+		native.WithTools(native.StaticTools(lookupTool("lookup"))),
+		native.WithMaxIter(p.turns + 5),
 	}, opts...)
-	r, err := agentrt.New(rev, opts...)
+	r, err := native.New(rev, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, res = collect(t, r, agentrt.Turn{Text: "find the answer", Meta: map[string]string{"issue": "42"}})
+	_, res = collect(t, r, native.Turn{Text: "find the answer", Meta: map[string]string{"issue": "42"}})
 	if res.Text != "done" {
 		t.Fatalf("turn answered %q, want it to finish the loop with %q", res.Text, "done")
 	}
@@ -212,7 +211,7 @@ func TestCompactionIsTheOnlyPlaceTheRequestPrefixChanges(t *testing.T) {
 
 	const turns = 10
 	model, summariesBefore, res := runLoop(t, &loopProvider{turns: turns},
-		agentrt.WithCompaction(agentrt.Compaction{MaxInputTokens: 1200, KeepTurns: 2}))
+		native.WithCompaction(native.Compaction{MaxInputTokens: 1200, KeepTurns: 2}))
 
 	if len(res.Compactions) == 0 {
 		t.Fatalf("turn never compacted; the budget is too large for this test to prove anything")
@@ -270,9 +269,9 @@ func TestCompactionIsTheOnlyPlaceTheRequestPrefixChanges(t *testing.T) {
 func TestCompactionDecisionsRepeatExactly(t *testing.T) {
 	t.Parallel()
 
-	run := func() ([][]byte, []int, []payload.Compaction) {
+	run := func() ([][]byte, []int, []event.Compaction) {
 		model, summariesBefore, res := runLoop(t, &loopProvider{turns: 10},
-			agentrt.WithCompaction(agentrt.Compaction{MaxInputTokens: 1200, KeepTurns: 2}))
+			native.WithCompaction(native.Compaction{MaxInputTokens: 1200, KeepTurns: 2}))
 		wires := make([][]byte, len(model))
 		for i, m := range model {
 			wires[i] = wire(t, m)
@@ -306,7 +305,7 @@ func TestCompactionDoesNotRepeatOnEveryCallWhenTheBudgetCannotBeMet(t *testing.T
 
 	const keep = 3
 	_, summariesBefore, res := runLoop(t, &loopProvider{turns: 14},
-		agentrt.WithCompaction(agentrt.Compaction{MaxInputTokens: 1, KeepTurns: keep}))
+		native.WithCompaction(native.Compaction{MaxInputTokens: 1, KeepTurns: keep}))
 
 	if len(res.Compactions) < 2 {
 		t.Fatalf("turn compacted %d times; the test needs at least two to measure the distance between them", len(res.Compactions))
@@ -332,7 +331,7 @@ func TestCompactionDoesNotRepeatOnEveryCallWhenTheBudgetCannotBeMet(t *testing.T
 func TestToolOrderInTheRequestIsIndependentOfSpecOrder(t *testing.T) {
 	t.Parallel()
 
-	catalog := agentrt.StaticTools(lookupTool("charlie"), lookupTool("alpha"), lookupTool("bravo"))
+	catalog := native.StaticTools(lookupTool("charlie"), lookupTool("alpha"), lookupTool("bravo"))
 	orders := [][]string{
 		{"alpha", "bravo", "charlie"},
 		{"charlie", "alpha", "bravo"},
@@ -347,14 +346,14 @@ func TestToolOrderInTheRequestIsIndependentOfSpecOrder(t *testing.T) {
 			p := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("ok")}}
 			rev := offlineRevision(1, "You look things up.")
 			rev.Spec.Tools = order
-			r, err := agentrt.New(rev,
-				agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return p, nil }),
-				agentrt.WithTools(catalog),
+			r, err := native.New(rev,
+				native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return p, nil }),
+				native.WithTools(catalog),
 			)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			collect(t, r, agentrt.Turn{Text: "hi"})
+			collect(t, r, native.Turn{Text: "hi"})
 
 			calls := p.Requests()
 			if len(calls) != 1 {
@@ -386,15 +385,15 @@ func TestWhatVariesBetweenRunsComesAfterWhatDoesNot(t *testing.T) {
 	t.Parallel()
 
 	const prompt = "You are docs-bot. Answer from the retrieved passages."
-	request := func(turn agentrt.Turn, passage string) saigetypes.Request {
+	request := func(turn native.Turn, passage string) saigetypes.Request {
 		p := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("ok")}}
 		rev := offlineRevision(3, prompt)
 		rev.Spec.Tools = []string{"lookup"}
-		rev.Spec.Sources = []agentrt.Source{{Name: "docs", URI: "mem://docs"}}
-		r, err := agentrt.New(rev,
-			agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return p, nil }),
-			agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup"))),
-			agentrt.WithRetriever(retrieverFunc(func(context.Context, string) (*ragtypes.AssembledContext, error) {
+		rev.Spec.Sources = []native.Source{{Name: "docs", URI: "mem://docs"}}
+		r, err := native.New(rev,
+			native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return p, nil }),
+			native.WithTools(native.StaticTools(lookupTool("lookup"))),
+			native.WithRetriever(retrieverFunc(func(context.Context, string) (*ragtypes.AssembledContext, error) {
 				return &ragtypes.AssembledContext{Prompt: passage}, nil
 			})),
 		)
@@ -409,8 +408,8 @@ func TestWhatVariesBetweenRunsComesAfterWhatDoesNot(t *testing.T) {
 		return saigetypes.Request{Tools: calls[0].Tools, Messages: calls[0].Messages}
 	}
 
-	a := request(agentrt.Turn{Text: "how do I deploy?", Meta: map[string]string{"run": "run-aaa", "at": "2026-10-13T01:00:00Z"}}, "PASSAGE-ONE")
-	b := request(agentrt.Turn{Text: "what broke?", Meta: map[string]string{"run": "run-bbb", "at": "2026-10-13T02:00:00Z"}}, "PASSAGE-TWO")
+	a := request(native.Turn{Text: "how do I deploy?", Meta: map[string]string{"run": "run-aaa", "at": "2026-10-13T01:00:00Z"}}, "PASSAGE-ONE")
+	b := request(native.Turn{Text: "what broke?", Meta: map[string]string{"run": "run-bbb", "at": "2026-10-13T02:00:00Z"}}, "PASSAGE-TWO")
 
 	for name, req := range map[string]saigetypes.Request{"first": a, "second": b} {
 		if len(req.Messages) != 2 {
@@ -453,21 +452,21 @@ func TestUsageAccountsForCacheReadsAndWritesAcrossATurn(t *testing.T) {
 	var kinds []string
 	rev := offlineRevision(1, "You look things up.")
 	rev.Spec.Tools = []string{"lookup"}
-	r, err := agentrt.New(rev,
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return p, nil }),
-		agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup"))),
+	r, err := native.New(rev,
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return p, nil }),
+		native.WithTools(native.StaticTools(lookupTool("lookup"))),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	chunks, res := collect(t, r, agentrt.Turn{Text: "find the answer"})
+	chunks, res := collect(t, r, native.Turn{Text: "find the answer"})
 	for _, c := range chunks {
-		kinds = append(kinds, string(c.Kind))
+		kinds = append(kinds, string(c.Type()))
 	}
 
 	// The test provider declares no rate card, so the calls are counted and
 	// not priced.
-	want := payload.Usage{ModelCalls: 4, Requests: 4, PromptTokens: 4000, CachedPromptTokens: 3200, CacheWriteTokens: 600, CompletionTokens: 80, UnpricedCalls: 4}
+	want := event.Usage{ModelCalls: 4, Requests: 4, PromptTokens: 4000, CachedPromptTokens: 3200, CacheWriteTokens: 600, CompletionTokens: 80, UnpricedCalls: 4}
 	if !reflect.DeepEqual(res.Usage, want) {
 		t.Errorf("Usage = %+v, want %+v", res.Usage, want)
 	}
@@ -476,12 +475,12 @@ func TestUsageAccountsForCacheReadsAndWritesAcrossATurn(t *testing.T) {
 	}
 	calls := 0
 	for _, c := range chunks {
-		if c.Kind == envelope.KindUsageCall {
+		if c.Type() == event.TypeUsageCall {
 			calls++
 			continue
 		}
-		if strings.Contains(string(c.Payload), "prompt_tokens") {
-			t.Errorf("token counts were published as a %s event (%v); they belong on usage.call only", c.Kind, kinds)
+		if strings.Contains(string(raw(c)), "prompt_tokens") {
+			t.Errorf("token counts were published as a %s event (%v); they belong on usage.call only", c.Type(), kinds)
 		}
 	}
 	if calls != 4 {
@@ -497,19 +496,19 @@ func TestOfflineScriptRunsUnchangedUnderABudgetItDoesNotCross(t *testing.T) {
 
 	rev := offlineRevision(1, "You are helpful.")
 	rev.Spec.Tools = []string{"lookup"}
-	r, err := agentrt.New(rev,
-		agentrt.WithScript(
+	r, err := native.New(rev,
+		native.WithScript(
 			agenttest.ToolCallResponse("call-1", "lookup", map[string]any{}),
 			agenttest.TextResponse("scripted answer"),
 		),
-		agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup"))),
-		agentrt.WithCompaction(agentrt.Compaction{MaxInputTokens: 100_000}),
-		agentrt.WithPromptCache(agentrt.PromptCacheLong),
+		native.WithTools(native.StaticTools(lookupTool("lookup"))),
+		native.WithCompaction(native.Compaction{MaxInputTokens: 100_000}),
+		native.WithPromptCache(native.PromptCacheLong),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, res := collect(t, r, agentrt.Turn{Text: "hi"})
+	_, res := collect(t, r, native.Turn{Text: "hi"})
 	if res.Text != "scripted answer" {
 		t.Errorf("Text = %q, want the script's answer", res.Text)
 	}
@@ -527,18 +526,18 @@ func TestAnUnknownPromptCacheLifetimeIsRefusedAtConstruction(t *testing.T) {
 		ttl     string
 		wantErr bool
 	}{
-		{agentrt.PromptCacheOff, false},
-		{agentrt.PromptCacheShort, false},
-		{agentrt.PromptCacheLong, false},
+		{native.PromptCacheOff, false},
+		{native.PromptCacheShort, false},
+		{native.PromptCacheLong, false},
 		{"24h", true},
 		{"forever", true},
 	}
 	for _, tc := range tests {
-		_, err := agentrt.New(offlineRevision(1, ""), agentrt.WithPromptCache(tc.ttl))
+		_, err := native.New(offlineRevision(1, ""), native.WithPromptCache(tc.ttl))
 		if tc.wantErr != (err != nil) {
 			t.Errorf("WithPromptCache(%q): err = %v, want an error: %v", tc.ttl, err, tc.wantErr)
 		}
-		if tc.wantErr && !errors.Is(err, agentrt.ErrInvalid) {
+		if tc.wantErr && !errors.Is(err, native.ErrInvalid) {
 			t.Errorf("WithPromptCache(%q): err = %v, want it to match ErrInvalid", tc.ttl, err)
 		}
 	}

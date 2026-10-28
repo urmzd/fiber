@@ -129,7 +129,6 @@ import (
 	"github.com/urmzd/saige/agent/convert"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/turn"
 
@@ -252,12 +251,12 @@ type Result struct {
 	// price the model. It is reported for a failed turn too, since the
 	// tokens were spent either way. Calls made by agents this turn delegated
 	// to are not in it; they are reported as run.usage.v1 bodies of their own.
-	Usage payload.Usage
+	Usage event.Usage
 	// Compactions lists each time the turn's history was summarized, in
 	// order, as each was also published (run.context.compacted.v1). It is
 	// empty unless WithCompaction set a budget the turn crossed, or let a
 	// host ask and one did.
-	Compactions []payload.Compaction
+	Compactions []event.Compaction
 	// Stopped is set when the turn ended because it was asked to stop, and
 	// says why and by whom. Text is then what had been answered so far, which
 	// may be nothing. It is nil for a turn that finished before the request
@@ -292,7 +291,7 @@ type Runner struct {
 	// compaction is the history budget; its zero value never compacts.
 	compaction Compaction
 	// toolArgs scrubs tool arguments before events carry them; nil
-	// publishes them as they are, within payload.MaxToolArguments.
+	// publishes them as they are, within event.MaxToolArguments.
 	toolArgs ToolArguments
 	// unavailable are the granted tools New dropped, in grant order.
 	unavailable []UnavailableTool
@@ -364,7 +363,7 @@ func WithStrictTools() Option {
 // WithToolArguments sets how tool arguments are scrubbed before the events
 // of a call carry them. Without it they are published as the model sent
 // them, or as an approval edited them, and left out only when they exceed
-// payload.MaxToolArguments. A deployment whose tools take secrets, or whose
+// event.MaxToolArguments. A deployment whose tools take secrets, or whose
 // streams reach people who should not read every argument, passes one.
 func WithToolArguments(fn ToolArguments) Option {
 	return func(c *config) { c.toolArgs = fn }

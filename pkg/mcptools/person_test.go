@@ -14,7 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
@@ -30,9 +30,9 @@ const (
 )
 
 var (
-	ana   = envelope.Actor{ID: "U-ana", User: "u-ana", Display: "Ana"}
-	bob   = envelope.Actor{ID: "U-bob", User: "u-bob", Display: "Bob"}
-	carol = envelope.Actor{ID: "U-carol", User: "u-carol"}
+	ana   = event.Actor{ID: "U-ana", User: "u-ana", Display: "Ana"}
+	bob   = event.Actor{ID: "U-bob", User: "u-bob", Display: "Bob"}
+	carol = event.Actor{ID: "U-carol", User: "u-carol"}
 )
 
 // authLog serves f over streamable HTTP and records the Authorization header
@@ -118,7 +118,7 @@ func (r *refs) askedFor() []string {
 // bob's as a reference, carol has none. It records who it was asked about.
 type people struct {
 	mu    sync.Mutex
-	asked []envelope.Actor
+	asked []event.Actor
 	creds map[string]mcptools.PersonCredential
 }
 
@@ -129,7 +129,7 @@ func newPeople() *people {
 	}}
 }
 
-func (p *people) ResolvePerson(_ context.Context, tenant string, prov toolprovider.Provider, a envelope.Actor) (mcptools.PersonCredential, error) {
+func (p *people) ResolvePerson(_ context.Context, tenant string, prov toolprovider.Provider, a event.Actor) (mcptools.PersonCredential, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.asked = append(p.asked, a)
@@ -192,7 +192,7 @@ func newPersonWorld(t *testing.T, opts ...mcptools.GrantsOption) *personWorld {
 	return w
 }
 
-func as(a envelope.Actor) context.Context { return envelope.WithActor(context.Background(), a) }
+func as(a event.Actor) context.Context { return event.WithActor(context.Background(), a) }
 
 func member(t *testing.T, tools []saigetypes.Tool, name string) saigetypes.Tool {
 	t.Helper()
@@ -450,7 +450,7 @@ func TestAPersonsSessionFollowsTheCredentialTheyHoldNow(t *testing.T) {
 // is closed, and its person is dialled afresh on their next turn.
 func TestPersonSessionsAreBounded(t *testing.T) {
 	w := newPersonWorld(t, mcptools.WithPersonSessions(1))
-	for _, a := range []envelope.Actor{ana, bob, ana} {
+	for _, a := range []event.Actor{ana, bob, ana} {
 		if _, _, err := w.grants.Expand(as(a), tenant, "mcp:fake"); err != nil {
 			t.Fatal(err)
 		}

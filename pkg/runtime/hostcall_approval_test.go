@@ -6,13 +6,13 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 type approvingCall struct{ *agenttest.MockTool }
 
-func (approvingCall) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
-	return agentrt.ApprovalRequest{Approvers: []string{"role:admin"}}, call.Arguments["agent"] == "guarded"
+func (approvingCall) Approval(call saigetypes.ToolCallPart) (native.ApprovalRequest, bool) {
+	return native.ApprovalRequest{Approvers: []string{"role:admin"}}, call.Arguments["agent"] == "guarded"
 }
 
 // The host's call tool keeps the per-call approval of the tool it wraps, so a
@@ -20,7 +20,7 @@ func (approvingCall) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalReq
 func TestHostCallToolForwardsApproval(t *testing.T) {
 	inner := approvingCall{&agenttest.MockTool{Def: saigetypes.ToolDef{Name: "call_agent"}}}
 	var tool saigetypes.Tool = &hostCallTool{Tool: inner}
-	a, ok := tool.(agentrt.Approving)
+	a, ok := tool.(native.Approving)
 	if !ok {
 		t.Fatal("the host call tool hides Approving")
 	}

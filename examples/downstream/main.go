@@ -27,10 +27,10 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber"
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -57,7 +57,7 @@ func run() error {
 	app, err := fiber.New(ctx,
 		fiber.WithTenant(tenant),
 		fiber.WithModelProvider("house", houseProvider),
-		fiber.WithOpenAICompatible(agentrt.OpenAICompatible{
+		fiber.WithOpenAICompatible(native.OpenAICompatible{
 			Name:    "fireworks",
 			BaseURL: "https://api.fireworks.ai/inference/v1",
 			KeyEnv:  "FIREWORKS_API_KEY",
@@ -125,7 +125,7 @@ func run() error {
 
 // houseProvider builds the model client for one agent version. It receives
 // the whole spec, so it can key on the model name or the agent.
-func houseProvider(spec agentrt.Spec) (saigetypes.Provider, error) {
+func houseProvider(spec native.Spec) (saigetypes.Provider, error) {
 	return &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 		agenttest.TextResponse(spec.Name + " answered on the house model (" + spec.Model + ")."),
 	}}, nil

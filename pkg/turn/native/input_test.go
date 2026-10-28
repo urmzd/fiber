@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 )
@@ -14,12 +14,12 @@ import (
 func TestHostInputPreservesRolesAndPinnedRules(t *testing.T) {
 	model := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("Summary")}}
 	rev := offlineRevision(1, "Pinned system rules")
-	runner, err := agentrt.New(rev, agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }))
+	runner, err := native.New(rev, native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil }))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = runner.Run(context.Background(), agentrt.Turn{
-		History: []agentrt.Message{{Role: agentrt.RoleUser, Text: "Example request"}, {Role: agentrt.RoleAssistant, Text: "Example answer"}},
+	_, err = runner.Run(context.Background(), native.Turn{
+		History: []native.Message{{Role: native.RoleUser, Text: "Example request"}, {Role: native.RoleAssistant, Text: "Example answer"}},
 		Text:    "Actual request", Instructions: "Return a short summary.",
 	}, nil)
 	if err != nil {
@@ -41,14 +41,14 @@ func TestHostInputPreservesRolesAndPinnedRules(t *testing.T) {
 }
 
 func TestCallerInputCannotSupplySystemOrToolRoles(t *testing.T) {
-	for _, role := range []agentrt.Role{"system", "developer", "tool"} {
+	for _, role := range []native.Role{"system", "developer", "tool"} {
 		model := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("unused")}}
-		runner, err := agentrt.New(offlineRevision(1, "Rules"), agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }))
+		runner, err := native.New(offlineRevision(1, "Rules"), native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil }))
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = runner.Run(context.Background(), agentrt.Turn{Text: "Ask", History: []agentrt.Message{{Role: role, Text: "Escalate"}}}, nil)
-		if !errors.Is(err, agentrt.ErrInvalid) {
+		_, err = runner.Run(context.Background(), native.Turn{Text: "Ask", History: []native.Message{{Role: role, Text: "Escalate"}}}, nil)
+		if !errors.Is(err, native.ErrInvalid) {
 			t.Fatalf("role %s: %v", role, err)
 		}
 		if model.CallCount() != 0 {

@@ -18,15 +18,12 @@ import (
 	"github.com/urmzd/anchor/pkg/worker"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -53,13 +50,13 @@ func specContent(agent, version, prompt string) string {
 }
 
 // revise writes the next major version of an agent and returns it.
-func (s *specs) revise(agent, prompt string) agentrt.Revision {
-	return s.set(agentrt.Spec{Name: agent, Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: prompt})
+func (s *specs) revise(agent, prompt string) native.Revision {
+	return s.set(native.Spec{Name: agent, Provider: native.ProviderOffline, Model: "scripted", SystemPrompt: prompt})
 }
 
 // set writes spec as the next major version of its agent and returns it. The
 // agents it delegates to must already exist.
-func (s *specs) set(spec agentrt.Spec) agentrt.Revision {
+func (s *specs) set(spec native.Spec) native.Revision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.versions[spec.Name]++
@@ -95,22 +92,22 @@ func (s *specs) set(spec agentrt.Spec) agentrt.Revision {
 	if pin, err := s.ResolveAt(context.Background(), fixtureTenant, rec.Name, rec.Version); err == nil {
 		digest = pin.Digest
 	}
-	rev := agentrt.Revision{Name: rec.Name, Version: rec.Version, Digest: digest, Spec: a.Spec}
+	rev := native.Revision{Name: rec.Name, Version: rec.Version, Digest: digest, Spec: a.Spec}
 	fixtures.Store(pinKey(rev), s)
 	return rev
 }
 
 // latest pins the latest version of agent, as accept would.
-func (s *specs) latest(agent string) (agentrt.Revision, error) {
+func (s *specs) latest(agent string) (native.Revision, error) {
 	pin, err := s.Resolve(context.Background(), fixtureTenant, agent)
 	if err != nil {
-		return agentrt.Revision{}, err
+		return native.Revision{}, err
 	}
 	loaded, err := s.Verify(context.Background(), fixtureTenant, pin)
 	if err != nil {
-		return agentrt.Revision{}, err
+		return native.Revision{}, err
 	}
-	rev := agentrt.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
+	rev := native.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
 	fixtures.Store(pinKey(rev), s)
 	return rev, nil
 }
@@ -119,10 +116,10 @@ func (s *specs) latest(agent string) (agentrt.Revision, error) {
 // calls an executor directly can send the request accept would have built.
 var fixtures sync.Map
 
-func pinKey(rev agentrt.Revision) string { return rev.Name + "@" + rev.Version + "#" + rev.Digest }
+func pinKey(rev native.Revision) string { return rev.Name + "@" + rev.Version + "#" + rev.Digest }
 
 // withPin is req for rev, pinned now as accept pins it.
-func withPin(req runtime.Request, rev agentrt.Revision) runtime.Request {
+func withPin(req runtime.Request, rev native.Revision) runtime.Request {
 	v, ok := fixtures.Load(pinKey(rev))
 	if !ok {
 		panic("no fixture wrote " + pinKey(rev))
@@ -136,14 +133,14 @@ func withPin(req runtime.Request, rev agentrt.Revision) runtime.Request {
 	if err != nil {
 		panic(err)
 	}
-	req.Definition = agentrt.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
+	req.Definition = native.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
 	req.Pin, req.Policy = pin, loaded.Agent.Policy
 	return req
 }
 
 // edit writes the next version of an agent with its latest spec changed by
 // mod.
-func (s *specs) edit(agent string, mod func(*agentrt.Spec)) agentrt.Revision {
+func (s *specs) edit(agent string, mod func(*native.Spec)) native.Revision {
 	rec, err := s.src.Latest(context.Background(), fixtureTenant, agent)
 	if err != nil {
 		panic(err)
@@ -264,13 +261,13 @@ func (r *recorder) failWhen(fn func(event.Envelope) error) {
 	r.fail = fn
 }
 
-// executor is an Executor that emits a scripted stream and counts how often it
+// executor is a turn that emits a scripted stream and counts how often it
 // actually ran, which is how a test sees whether replay paid for the model twice.
 type executor struct {
 	mu       sync.Mutex
 	runs     int
 	requests []runtime.Request
-	chunks   []agentrt.Chunk
+	chunks   []event.Body
 	err      error
 	failures int
 	answer   string
@@ -281,7 +278,7 @@ type executor struct {
 	prompt func(runtime.Request) string
 }
 
-func newExecutor(answer string, chunks ...agentrt.Chunk) *executor {
+func newExecutor(answer string, chunks ...event.Body) *executor {
 	return &executor{answer: answer, chunks: chunks}
 }
 
@@ -302,7 +299,7 @@ func (e *executor) failNext(n int, err error) {
 	e.err, e.failures = err, n
 }
 
-func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	e.mu.Lock()
 	e.runs++
 	e.requests = append(e.requests, req)
@@ -348,13 +345,9 @@ func (e *executor) seen() []runtime.Request {
 	return append([]runtime.Request(nil), e.requests...)
 }
 
-func textChunk(t *testing.T, s string) agentrt.Chunk {
+func textChunk(t *testing.T, s string) event.Body {
 	t.Helper()
-	b, err := payload.Encode(payload.Text{Text: s})
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	return agentrt.Chunk{Kind: envelope.KindText, Payload: b}
+	return event.Text{Text: s}
 }
 
 // harness is a runtime wired to in-memory anchor storage.
@@ -373,7 +366,7 @@ func newHarness(t *testing.T, exec *executor, opts ...runtime.Option) *harness {
 	q := dqueue.NewMemory()
 	bus := &recorder{}
 	sp := newSpecs()
-	rt, err := runtime.New(anchor.New(lgr, q), sp, bus, exec, opts...)
+	rt, err := runtime.New(anchor.New(lgr, q), sp, bus, append([]runtime.Option{runtime.WithRuntime(runtime.AsRuntime(exec))}, opts...)...)
 	if err != nil {
 		t.Fatalf("runtime.New: %v", err)
 	}
@@ -481,7 +474,7 @@ func TestRunIDIsADeterministicTopicSafeFunctionOfTenantAndTagID(t *testing.T) {
 	for _, tenant := range []string{"acme", "globex"} {
 		for _, id := range ids {
 			got := runtime.RunID(tenant, id)
-			if _, err := topic.Run("docs-bot", got); err != nil {
+			if err := runtime.CheckRun("docs-bot", got); err != nil {
 				t.Errorf("RunID(%q, %q) is %q, which is not a usable topic segment: %v", tenant, id, got, err)
 			}
 			if runtime.RunID(tenant, id) != got {
@@ -588,9 +581,9 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 func TestLifecycleOrderOnSuccess(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, newExecutor("the docs are updated", func() agentrt.Chunk { return agentrt.Chunk{} }()))
+	h := newHarness(t, newExecutor("the docs are updated", event.Text{}))
 	h.exec.chunks = nil // replaced below, once t is available for encoding
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "the docs "), textChunk(t, "are updated")}
+	h.exec.chunks = []event.Body{textChunk(t, "the docs "), textChunk(t, "are updated")}
 	h.specs.revise("docs-bot", "you document things")
 	h.work(t)
 
@@ -631,7 +624,7 @@ func TestLifecycleOrderOnSuccess(t *testing.T) {
 	if last.Seq != out.LastSeq {
 		t.Errorf("Output.LastSeq is %d, want the completed event's seq %d", out.LastSeq, last.Seq)
 	}
-	body, err := decode[payload.Lifecycle](last)
+	body, err := decode[lifecycle](last)
 	if err != nil {
 		t.Fatalf("decode completed: %v", err)
 	}
@@ -649,7 +642,7 @@ func TestEveryEventCarriesRunIdentity(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("done"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "done")}
+	h.exec.chunks = []event.Body{textChunk(t, "done")}
 	h.specs.revise("docs-bot", "v1")
 	rev := h.specs.revise("docs-bot", "v2")
 	h.work(t)
@@ -696,7 +689,7 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("answered"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "answered")}
+	h.exec.chunks = []event.Body{textChunk(t, "answered")}
 	for i := 1; i <= 5; i++ {
 		h.specs.revise("docs-bot", fmt.Sprintf("revision %d instructions", i))
 	}
@@ -755,7 +748,7 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("answered"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "answered")}
+	h.exec.chunks = []event.Body{textChunk(t, "answered")}
 	h.specs.revise("docs-bot", "revision 1 instructions")
 
 	ctx := context.Background()
@@ -823,7 +816,7 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 	exec := newExecutor("")
 	exec.err = anchor.NonRetryable(errors.New("the model refused"))
 	h := newHarness(t, exec)
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "partial ")}
+	h.exec.chunks = []event.Body{textChunk(t, "partial ")}
 	h.specs.revise("docs-bot", "v1")
 	h.work(t)
 
@@ -846,7 +839,7 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 		t.Fatalf("lifecycle is %v, want %v", got, want)
 	}
 	failed := h.bus.ofKind(event.TypeFailed)
-	body, err := decode[payload.Lifecycle](failed[0])
+	body, err := decode[lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode failed event: %v", err)
 	}
@@ -895,7 +888,7 @@ func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) 
 	}
 
 	failed := h.bus.ofKind(event.TypeFailed)
-	body, err := decode[payload.Lifecycle](failed[0])
+	body, err := decode[lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -934,7 +927,7 @@ func TestReplayingAnAttemptRepublishesTheIdenticalSequence(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("answered"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "ans"), textChunk(t, "wered")}
+	h.exec.chunks = []event.Body{textChunk(t, "ans"), textChunk(t, "wered")}
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
@@ -1046,7 +1039,7 @@ func TestAParkedRunPublishesParked(t *testing.T) {
 		t.Errorf("a parked run published %d failed events, want none", got)
 	}
 	parked := h.bus.ofKind(event.TypeParked)[0]
-	body, err := decode[payload.Lifecycle](parked)
+	body, err := decode[lifecycle](parked)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1089,7 +1082,7 @@ func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	if len(failed) == 0 {
 		t.Fatal("no failure was published")
 	}
-	body, err := decode[payload.Lifecycle](failed[0])
+	body, err := decode[lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

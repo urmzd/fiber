@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"reflect"
@@ -7,9 +7,8 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // priced is a scripted model that declares what saige's catalog would: a rate
@@ -36,14 +35,14 @@ func withUsage(deltas []saigetypes.Delta, u saigetypes.UsageDelta) []saigetypes.
 	return append(append([]saigetypes.Delta(nil), deltas...), u)
 }
 
-func usageCalls(t *testing.T, chunks []agentrt.Chunk) []payload.UsageCall {
+func usageCalls(t *testing.T, chunks []event.Body) []event.UsageCall {
 	t.Helper()
-	var out []payload.UsageCall
+	var out []event.UsageCall
 	for _, c := range chunks {
-		if c.Kind != envelope.KindUsageCall {
+		if c.Type() != event.TypeUsageCall {
 			continue
 		}
-		call, err := payload.Decode[payload.UsageCall](envelope.Event{Kind: c.Kind, Payload: c.Payload})
+		call, err := decodeBody[event.UsageCall](c)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,23 +69,23 @@ func TestEachModelCallIsPublishedWithSaigesFigures(t *testing.T) {
 	}}}
 	rev := offlineRevision(1, "You look things up.")
 	rev.Spec.Tools = []string{"lookup"}
-	r, err := agentrt.New(rev,
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }),
-		agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup"))),
+	r, err := native.New(rev,
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil }),
+		native.WithTools(native.StaticTools(lookupTool("lookup"))),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	chunks, res := collect(t, r, agentrt.Turn{Text: "find it", Accounting: "run-x/a1"})
+	chunks, res := collect(t, r, native.Turn{Text: "find it", Accounting: "run-x/a1"})
 
 	calls := usageCalls(t, chunks)
 	if len(calls) != 2 {
 		t.Fatalf("published %d usage.call events, want one per model call (2): %v", len(calls), kinds(chunks))
 	}
-	cost := func(d saigetypes.UsageDelta) *payload.Cost {
-		return &payload.Cost{Micros: int64(sonnetLike.Pricing.Cost(saigetypes.UsageFromDelta(d))), Currency: "USD", AsOf: "2026-07-24"}
+	cost := func(d saigetypes.UsageDelta) *event.Cost {
+		return &event.Cost{Micros: int64(sonnetLike.Pricing.Cost(saigetypes.UsageFromDelta(d))), Currency: "USD", AsOf: "2026-07-24"}
 	}
-	want := []payload.UsageCall{
+	want := []event.UsageCall{
 		{
 			// Keyed by the turn's own prefix; saige's id rides beside it.
 			AccountingID: "run-x/a1/1", SaigeAccountingID: "acct-1", Agent: "docs-bot", Model: "claude-test-0", Requests: 1,
@@ -108,7 +107,7 @@ func TestEachModelCallIsPublishedWithSaigesFigures(t *testing.T) {
 		t.Fatalf("a priced call cost %d micros", calls[0].Cost.Micros)
 	}
 
-	var sum payload.Usage
+	var sum event.Usage
 	for _, c := range calls {
 		sum = sum.AddCall(c)
 	}
@@ -142,12 +141,12 @@ func TestAnUnknownModelReportsTokensAndNoCost(t *testing.T) {
 			case *priced:
 				m.ScriptedProvider = &agenttest.ScriptedProvider{Responses: script}
 			}
-			r, err := agentrt.New(offlineRevision(1, ""),
-				agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return tc.model, nil }))
+			r, err := native.New(offlineRevision(1, ""),
+				native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return tc.model, nil }))
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			chunks, res := collect(t, r, agentrt.Turn{Text: "hi"})
+			chunks, res := collect(t, r, native.Turn{Text: "hi"})
 			calls := usageCalls(t, chunks)
 			if len(calls) != 1 {
 				t.Fatalf("published %d usage.call events, want 1", len(calls))
@@ -181,12 +180,12 @@ func TestAResponseCacheHitSpendsNothing(t *testing.T) {
 	model := &priced{caps: sonnetLike, ScriptedProvider: &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 		withUsage(agenttest.TextResponse("cached"), saigetypes.UsageDelta{PromptTokens: 5_000, CompletionTokens: 100, CacheHit: true}),
 	}}}
-	r, err := agentrt.New(offlineRevision(1, ""),
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }))
+	r, err := native.New(offlineRevision(1, ""),
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil }))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	chunks, res := collect(t, r, agentrt.Turn{Text: "hi"})
+	chunks, res := collect(t, r, native.Turn{Text: "hi"})
 	calls := usageCalls(t, chunks)
 	if len(calls) != 1 || !calls[0].ResponseCacheHit || calls[0].PromptTokens != 0 || calls[0].Requests != 0 || calls[0].Cost != nil {
 		t.Fatalf("usage.call = %+v, want a flagged call that spent nothing", calls)
@@ -196,8 +195,8 @@ func TestAResponseCacheHitSpendsNothing(t *testing.T) {
 	}
 }
 
-func equalCall(a, b payload.UsageCall) bool {
+func equalCall(a, b event.UsageCall) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-func equalUsage(a, b payload.Usage) bool { return reflect.DeepEqual(a, b) }
+func equalUsage(a, b event.Usage) bool { return reflect.DeepEqual(a, b) }

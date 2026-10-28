@@ -53,7 +53,7 @@
 // # Boundary
 //
 // This package stores and orders messages. It does not know what a run is
-// beyond an id, does not render anything for a model (pkg/agentrt does), and
+// beyond an id, does not render anything for a model (pkg/turn/native does), and
 // does not decide when history is pinned or appended (pkg/runtime does). It
 // imports only the leaves that name its inputs.
 package thread
@@ -67,7 +67,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 )
 
@@ -196,7 +195,7 @@ type Entry struct {
 	Text string `json:"text"`
 	// Actor is who said it: a person for a user message, the agent for its
 	// own answer.
-	Actor envelope.Actor `json:"actor,omitempty"`
+	Actor event.Actor `json:"actor,omitempty"`
 	// RunID is the run that produced the entry, empty for a message that
 	// reached the journal by reconciliation rather than through a run.
 	RunID string `json:"run_id,omitempty"`

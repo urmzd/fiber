@@ -11,7 +11,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/attachment/intake"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 )
 
@@ -69,7 +69,7 @@ func (c *Connector) Messages(ctx context.Context, tenant string, surface address
 		msg := thread.Message{
 			ID:    strconv.FormatInt(cm.ID, 10),
 			Text:  cm.Body,
-			Actor: envelope.Actor{ID: cm.User.Login, Bot: cm.User.Type == "Bot"},
+			Actor: event.Actor{ID: cm.User.Login, Bot: cm.User.Type == "Bot"},
 			At:    cm.CreatedAt,
 			Own:   own,
 		}

@@ -78,11 +78,11 @@ func (anySet) Lookup(token string) (string, bool) {
 	return token, true
 }
 
-// Valid reports whether name is usable as an agent name: the charset of a
-// topic segment (letters, digits, "-", "_"), non-empty. The constraint comes
-// from pkg/topic, which will not accept anything else as a segment, so a
-// mention that could never become a topic is rejected here where the error is
-// still attributable to the text a human typed.
+// Valid reports whether name is usable as an agent name: letters, digits,
+// "-", "_", non-empty. The constraint comes from runtime.CheckRun, which will
+// not accept anything else in a run's name, so a mention that could never
+// name a run is rejected here where the error is still attributable to the
+// text a human typed.
 func Valid(name string) bool {
 	if name == "" {
 		return false

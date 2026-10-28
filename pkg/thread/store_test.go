@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/thread/threadtest"
@@ -64,11 +63,11 @@ func slackThread(agent string) thread.Key {
 }
 
 func user(run, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleUser, Text: text, RunID: run, Actor: envelope.Actor{ID: "U1", Display: "ada"}}
+	return thread.Entry{Role: thread.RoleUser, Text: text, RunID: run, Actor: event.Actor{ID: "U1", Display: "ada"}}
 }
 
 func assistant(run, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleAssistant, Text: text, RunID: run, Actor: envelope.Actor{ID: "docs-bot", Bot: true}}
+	return thread.Entry{Role: thread.RoleAssistant, Text: text, RunID: run, Actor: event.Actor{ID: "docs-bot", Bot: true}}
 }
 
 func mustAppend(t *testing.T, s thread.Store, key thread.Key, entries ...thread.Entry) []thread.Entry {

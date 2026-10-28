@@ -11,9 +11,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/urmzd/fiber"
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
@@ -187,10 +187,10 @@ type listedTool struct {
 }
 
 type listing struct {
-	Agent       string                    `json:"agent"`
-	Version     string                    `json:"version"`
-	Tools       []listedTool              `json:"tools"`
-	Unavailable []agentrt.UnavailableTool `json:"unavailable,omitempty"`
+	Agent       string                   `json:"agent"`
+	Version     string                   `json:"version"`
+	Tools       []listedTool             `json:"tools"`
+	Unavailable []native.UnavailableTool `json:"unavailable,omitempty"`
 }
 
 // listTools prints what a run answering trigger would be granted, as this

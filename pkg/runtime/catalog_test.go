@@ -15,10 +15,10 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/connector"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 type identityActor struct{ seen string }
@@ -53,15 +53,15 @@ func TestCatalogBindsTheActualRunOverCallerContextAndSourceParameters(t *testing
 
 // groupCatalog is a per-turn catalog that resolves no single tools and one
 // MCP tool group, the way a host serving a tenant's MCP providers would.
-type groupCatalog struct{ group agentrt.ToolGroup }
+type groupCatalog struct{ group native.ToolGroup }
 
 func (groupCatalog) Lookup(name string) (saigetypes.Tool, error) {
-	return nil, fmt.Errorf("%w: %q", agentrt.ErrNoSuchTool, name)
+	return nil, fmt.Errorf("%w: %q", native.ErrNoSuchTool, name)
 }
 
-func (c groupCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
+func (c groupCatalog) ToolGroup(name string) (native.ToolGroup, error) {
 	if name != c.group.Name {
-		return agentrt.ToolGroup{}, fmt.Errorf("%w: %q", agentrt.ErrNoSuchToolGroup, name)
+		return native.ToolGroup{}, fmt.Errorf("%w: %q", native.ErrNoSuchToolGroup, name)
 	}
 	return c.group, nil
 }
@@ -85,11 +85,11 @@ func TestAnMCPToolGroupResolvesThroughTheSandbox(t *testing.T) {
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
 	history.revise("lead", "Lead.")
-	lead := history.edit("lead", func(s *agentrt.Spec) { s.Tools = []string{agentrt.MCPGroup("urmzd")} })
+	lead := history.edit("lead", func(s *native.Spec) { s.Tools = []string{native.MCPGroup("urmzd")} })
 
-	catalog := groupCatalog{group: agentrt.ToolGroup{Name: agentrt.MCPGroup("urmzd"), Tools: []saigetypes.Tool{echoTool{}}}}
+	catalog := groupCatalog{group: native.ToolGroup{Name: native.MCPGroup("urmzd"), Tools: []saigetypes.Tool{echoTool{}}}}
 	s, err := runtime.NewSandbox(plane, tools, history,
-		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) { return catalog, nil }),
+		runtime.WithCatalog(func(runtime.Request, func(event.Action) error) (native.Tools, error) { return catalog, nil }),
 		runtime.WithAgentOptions(scripted(map[string][][]saigetypes.Delta{
 			"lead": {
 				agenttest.ToolCallResponse("call-1", "urmzd__echo", map[string]any{}),

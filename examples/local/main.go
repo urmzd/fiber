@@ -127,7 +127,7 @@ func run() error {
 	slack := newSlackSink(surfaces)
 	hook := newWebhookSink(surfaces)
 
-	// The agent side: a corpus to ground answers in, and an executor that
+	// The agent side: a corpus to ground answers in, and a turn runtime that
 	// builds the agent from a pinned revision and runs it.
 	docs := corpus{blocks: []ragtypes.ContextBlock{
 		{
@@ -156,7 +156,7 @@ func run() error {
 		},
 	}}
 
-	exec := newOfflineExecutor(docs)
+	exec := newOfflineRuntime(docs)
 	exec.script("docs-bot", streamed(
 		"The release workflow runs on merge to main [1]. ",
 		"It builds, signs and uploads the archive, then opens a draft release ",
@@ -174,7 +174,7 @@ func run() error {
 		fiber.WithLogger(quiet),
 		fiber.WithDefinitions(store),
 		fiber.WithBus(published),
-		fiber.WithExecutor(exec),
+		fiber.WithTurnRuntime(exec),
 		fiber.WithConnector(slack),
 		fiber.WithConnector(hook),
 		fiber.WithRuntimeOptions(
@@ -491,7 +491,7 @@ func run() error {
 	fmt.Printf("  model calls         %d\n", after)
 	fmt.Println()
 	fmt.Println("  pass WithPostgres(pool) and WithBus(bus.NewRedis(client)) instead of")
-	fmt.Println("  the in-memory definitions, bus and executor, swap the two fakes for")
+	fmt.Println("  the in-memory definitions, bus and turn runtime, swap the two fakes for")
 	fmt.Println("  WithSlack and WithWebhooks, and this file does not otherwise change.")
 	fmt.Println()
 

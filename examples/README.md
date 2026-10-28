@@ -65,7 +65,7 @@ paths.
 | Bus | `pkg/bus.Memory` (`fiber.WithBus`) | `bus.NewRedis` or `bus.NewPostgres` (`fiber.WithBus`) |
 | Ledger and queue | anchor `ledger.Memory`, `queue.Memory` | anchor's Postgres ledger and queue (`fiber.WithPostgres`) |
 | Model | saige `agenttest.ScriptedProvider`, via the spec's `offline` provider | `anthropic`, `openai` (or any OpenAI-compatible server) or `ollama`, by changing two fields on the spec |
-| Execution | an in-process `runtime.Executor` (`fiber.WithExecutor`) | `runtime.NewSandbox`, a playscape node under NGAC, which `fiber.New` builds by default |
+| Execution | an in-process `turn.Runtime` (`fiber.WithTurnRuntime`) | `runtime.NewSandbox`, a playscape node under NGAC, which `fiber.New` builds by default |
 | Connectors | two fakes implementing `connector.Sink` (`fiber.WithConnector`) | `pkg/connectors/slack`, `pkg/connectors/webhook` (`fiber.WithSlack`, `fiber.WithWebhooks`) |
 
 Every row is an option. `main.go` does not otherwise change.

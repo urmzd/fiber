@@ -1,12 +1,12 @@
 package main
 
 // This file holds everything the story in main.go needs but is not itself the
-// story: two fake connectors, an executor, a corpus, and a bus wrapper that can
+// story: two fake connectors, a turn runtime, a corpus, and a bus wrapper that can
 // be told to fail once.
 //
 // They are fakes only in the sense that they do not open sockets. Each one
 // implements exactly the interface the real thing implements — connector.Sink,
-// runtime.Executor, agentrt.Retriever, bus.Bus — so nothing in main.go is
+// turn.Runtime, native.Retriever, bus.Bus — so nothing in main.go is
 // simplified for the demo. Swapping pkg/connectors/slack in for slackSink is a
 // constructor change and nothing else.
 
@@ -21,11 +21,11 @@ import (
 	"sync/atomic"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/event"
-	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -256,76 +256,68 @@ func (w *webhookSink) seenKinds() map[string]int {
 	return out
 }
 
-// ── the executor ────────────────────────────────────────────────────
+// ── the turn runtime ────────────────────────────────────────────────
 //
-// runtime.Executor is the seam between the durable turn and the agent loop. A
+// turn.Runtime is the seam between the durable turn and the agent loop. A
 // deployment passes runtime.NewSandbox, which runs the turn as a playscape task
 // under the NGAC policy compiled from the pinned revision's Access grant.
 //
-// This example passes an in-process executor instead, for one reason: a sandbox
+// This example passes an in-process runtime instead, for one reason: a sandbox
 // is about CONTAINMENT, and containment is not what this example is trying to
-// show. Everything above the seam — pinning, banding, publication, delivery,
-// replay — is identical either way, because the seam is one method.
+// show. Everything above the seam (pinning, banding, publication, delivery,
+// replay) is identical either way, because the seam is one method.
 //
-// What it does is real. It builds the agent with pkg/agentrt from the pinned
-// revision and runs a saige agent loop against agenttest.ScriptedProvider, so
+// What it does is real. It runs the native runtime (pkg/turn/native) on the
+// pinned revision, a saige agent loop against agenttest.ScriptedProvider, so
 // the deltas that become events are saige's own typed deltas, translated by the
 // same code a production turn uses.
 
-type offlineExecutor struct {
+type offlineRuntime struct {
 	// calls counts how often the model was actually reached. It is the whole
 	// proof in section 7: anchor replays the turn, but a recorded activity
 	// is served from the ledger, so this must not move on a replay.
 	calls atomic.Int64
 
-	retriever agentrt.Retriever
+	retriever native.Retriever
 	scripts   map[string][][]saigetypes.Delta // agent name -> one entry per model call
 }
 
-func newOfflineExecutor(retriever agentrt.Retriever) *offlineExecutor {
-	return &offlineExecutor{
+func newOfflineRuntime(retriever native.Retriever) *offlineRuntime {
+	return &offlineRuntime{
 		retriever: retriever,
 		scripts:   make(map[string][][]saigetypes.Delta),
 	}
 }
 
 // script sets what the scripted provider replays for an agent.
-func (x *offlineExecutor) script(agent string, deltas ...[]saigetypes.Delta) {
+func (x *offlineRuntime) script(agent string, deltas ...[]saigetypes.Delta) {
 	x.scripts[agent] = deltas
 }
 
-// Execute implements runtime.Executor.
+// Turn implements turn.Runtime.
 //
-// req.Definition is a resolved, PINNED version, not a name and a range. An
-// executor must never re-resolve it: it may be running in another process, and
-// "which definition to run" is not a question it is allowed to answer.
-func (x *offlineExecutor) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+// def is a resolved, PINNED version, not a name and a range. A turn runtime
+// must never re-resolve it: it may be running in another process, and "which
+// definition to run" is not a question it is allowed to answer.
+func (x *offlineRuntime) Turn(ctx context.Context, def turn.Pinned, in turn.Input, emit func(context.Context, event.Body) error) (turn.Result, error) {
 	x.calls.Add(1)
-
-	runner, err := agentrt.New(req.Definition,
-		// The definition says provider "offline", so agentrt resolves it to
-		// saige's agenttest.ScriptedProvider with this script. Change its
-		// model.use to anthropic/<model> and the same code calls a model.
-		agentrt.WithScript(x.scripts[req.Agent()]...),
-		agentrt.WithRetriever(x.retriever),
-		agentrt.WithLogger(quiet),
-	)
-	if err != nil {
-		return runtime.Outcome{}, err
-	}
-
-	res, err := runner.Run(ctx, agentrt.Turn{Text: req.Text, Meta: req.Meta}, emit)
-	if err != nil {
-		return runtime.Outcome{}, err
-	}
-	return runtime.Outcome{Text: res.Text, Chunks: res.Chunks, Citations: res.Citations}, nil
+	rt := &native.Runtime{Options: []native.Option{
+		// The definition says provider "offline", so the native runtime
+		// resolves it to saige's agenttest.ScriptedProvider with this
+		// script. Change its model.use to anthropic/<model> and the same
+		// code calls a model.
+		native.WithScript(x.scripts[def.Name]...),
+		native.WithRetriever(x.retriever),
+		native.WithLogger(quiet),
+	}}
+	return rt.Turn(ctx, def, in, emit)
 }
 
-func (x *offlineExecutor) modelCalls() int64 { return x.calls.Load() }
+func (x *offlineRuntime) modelCalls() int64 { return x.calls.Load() }
 
 // ── the corpus ──────────────────────────────────────────────────────
 //
-// agentrt.Retriever is the narrow half of saige's RAG pipeline: a turn
+// native.Retriever is the narrow half of saige's RAG pipeline: a turn
 // retrieves, it does not ingest. A deployment with a real pipeline adapts it in
 // four lines (Search, then take .Context).
 //

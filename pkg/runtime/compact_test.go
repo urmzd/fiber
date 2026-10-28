@@ -13,26 +13,25 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // listener is an executor that waits, once it is running, for a request to
 // compact, and records the first one it hears.
 type listener struct {
 	waiting chan struct{}
-	heard   chan agentrt.CompactRequest
+	heard   chan native.CompactRequest
 	once    sync.Once
 }
 
 func newListener() *listener {
-	return &listener{waiting: make(chan struct{}), heard: make(chan agentrt.CompactRequest, 1)}
+	return &listener{waiting: make(chan struct{}), heard: make(chan native.CompactRequest, 1)}
 }
 
-func (l *listener) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (l *listener) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	signal := runtime.CompactSignal(ctx)
 	l.once.Do(func() { close(l.waiting) })
 	select {
@@ -187,14 +186,14 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 	w := newWorld(t)
 	lookup := &heldLookup{running: make(chan struct{}), release: make(chan struct{})}
 	model := &loopModel{turns: 30}
-	w.specs.edit("docs-bot", func(s *agentrt.Spec) { s.Tools = []string{"lookup"} })
+	w.specs.edit("docs-bot", func(s *native.Spec) { s.Tools = []string{"lookup"} })
 	exec := sandboxOf(t, w.specs, map[string]saigetypes.Provider{"docs-bot": model},
-		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
-			return agentrt.StaticTools(lookup), nil
+		runtime.WithCatalog(func(runtime.Request, func(event.Action) error) (native.Tools, error) {
+			return native.StaticTools(lookup), nil
 		}),
 		runtime.WithAgentOptions(
-			agentrt.WithMaxIter(40),
-			agentrt.WithCompaction(agentrt.Compaction{OnRequest: true, KeepTurns: 1}),
+			native.WithMaxIter(40),
+			native.WithCompaction(native.Compaction{OnRequest: true, KeepTurns: 1}),
 		))
 	rt := w.runtime(t, exec, runtime.WithCompactRequests())
 	w.work(t, rt, nil)
@@ -213,12 +212,12 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 	if out := w.result(t, rt, runID); out.Text != "done" {
 		t.Fatalf("Output.Text = %q, want the run to finish its loop", out.Text)
 	}
-	var compactions []payload.Compaction
+	var compactions []event.Compaction
 	for _, e := range w.bus.of(runID) {
 		if e.Type != event.TypeCompacted {
 			continue
 		}
-		body, err := decode[payload.Compaction](e)
+		body, err := decode[event.Compaction](e)
 		if err != nil {
 			t.Fatalf("decode %s: %v", e.Type, err)
 		}
@@ -227,7 +226,7 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 	if len(compactions) != 1 {
 		t.Fatalf("the run published %d %s events, want 1: %v", len(compactions), event.TypeCompacted, kindsOf(w.bus.of(runID)))
 	}
-	if c := compactions[0]; c.Trigger != agentrt.TriggerRequested || c.By != "U1" || c.Summarized == 0 {
+	if c := compactions[0]; c.Trigger != native.TriggerRequested || c.By != "U1" || c.Summarized == 0 {
 		t.Errorf("compaction = %+v, want a requested one by U1 that summarized something", c)
 	}
 }
@@ -278,12 +277,12 @@ func (s *droppingStream) Recv(ctx context.Context) (event.Envelope, error) {
 // until the test lets it finish.
 type counting struct {
 	waiting chan struct{}
-	heard   chan agentrt.CompactRequest
+	heard   chan native.CompactRequest
 	finish  chan struct{}
 	once    sync.Once
 }
 
-func (c *counting) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (c *counting) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	signal := runtime.CompactSignal(ctx)
 	c.once.Do(func() { close(c.waiting) })
 	for {
@@ -304,7 +303,7 @@ func (c *counting) Execute(ctx context.Context, req runtime.Request, _ func(cont
 func TestARequestToCompactIsRelayedOnceAcrossAReconnect(t *testing.T) {
 	broker := &droppingBus{Bus: newBroker(t), resubscribed: make(chan struct{})}
 	w := newWorldOn(t, broker)
-	exec := &counting{waiting: make(chan struct{}), heard: make(chan agentrt.CompactRequest, 8), finish: make(chan struct{})}
+	exec := &counting{waiting: make(chan struct{}), heard: make(chan native.CompactRequest, 8), finish: make(chan struct{})}
 	rt := w.runtime(t, exec, runtime.WithCompactRequests())
 	w.work(t, rt, nil)
 
@@ -398,7 +397,7 @@ type held struct {
 	release chan struct{}
 }
 
-func (h *held) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (h *held) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	h.started <- struct{}{}
 	select {
 	case <-h.release:

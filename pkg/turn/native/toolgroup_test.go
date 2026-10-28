@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // mcpTool stands in for a pkg/mcptools callable: a tool named
@@ -25,8 +25,8 @@ func (t mcpTool) Execute(context.Context, map[string]any) (string, error) {
 	return "ran " + t.name, nil
 }
 
-func group(provider string, tools ...string) agentrt.ToolGroup {
-	g := agentrt.ToolGroup{Name: agentrt.MCPGroup(provider)}
+func group(provider string, tools ...string) native.ToolGroup {
+	g := native.ToolGroup{Name: native.MCPGroup(provider)}
 	for _, n := range tools {
 		g.Tools = append(g.Tools, mcpTool{name: n})
 	}
@@ -36,24 +36,24 @@ func group(provider string, tools ...string) agentrt.ToolGroup {
 // groupCatalog resolves single tools from a fixed set and groups from a map,
 // like a per-turn catalog serving a tenant's MCP providers.
 type groupCatalog struct {
-	agentrt.Tools
-	groups map[string]agentrt.ToolGroup
+	native.Tools
+	groups map[string]native.ToolGroup
 }
 
-func (c groupCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
+func (c groupCatalog) ToolGroup(name string) (native.ToolGroup, error) {
 	g, ok := c.groups[name]
 	if !ok {
-		return agentrt.ToolGroup{}, fmt.Errorf("%w: %q", agentrt.ErrNoSuchToolGroup, name)
+		return native.ToolGroup{}, fmt.Errorf("%w: %q", native.ErrNoSuchToolGroup, name)
 	}
 	return g, nil
 }
 
 // toolsShown builds a runner, runs one turn, and returns the tool names the
 // model was shown.
-func toolsShown(t *testing.T, tools, approvals []string, opts ...agentrt.Option) ([]string, error) {
+func toolsShown(t *testing.T, tools, approvals []string, opts ...native.Option) ([]string, error) {
 	t.Helper()
 	var shown []string
-	spy := func(agentrt.Spec) (saigetypes.Provider, error) {
+	spy := func(native.Spec) (saigetypes.Provider, error) {
 		return providerFunc(func(_ context.Context, _ []saigetypes.Message, defs []saigetypes.ToolDef) (<-chan saigetypes.Delta, error) {
 			for _, d := range defs {
 				shown = append(shown, d.Name)
@@ -65,11 +65,11 @@ func toolsShown(t *testing.T, tools, approvals []string, opts ...agentrt.Option)
 	rev.Spec.Provider = "spy"
 	rev.Spec.Tools = tools
 	rev.Spec.Approvals = approvals
-	r, err := agentrt.New(rev, append([]agentrt.Option{agentrt.WithProvider("spy", spy)}, opts...)...)
+	r, err := native.New(rev, append([]native.Option{native.WithProvider("spy", spy)}, opts...)...)
 	if err != nil {
 		return nil, err
 	}
-	collect(t, r, agentrt.Turn{Text: "go"})
+	collect(t, r, native.Turn{Text: "go"})
 	slices.Sort(shown)
 	return shown, nil
 }
@@ -81,24 +81,24 @@ func TestAnMCPGroupRegistersItsMembersNeverItself(t *testing.T) {
 	urmzd := group("urmzd", "urmzd__create_issue", "urmzd__search")
 	docs := group("docs", "docs__lookup")
 	catalog := groupCatalog{
-		Tools:  agentrt.StaticTools(mcpTool{name: "fetch"}),
-		groups: map[string]agentrt.ToolGroup{docs.Name: docs},
+		Tools:  native.StaticTools(mcpTool{name: "fetch"}),
+		groups: map[string]native.ToolGroup{docs.Name: docs},
 	}
 
 	tests := []struct {
 		name  string
 		tools []string
-		opts  []agentrt.Option
+		opts  []native.Option
 		want  []string
 	}{
 		{name: "a registered group", tools: []string{"mcp:urmzd"},
-			opts: []agentrt.Option{agentrt.WithToolGroups(urmzd)},
+			opts: []native.Option{native.WithToolGroups(urmzd)},
 			want: []string{"urmzd__create_issue", "urmzd__search"}},
 		{name: "a group the catalog resolves", tools: []string{"mcp:docs"},
-			opts: []agentrt.Option{agentrt.WithTools(catalog)},
+			opts: []native.Option{native.WithTools(catalog)},
 			want: []string{"docs__lookup"}},
 		{name: "groups beside a single tool", tools: []string{"fetch", "mcp:docs", "mcp:urmzd"},
-			opts: []agentrt.Option{agentrt.WithTools(catalog), agentrt.WithToolGroups(urmzd)},
+			opts: []native.Option{native.WithTools(catalog), native.WithToolGroups(urmzd)},
 			want: []string{"docs__lookup", "fetch", "urmzd__create_issue", "urmzd__search"}},
 	}
 	for _, tt := range tests {
@@ -122,31 +122,31 @@ func TestAnMCPGroupThatCannotBeExpandedIsDroppedWithAWarning(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		opts []agentrt.Option
+		opts []native.Option
 	}{
 		{name: "not registered and no catalog"},
-		{name: "a catalog without groups", opts: []agentrt.Option{agentrt.WithTools(agentrt.StaticTools(mcpTool{name: "fetch"}))}},
-		{name: "a catalog that does not know it", opts: []agentrt.Option{agentrt.WithTools(groupCatalog{Tools: agentrt.StaticTools(mcpTool{name: "fetch"})})}},
-		{name: "a group with no tools", opts: []agentrt.Option{agentrt.WithTools(agentrt.StaticTools(mcpTool{name: "fetch"})), agentrt.WithToolGroups(group("urmzd"))}},
+		{name: "a catalog without groups", opts: []native.Option{native.WithTools(native.StaticTools(mcpTool{name: "fetch"}))}},
+		{name: "a catalog that does not know it", opts: []native.Option{native.WithTools(groupCatalog{Tools: native.StaticTools(mcpTool{name: "fetch"})})}},
+		{name: "a group with no tools", opts: []native.Option{native.WithTools(native.StaticTools(mcpTool{name: "fetch"})), native.WithToolGroups(group("urmzd"))}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			rev := offlineRevision(1, "You help.")
 			rev.Spec.Tools = []string{"fetch", "mcp:urmzd"}
-			r, err := agentrt.New(rev, tt.opts...)
+			r, err := native.New(rev, tt.opts...)
 			if err != nil {
 				t.Fatalf("New: %v, want the group dropped", err)
 			}
 			gone := r.Unavailable()
-			if !slices.ContainsFunc(gone, func(u agentrt.UnavailableTool) bool { return u.Name == "mcp:urmzd" && u.Reason != "" }) {
+			if !slices.ContainsFunc(gone, func(u native.UnavailableTool) bool { return u.Name == "mcp:urmzd" && u.Reason != "" }) {
 				t.Fatalf("Unavailable = %+v, want mcp:urmzd with its reason", gone)
 			}
 
 			only := offlineRevision(1, "You help.")
 			only.Spec.Tools = []string{"mcp:urmzd"}
-			strict := append([]agentrt.Option{agentrt.WithStrictTools()}, tt.opts...)
-			if _, err := agentrt.New(only, strict...); !errors.Is(err, agentrt.ErrNoSuchToolGroup) {
+			strict := append([]native.Option{native.WithStrictTools()}, tt.opts...)
+			if _, err := native.New(only, strict...); !errors.Is(err, native.ErrNoSuchToolGroup) {
 				t.Fatalf("strict New: %v, want ErrNoSuchToolGroup", err)
 			}
 		})
@@ -154,7 +154,7 @@ func TestAnMCPGroupThatCannotBeExpandedIsDroppedWithAWarning(t *testing.T) {
 
 	// The model is told the group's name, never the reason.
 	var system string
-	spy := func(agentrt.Spec) (saigetypes.Provider, error) {
+	spy := func(native.Spec) (saigetypes.Provider, error) {
 		return providerFunc(func(_ context.Context, msgs []saigetypes.Message, _ []saigetypes.ToolDef) (<-chan saigetypes.Delta, error) {
 			for _, m := range msgs {
 				if _, ok := m.(saigetypes.SystemMessage); ok {
@@ -167,11 +167,11 @@ func TestAnMCPGroupThatCannotBeExpandedIsDroppedWithAWarning(t *testing.T) {
 	rev := offlineRevision(1, "You help.")
 	rev.Spec.Provider = "spy"
 	rev.Spec.Tools = []string{"mcp:urmzd"}
-	r, err := agentrt.New(rev, agentrt.WithProvider("spy", spy))
+	r, err := native.New(rev, native.WithProvider("spy", spy))
 	if err != nil {
 		t.Fatal(err)
 	}
-	collect(t, r, agentrt.Turn{Text: "go"})
+	collect(t, r, native.Turn{Text: "go"})
 	if !strings.Contains(system, "mcp:urmzd") || strings.Contains(system, "not registered") {
 		t.Fatalf("system prompt %q: want the group named, without the reason", system)
 	}
@@ -186,7 +186,7 @@ func TestAnApprovalOnADroppedGroupsMemberIsSkipped(t *testing.T) {
 			t.Fatalf("%s: New: %v, want the approval skipped with its group", grant, err)
 		}
 	}
-	if _, err := toolsShown(t, []string{"mcp:urmzd"}, []string{"other__delete"}); !errors.Is(err, agentrt.ErrInvalid) {
+	if _, err := toolsShown(t, []string{"mcp:urmzd"}, []string{"other__delete"}); !errors.Is(err, native.ErrInvalid) {
 		t.Fatalf("an approval no grant covers: %v, want ErrInvalid", err)
 	}
 }
@@ -195,8 +195,8 @@ func TestAnApprovalOnADroppedGroupsMemberIsSkipped(t *testing.T) {
 // build even though an unavailable group would be dropped.
 func TestAMalformedMCPGroupAlwaysRefuses(t *testing.T) {
 	t.Parallel()
-	bad := agentrt.ToolGroup{Name: "mcp:urmzd", Tools: []saigetypes.Tool{mcpTool{name: "mcp:nested"}}}
-	if _, err := toolsShown(t, []string{"mcp:urmzd"}, nil, agentrt.WithToolGroups(bad)); !errors.Is(err, agentrt.ErrInvalid) {
+	bad := native.ToolGroup{Name: "mcp:urmzd", Tools: []saigetypes.Tool{mcpTool{name: "mcp:nested"}}}
+	if _, err := toolsShown(t, []string{"mcp:urmzd"}, nil, native.WithToolGroups(bad)); !errors.Is(err, native.ErrInvalid) {
 		t.Fatalf("New: %v, want ErrInvalid", err)
 	}
 }
@@ -205,12 +205,12 @@ func TestAMalformedMCPGroupAlwaysRefuses(t *testing.T) {
 // hold refuses to build: the guard never silently lapses.
 func TestApprovalsHoldForToolsGrantedThroughAnMCPGroup(t *testing.T) {
 	t.Parallel()
-	urmzd := agentrt.WithToolGroups(group("urmzd", "urmzd__create_issue", "urmzd__search"))
+	urmzd := native.WithToolGroups(group("urmzd", "urmzd__create_issue", "urmzd__search"))
 
 	if _, err := toolsShown(t, []string{"mcp:urmzd"}, []string{"urmzd__create_issue"}, urmzd); err != nil {
 		t.Errorf("approval for a member: New: %v", err)
 	}
-	if _, err := toolsShown(t, []string{"mcp:urmzd"}, []string{"urmzd__delete_repo"}, urmzd); !errors.Is(err, agentrt.ErrInvalid) {
+	if _, err := toolsShown(t, []string{"mcp:urmzd"}, []string{"urmzd__delete_repo"}, urmzd); !errors.Is(err, native.ErrInvalid) {
 		t.Errorf("approval for a tool outside the group: New: %v, want ErrInvalid", err)
 	}
 }

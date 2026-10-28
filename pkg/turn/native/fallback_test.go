@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -10,21 +10,21 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // models registers one scripted model per provider name and records the spec
 // each ProviderFunc was handed.
 type models struct {
 	mu    sync.Mutex
-	specs map[string]agentrt.Spec
-	opts  []agentrt.Option
+	specs map[string]native.Spec
+	opts  []native.Option
 }
 
 func newModels(byProvider map[string]saigetypes.Provider) *models {
-	m := &models{specs: map[string]agentrt.Spec{}}
+	m := &models{specs: map[string]native.Spec{}}
 	for name, p := range byProvider {
-		m.opts = append(m.opts, agentrt.WithProvider(name, func(spec agentrt.Spec) (saigetypes.Provider, error) {
+		m.opts = append(m.opts, native.WithProvider(name, func(spec native.Spec) (saigetypes.Provider, error) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			m.specs[name] = spec
@@ -34,10 +34,10 @@ func newModels(byProvider map[string]saigetypes.Provider) *models {
 	return m
 }
 
-func fallbackRevision() agentrt.Revision {
+func fallbackRevision() native.Revision {
 	rev := offlineRevision(1, "You answer.")
 	rev.Spec.Provider, rev.Spec.Model = "primary", "big-model"
-	rev.Spec.Fallbacks = []agentrt.ModelRef{{Provider: "backup", Model: "small-model"}}
+	rev.Spec.Fallbacks = []native.ModelRef{{Provider: "backup", Model: "small-model"}}
 	return rev
 }
 
@@ -76,11 +76,11 @@ func TestATransientFailureFallsThroughToTheNextModel(t *testing.T) {
 			t.Parallel()
 			backup := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("from the backup")}}
 			m := newModels(map[string]saigetypes.Provider{"primary": tc.primary, "backup": backup})
-			r, err := agentrt.New(fallbackRevision(), m.opts...)
+			r, err := native.New(fallbackRevision(), m.opts...)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			_, res := collect(t, r, agentrt.Turn{Text: "hi"})
+			_, res := collect(t, r, native.Turn{Text: "hi"})
 			if res.Text != "from the backup" {
 				t.Fatalf("answer is %q, want the backup's", res.Text)
 			}
@@ -109,11 +109,11 @@ func TestATerminalFailureDoesNotFallThrough(t *testing.T) {
 	primary := &agenttest.ScriptedProvider{Errors: []error{providerError(saigetypes.ErrorKindInvalidRequest)}}
 	backup := &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{agenttest.TextResponse("from the backup")}}
 	m := newModels(map[string]saigetypes.Provider{"primary": primary, "backup": backup})
-	r, err := agentrt.New(fallbackRevision(), m.opts...)
+	r, err := native.New(fallbackRevision(), m.opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = r.Run(context.Background(), agentrt.Turn{Text: "hi"}, nil)
+	_, err = r.Run(context.Background(), native.Turn{Text: "hi"}, nil)
 	if err == nil {
 		t.Fatal("Run succeeded although the request was invalid")
 	}
@@ -134,13 +134,13 @@ func TestAFallbackThatCannotBeBuiltFailsTheBuild(t *testing.T) {
 	m := newModels(map[string]saigetypes.Provider{"primary": primary})
 
 	unknown := fallbackRevision()
-	if _, err := agentrt.New(unknown, m.opts...); !errors.Is(err, agentrt.ErrInvalid) || !strings.Contains(err.Error(), "fallback 1") {
+	if _, err := native.New(unknown, m.opts...); !errors.Is(err, native.ErrInvalid) || !strings.Contains(err.Error(), "fallback 1") {
 		t.Fatalf("New with an unregistered fallback provider returned %v, want ErrInvalid naming fallback 1", err)
 	}
 
 	broken := errors.New("no credentials")
-	opts := append(m.opts, agentrt.WithProvider("backup", func(agentrt.Spec) (saigetypes.Provider, error) { return nil, broken }))
-	if _, err := agentrt.New(fallbackRevision(), opts...); !errors.Is(err, broken) || !strings.Contains(err.Error(), `fallback 1 (backup "small-model")`) {
+	opts := append(m.opts, native.WithProvider("backup", func(native.Spec) (saigetypes.Provider, error) { return nil, broken }))
+	if _, err := native.New(fallbackRevision(), opts...); !errors.Is(err, broken) || !strings.Contains(err.Error(), `fallback 1 (backup "small-model")`) {
 		t.Fatalf("New with a fallback that fails to build returned %v, want its error naming the fallback", err)
 	}
 }
@@ -163,11 +163,11 @@ func TestAFallbackCallIsPricedOnItsOwnModel(t *testing.T) {
 		withUsage(agenttest.TextResponse("from the backup"), usage),
 	}}}
 	m := newModels(map[string]saigetypes.Provider{"primary": primary, "backup": backup})
-	r, err := agentrt.New(fallbackRevision(), m.opts...)
+	r, err := native.New(fallbackRevision(), m.opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	chunks, _ := collect(t, r, agentrt.Turn{Text: "hi"})
+	chunks, _ := collect(t, r, native.Turn{Text: "hi"})
 	calls := usageCalls(t, chunks)
 	if len(calls) != 1 {
 		t.Fatalf("published %d usage.call events, want 1", len(calls))
@@ -190,12 +190,12 @@ func TestFallbackOnDecidesWhichFailuresFallThrough(t *testing.T) {
 		kind saigetypes.ErrorKind
 		want bool
 	}{
-		{"named: a rate limit falls through", []string{agentrt.FallbackOnRateLimit}, saigetypes.ErrorKindRateLimit, true},
-		{"named: an outage does not", []string{agentrt.FallbackOnRateLimit}, saigetypes.ErrorKindUnavailable, false},
+		{"named: a rate limit falls through", []string{native.FallbackOnRateLimit}, saigetypes.ErrorKindRateLimit, true},
+		{"named: an outage does not", []string{native.FallbackOnRateLimit}, saigetypes.ErrorKindUnavailable, false},
 		{"unset: an outage falls through", nil, saigetypes.ErrorKindUnavailable, true},
-		{"any: an auth failure falls through", []string{agentrt.FallbackOnAny}, saigetypes.ErrorKindAuth, true},
-		{"transient: covers an outage", []string{agentrt.FallbackOnTransient}, saigetypes.ErrorKindUnavailable, true},
-		{"named: an invalid request never does", []string{agentrt.FallbackOnRateLimit, agentrt.FallbackOnTransient}, saigetypes.ErrorKindInvalidRequest, false},
+		{"any: an auth failure falls through", []string{native.FallbackOnAny}, saigetypes.ErrorKindAuth, true},
+		{"transient: covers an outage", []string{native.FallbackOnTransient}, saigetypes.ErrorKindUnavailable, true},
+		{"named: an invalid request never does", []string{native.FallbackOnRateLimit, native.FallbackOnTransient}, saigetypes.ErrorKindInvalidRequest, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,11 +205,11 @@ func TestFallbackOnDecidesWhichFailuresFallThrough(t *testing.T) {
 			m := newModels(map[string]saigetypes.Provider{"primary": primary, "backup": backup})
 			rev := fallbackRevision()
 			rev.Spec.FallbackOn = tc.on
-			r, err := agentrt.New(rev, m.opts...)
+			r, err := native.New(rev, m.opts...)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			res, err := r.Run(context.Background(), agentrt.Turn{Text: "hi"}, nil)
+			res, err := r.Run(context.Background(), native.Turn{Text: "hi"}, nil)
 			if got := err == nil && res.Text == "from the backup"; got != tc.want {
 				t.Fatalf("backup answered = %v (err %v), want %v", got, err, tc.want)
 			}
@@ -226,17 +226,17 @@ func TestFallbackOnDecidesWhichFailuresFallThrough(t *testing.T) {
 func TestAFallbackRuleThatCannotBeHonouredFailsTheBuild(t *testing.T) {
 	t.Parallel()
 	m := newModels(map[string]saigetypes.Provider{"primary": &agenttest.ScriptedProvider{}, "backup": &agenttest.ScriptedProvider{}})
-	for name, mutate := range map[string]func(*agentrt.Revision){
-		"unknown":   func(r *agentrt.Revision) { r.Spec.FallbackOn = []string{"timeout"} },
-		"any mixed": func(r *agentrt.Revision) { r.Spec.FallbackOn = []string{agentrt.FallbackOnAny, agentrt.FallbackOnAuth} },
-		"no fallbacks": func(r *agentrt.Revision) {
-			r.Spec.FallbackOn = []string{agentrt.FallbackOnAuth}
+	for name, mutate := range map[string]func(*native.Revision){
+		"unknown":   func(r *native.Revision) { r.Spec.FallbackOn = []string{"timeout"} },
+		"any mixed": func(r *native.Revision) { r.Spec.FallbackOn = []string{native.FallbackOnAny, native.FallbackOnAuth} },
+		"no fallbacks": func(r *native.Revision) {
+			r.Spec.FallbackOn = []string{native.FallbackOnAuth}
 			r.Spec.Fallbacks = nil
 		},
 	} {
 		rev := fallbackRevision()
 		mutate(&rev)
-		if _, err := agentrt.New(rev, m.opts...); !errors.Is(err, agentrt.ErrInvalid) {
+		if _, err := native.New(rev, m.opts...); !errors.Is(err, native.ErrInvalid) {
 			t.Errorf("%s: New returned %v, want ErrInvalid", name, err)
 		}
 	}

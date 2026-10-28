@@ -13,8 +13,6 @@ import (
 
 	drun "github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/internal/pgrename"
 	"github.com/urmzd/fiber/pkg/runtime"
@@ -23,7 +21,7 @@ import (
 // untouched is an executor a run must never reach.
 type untouched struct{ calls atomic.Int32 }
 
-func (u *untouched) Execute(context.Context, runtime.Request, func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (u *untouched) Execute(context.Context, runtime.Request, func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	u.calls.Add(1)
 	return runtime.Outcome{}, errors.New("a run from before the rename reached the agent")
 }
@@ -95,7 +93,7 @@ func TestLegacyTurnFailsTerminally(t *testing.T) {
 				t.Errorf("the agent ran %d times for a run it cannot resume", n)
 			}
 			// Nothing is left to wait on: a late answer is refused.
-			if _, _, err := rt.Answer(ctx, runtime.AnswerRequest{Tenant: "acme", RunID: runID, QuestionID: "q1", Answer: payload.Answer{Text: "yes"}, By: "ana"}); err == nil {
+			if _, _, err := rt.Answer(ctx, runtime.AnswerRequest{Tenant: "acme", RunID: runID, QuestionID: "q1", Answer: event.Answer{Text: "yes"}, By: "ana"}); err == nil {
 				t.Error("an answer to the ended run was accepted")
 			}
 		})

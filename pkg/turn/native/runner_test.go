@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -13,23 +13,22 @@ import (
 	ragtypes "github.com/urmzd/saige/rag/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
-func offlineRevision(rev int, prompt string) agentrt.Revision {
+func offlineRevision(rev int, prompt string) native.Revision {
 	version := ""
 	if rev > 0 {
 		version = fmt.Sprintf("%d.0.0", rev)
 	}
-	return agentrt.Revision{
+	return native.Revision{
 		Name:    "docs-bot",
 		Version: version,
-		Spec: agentrt.Spec{
+		Spec: native.Spec{
 			Name:         "docs-bot",
-			Provider:     agentrt.ProviderOffline,
+			Provider:     native.ProviderOffline,
 			Model:        "scripted",
 			SystemPrompt: prompt,
 		},
@@ -37,10 +36,10 @@ func offlineRevision(rev int, prompt string) agentrt.Revision {
 }
 
 // collect runs a turn and returns the chunks it produced, in order.
-func collect(t *testing.T, r *agentrt.Runner, turn agentrt.Turn) ([]agentrt.Chunk, agentrt.Result) {
+func collect(t *testing.T, r *native.Runner, turn native.Turn) ([]event.Body, native.Result) {
 	t.Helper()
-	var got []agentrt.Chunk
-	res, err := r.Run(context.Background(), turn, func(_ context.Context, c agentrt.Chunk) error {
+	var got []event.Body
+	res, err := r.Run(context.Background(), turn, func(_ context.Context, c event.Body) error {
 		got = append(got, c)
 		return nil
 	})
@@ -55,18 +54,18 @@ func collect(t *testing.T, r *agentrt.Runner, turn agentrt.Turn) ([]agentrt.Chun
 func TestOfflineProviderStreamsAScriptedTurn(t *testing.T) {
 	t.Parallel()
 
-	r, err := agentrt.New(offlineRevision(1, "You document things."),
-		agentrt.WithScript(agenttest.TextResponse("the docs are updated")))
+	r, err := native.New(offlineRevision(1, "You document things."),
+		native.WithScript(agenttest.TextResponse("the docs are updated")))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	got, res := collect(t, r, agentrt.Turn{Text: "update the docs"})
+	got, res := collect(t, r, native.Turn{Text: "update the docs"})
 
 	if res.Text != "the docs are updated" {
 		t.Errorf("answer is %q, want %q", res.Text, "the docs are updated")
 	}
 	// The answer, then the one model call's usage.
-	if len(got) != 2 || got[0].Kind != envelope.KindText || got[1].Kind != envelope.KindUsageCall {
+	if len(got) != 2 || got[0].Type() != event.TypeText || got[1].Type() != event.TypeUsageCall {
 		t.Fatalf("got %d chunks (%v), want a text chunk and a usage.call", len(got), kinds(got))
 	}
 	if res.Chunks != 2 {
@@ -80,7 +79,7 @@ func TestRunnerExecutesThePinnedRevisionsPrompt(t *testing.T) {
 	t.Parallel()
 
 	var seen []saigetypes.Message
-	spy := func(spec agentrt.Spec) (saigetypes.Provider, error) {
+	spy := func(spec native.Spec) (saigetypes.Provider, error) {
 		return providerFunc(func(_ context.Context, msgs []saigetypes.Message, _ []saigetypes.ToolDef) (<-chan saigetypes.Delta, error) {
 			seen = msgs
 			return scripted(agenttest.TextResponse("ok")), nil
@@ -89,7 +88,7 @@ func TestRunnerExecutesThePinnedRevisionsPrompt(t *testing.T) {
 
 	rev := offlineRevision(6, "revision six instructions")
 	rev.Spec.Provider = "spy"
-	r, err := agentrt.New(rev, agentrt.WithProvider("spy", spy))
+	r, err := native.New(rev, native.WithProvider("spy", spy))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -99,7 +98,7 @@ func TestRunnerExecutesThePinnedRevisionsPrompt(t *testing.T) {
 	if got := r.SystemPrompt(); got != "revision six instructions" {
 		t.Fatalf("SystemPrompt() is %q, want revision six's", got)
 	}
-	collect(t, r, agentrt.Turn{Text: "hello"})
+	collect(t, r, native.Turn{Text: "hello"})
 
 	if len(seen) == 0 {
 		t.Fatal("the provider was never called")
@@ -115,7 +114,7 @@ func TestRetrievalPublishesCitationsBeforeTheAnswer(t *testing.T) {
 	t.Parallel()
 
 	var seen []saigetypes.Message
-	spy := func(spec agentrt.Spec) (saigetypes.Provider, error) {
+	spy := func(spec native.Spec) (saigetypes.Provider, error) {
 		return providerFunc(func(_ context.Context, msgs []saigetypes.Message, _ []saigetypes.ToolDef) (<-chan saigetypes.Delta, error) {
 			seen = msgs
 			return scripted(agenttest.TextResponse("deploys happen on merge [1]")), nil
@@ -123,11 +122,11 @@ func TestRetrievalPublishesCitationsBeforeTheAnswer(t *testing.T) {
 	}
 	rev := offlineRevision(1, "answer from the runbook")
 	rev.Spec.Provider = "spy"
-	rev.Spec.Sources = []agentrt.Source{{Name: "runbook", URI: "file://runbook.md"}}
+	rev.Spec.Sources = []native.Source{{Name: "runbook", URI: "file://runbook.md"}}
 
-	r, err := agentrt.New(rev,
-		agentrt.WithProvider("spy", spy),
-		agentrt.WithRetriever(retrieverFunc(func(context.Context, string) (*ragtypes.AssembledContext, error) {
+	r, err := native.New(rev,
+		native.WithProvider("spy", spy),
+		native.WithRetriever(retrieverFunc(func(context.Context, string) (*ragtypes.AssembledContext, error) {
 			return &ragtypes.AssembledContext{
 				Prompt: "Context: deploys run on merge to main.",
 				Blocks: []ragtypes.ContextBlock{{Text: "deploys run on merge to main", Citation: "[1]"}},
@@ -136,16 +135,16 @@ func TestRetrievalPublishesCitationsBeforeTheAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	got, res := collect(t, r, agentrt.Turn{Text: "when do deploys happen?"})
+	got, res := collect(t, r, native.Turn{Text: "when do deploys happen?"})
 
 	if len(got) < 2 {
 		t.Fatalf("got %v, want a citation followed by text", kinds(got))
 	}
-	if got[0].Kind != envelope.KindCitation {
-		t.Errorf("first chunk is %s, want %s", got[0].Kind, envelope.KindCitation)
+	if got[0].Type() != event.TypeCitation {
+		t.Errorf("first chunk is %s, want %s", got[0].Type(), event.TypeCitation)
 	}
-	if got[1].Kind != envelope.KindText {
-		t.Errorf("second chunk is %s, want %s", got[1].Kind, envelope.KindText)
+	if got[1].Type() != event.TypeText {
+		t.Errorf("second chunk is %s, want %s", got[1].Type(), event.TypeText)
 	}
 	if res.Citations != 1 {
 		t.Errorf("Result.Citations is %d, want 1", res.Citations)
@@ -161,16 +160,16 @@ func TestRetrievalIsSkippedWhenTheSpecNamesNoSources(t *testing.T) {
 	t.Parallel()
 
 	called := false
-	r, err := agentrt.New(offlineRevision(1, ""),
-		agentrt.WithScript(agenttest.TextResponse("hi")),
-		agentrt.WithRetriever(retrieverFunc(func(context.Context, string) (*ragtypes.AssembledContext, error) {
+	r, err := native.New(offlineRevision(1, ""),
+		native.WithScript(agenttest.TextResponse("hi")),
+		native.WithRetriever(retrieverFunc(func(context.Context, string) (*ragtypes.AssembledContext, error) {
 			called = true
 			return nil, nil
 		})))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	collect(t, r, agentrt.Turn{Text: "hello"})
+	collect(t, r, native.Turn{Text: "hello"})
 	if called {
 		t.Fatal("retrieval ran for a spec with no sources")
 	}
@@ -200,22 +199,22 @@ func TestConnectorActionReportsWhatItDidAndWhere(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	var actions []payload.Action
+	var actions []event.Action
 	rev := offlineRevision(1, "")
 	rev.Spec.Tools = []string{"github_comment"}
-	r, err := agentrt.New(rev,
-		agentrt.WithTools(agentrt.ConnectorTools(reg, target, func(a payload.Action) error {
+	r, err := native.New(rev,
+		native.WithTools(native.ConnectorTools(reg, target, func(a event.Action) error {
 			actions = append(actions, a)
 			return nil
 		})),
-		agentrt.WithScript(
+		native.WithScript(
 			agenttest.ToolCallResponse("call_1", "github_comment", map[string]any{"body": "on it"}),
 			agenttest.TextResponse("commented"),
 		))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	got, res := collect(t, r, agentrt.Turn{Text: "comment on the issue"})
+	got, res := collect(t, r, native.Turn{Text: "comment on the issue"})
 
 	if len(actions) != 1 {
 		t.Fatalf("got %d action reports, want 1", len(actions))
@@ -235,17 +234,17 @@ func TestConnectorActionReportsWhatItDidAndWhere(t *testing.T) {
 	if res.Text != "commented" {
 		t.Errorf("answer is %q, want %q", res.Text, "commented")
 	}
-	if !hasKind(got, envelope.KindToolCall) || !hasKind(got, envelope.KindToolDone) {
+	if !hasKind(got, event.TypeToolCall) || !hasKind(got, event.TypeToolDone) {
 		t.Errorf("chunks are %v, want a tool call and a tool done", kinds(got))
 	}
 	// The agent loop names the tool on the delta that reports its result, so
 	// the done event says which tool finished.
 	for _, c := range got {
-		if c.Kind != envelope.KindToolDone {
+		if c.Type() != event.TypeToolDone {
 			continue
 		}
-		var done payload.ToolDone
-		if err := json.Unmarshal(c.Payload, &done); err != nil {
+		var done event.ToolDone
+		if err := json.Unmarshal(raw(c), &done); err != nil {
 			t.Fatalf("decode tool done: %v", err)
 		}
 		if done.Name != "github_comment" {
@@ -262,7 +261,7 @@ func TestMetadataRendersInAStableOrder(t *testing.T) {
 	meta := map[string]string{"pr": "42", "author": "urmzd", "title": "fix the docs"}
 	var prompts []string
 	for range 8 {
-		spy := func(agentrt.Spec) (saigetypes.Provider, error) {
+		spy := func(native.Spec) (saigetypes.Provider, error) {
 			return providerFunc(func(_ context.Context, msgs []saigetypes.Message, _ []saigetypes.ToolDef) (<-chan saigetypes.Delta, error) {
 				prompts = append(prompts, renderMessages(msgs))
 				return scripted(agenttest.TextResponse("ok")), nil
@@ -270,11 +269,11 @@ func TestMetadataRendersInAStableOrder(t *testing.T) {
 		}
 		rev := offlineRevision(1, "")
 		rev.Spec.Provider = "spy"
-		r, err := agentrt.New(rev, agentrt.WithProvider("spy", spy))
+		r, err := native.New(rev, native.WithProvider("spy", spy))
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		collect(t, r, agentrt.Turn{Text: "review this", Meta: meta})
+		collect(t, r, native.Turn{Text: "review this", Meta: meta})
 	}
 	for i, p := range prompts {
 		if p != prompts[0] {
@@ -295,8 +294,8 @@ func TestConstructionRefusesWhatItCannotRun(t *testing.T) {
 
 	tests := []struct {
 		name string
-		rev  agentrt.Revision
-		opts []agentrt.Option
+		rev  native.Revision
+		opts []native.Option
 	}{
 		{
 			name: "an unpinned revision",
@@ -304,34 +303,34 @@ func TestConstructionRefusesWhatItCannotRun(t *testing.T) {
 		},
 		{
 			name: "a provider this process does not have",
-			rev: agentrt.Revision{Name: "docs-bot", Version: "1.0.0", Spec: agentrt.Spec{
+			rev: native.Revision{Name: "docs-bot", Version: "1.0.0", Spec: native.Spec{
 				Name: "docs-bot", Provider: "gpt-9", Model: "x",
 			}},
 		},
 		{
 			name: "a tool no connector contributes",
-			rev: func() agentrt.Revision {
+			rev: func() native.Revision {
 				r := offlineRevision(1, "")
 				r.Spec.Tools = []string{"jira_transition"}
 				return r
 			}(),
-			opts: []agentrt.Option{agentrt.WithTools(agentrt.StaticTools()), agentrt.WithStrictTools()},
+			opts: []native.Option{native.WithTools(native.StaticTools()), native.WithStrictTools()},
 		},
 		{
 			name: "a tool with no catalog at all",
-			rev: func() agentrt.Revision {
+			rev: func() native.Revision {
 				r := offlineRevision(1, "")
 				r.Spec.Tools = []string{"jira_transition"}
 				return r
 			}(),
-			opts: []agentrt.Option{agentrt.WithStrictTools()},
+			opts: []native.Option{native.WithStrictTools()},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := agentrt.New(tc.rev, tc.opts...); !errors.Is(err, agentrt.ErrInvalid) {
-				t.Fatalf("New returned %v, want an error matching agentrt.ErrInvalid", err)
+			if _, err := native.New(tc.rev, tc.opts...); !errors.Is(err, native.ErrInvalid) {
+				t.Fatalf("New returned %v, want an error matching native.ErrInvalid", err)
 			}
 		})
 	}
@@ -343,11 +342,11 @@ func TestProviderErrorFailsTheTurn(t *testing.T) {
 
 	boom := errors.New("model refused")
 	rev := offlineRevision(1, "")
-	r, err := agentrt.New(rev, agentrt.WithScript([]saigetypes.Delta{saigetypes.ErrorDelta{Error: boom}}))
+	r, err := native.New(rev, native.WithScript([]saigetypes.Delta{saigetypes.ErrorDelta{Error: boom}}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := r.Run(context.Background(), agentrt.Turn{Text: "hi"}, nil); err == nil {
+	if _, err := r.Run(context.Background(), native.Turn{Text: "hi"}, nil); err == nil {
 		t.Fatal("Run succeeded on an error delta")
 	} else if !strings.Contains(err.Error(), "model refused") {
 		t.Fatalf("error is %v, want it to carry the provider's reason", err)
@@ -360,11 +359,11 @@ func TestAnEmitFailureAbortsTheTurn(t *testing.T) {
 	t.Parallel()
 
 	gone := errors.New("subscriber gone")
-	r, err := agentrt.New(offlineRevision(1, ""), agentrt.WithScript(agenttest.TextResponse("hello")))
+	r, err := native.New(offlineRevision(1, ""), native.WithScript(agenttest.TextResponse("hello")))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = r.Run(context.Background(), agentrt.Turn{Text: "hi"}, func(context.Context, agentrt.Chunk) error {
+	_, err = r.Run(context.Background(), native.Turn{Text: "hi"}, func(context.Context, event.Body) error {
 		return gone
 	})
 	if !errors.Is(err, gone) {
@@ -402,17 +401,17 @@ type fakeConnector struct {
 func (c *fakeConnector) Name() string                { return "github" }
 func (c *fakeConnector) Actions() []connector.Action { return c.actions }
 
-func kinds(cs []agentrt.Chunk) []envelope.Kind {
-	out := make([]envelope.Kind, len(cs))
+func kinds(cs []event.Body) []string {
+	out := make([]string, len(cs))
 	for i, c := range cs {
-		out[i] = c.Kind
+		out[i] = c.Type()
 	}
 	return out
 }
 
-func hasKind(cs []agentrt.Chunk, k envelope.Kind) bool {
+func hasKind(cs []event.Body, k string) bool {
 	for _, c := range cs {
-		if c.Kind == k {
+		if c.Type() == k {
 			return true
 		}
 	}
@@ -437,16 +436,16 @@ func TestApprovalRequestIsRefused(t *testing.T) {
 	marked := &saigetypes.MarkedTool{Inner: inner, Markers: []saigetypes.Marker{{Kind: "human_approval"}}}
 	rev := offlineRevision(1, "")
 	rev.Spec.Tools = []string{"deploy"}
-	r, err := agentrt.New(rev,
-		agentrt.WithTools(agentrt.StaticTools(marked)),
-		agentrt.WithScript(
+	r, err := native.New(rev,
+		native.WithTools(native.StaticTools(marked)),
+		native.WithScript(
 			agenttest.ToolCallResponse("call_1", "deploy", map[string]any{}),
 			agenttest.TextResponse("not deployed"),
 		))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	got, res := collect(t, r, agentrt.Turn{Text: "deploy it"})
+	got, res := collect(t, r, native.Turn{Text: "deploy it"})
 
 	if len(inner.Calls) != 0 {
 		t.Errorf("the tool ran %d times, want 0", len(inner.Calls))
@@ -454,7 +453,7 @@ func TestApprovalRequestIsRefused(t *testing.T) {
 	if res.Text != "not deployed" {
 		t.Errorf("answer is %q, want %q", res.Text, "not deployed")
 	}
-	if !hasKind(got, envelope.KindToolDone) {
+	if !hasKind(got, event.TypeToolDone) {
 		t.Errorf("chunks are %v, want a tool done for the refused call", kinds(got))
 	}
 }

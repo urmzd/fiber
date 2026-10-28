@@ -5,7 +5,7 @@
 // tools may this caller invoke right now, and what happens when it does. What
 // a provider is and which tools were accepted belong to pkg/toolprovider;
 // which agent holds which grant belongs to the agent's spec and to
-// pkg/agentrt, which this package does not import.
+// pkg/turn/native, which this package does not import.
 //
 // # Only accepted tools are callable
 //
@@ -53,14 +53,14 @@
 // their own (WithPersonCredential). A person with none gets no tools, never
 // the shared credential and never anyone else's.
 //
-// # The seam with pkg/agentrt
+// # The seam with pkg/turn/native
 //
-// agentrt resolves a spec's tool names through its Tools interface,
+// native resolves a spec's tool names through its Tools interface,
 // Lookup(name string) (saige types.Tool, error), and runs what it gets back.
 // *Toolset has exactly that method, so the wiring is
 //
 //	ts, err := session.Toolset(ctx, snapshot, grant)
-//	var tools agentrt.Tools = ts
+//	var tools native.Tools = ts
 //
 // and each callable is a plain saige types.Tool whose Definition carries the
 // qualified name (toolprovider.QualifiedName, "<provider>__<tool>"), the
@@ -76,11 +76,11 @@
 // the store, for one tenant, into the members of that tool group, under the
 // grant's class, on a session kept per provider record version, and for a
 // person-scoped provider per person as well. pkg/runtime's
-// WithToolGroupSource takes a *Grants and hands the members to pkg/agentrt
-// as an agentrt.ToolGroup, so this package stays independent of agentrt; the
-// person a turn acts for reaches it on the context (envelope.ActorFrom), and a
-// person with no credential is reported with a note agentrt shows the model
-// (agentrt.ModelNote, which this package satisfies by shape).
+// WithToolGroupSource takes a *Grants and hands the members to pkg/turn/native
+// as a native.ToolGroup, so this package stays independent of native; the
+// person a turn acts for reaches it on the context (event.ActorFrom), and a
+// person with no credential is reported with a note native shows the model
+// (native.ModelNote, which this package satisfies by shape).
 package mcptools
 
 import (

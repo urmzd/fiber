@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -42,8 +42,8 @@ func Dialer(opts ...Option) Dial {
 //
 // It is the store-backed source of tool groups: pkg/runtime's
 // WithToolGroupSource takes a *Grants and hands what it expands to
-// pkg/agentrt as an agentrt.ToolGroup named by the grant, whose members the
-// runner registers. This package does not import agentrt.
+// pkg/turn/native as a native.ToolGroup named by the grant, whose members the
+// runner registers. This package does not import native.
 //
 // Sessions are kept open per tenant and provider, for the provider record's
 // version, so a stdio server is not started per turn, and a record that
@@ -55,7 +55,7 @@ func Dialer(opts ...Option) Dial {
 //
 // A person-scoped provider (toolprovider.ScopePerson) is expanded for the
 // person the run acts for: the actor pkg/runtime puts on the turn's context
-// from the run's record (envelope.ActorFrom). Each expansion asks the
+// from the run's record (event.ActorFrom). Each expansion asks the
 // PersonResolver (WithPersonResolver) for that person's credential and
 // expands on a session of their own, kept per provider record version and
 // person and opened with exactly that credential; a credential the resolver
@@ -64,7 +64,7 @@ func Dialer(opts ...Option) Dial {
 // credential, the grant is not expanded: Expand reports
 // ErrNoPersonCredential, which a runtime drops as an unavailable group, the
 // operator log names the provider and the person, and the model is told (as
-// an agentrt.ModelNote) that the person has not connected one. The shared
+// an native.ModelNote) that the person has not connected one. The shared
 // credential is never used, and no person's session is ever handed to
 // another. At most WithPersonSessions person sessions are kept open; past
 // that the one expanded longest ago is closed.
@@ -144,7 +144,7 @@ type person struct {
 // personFor resolves the credential of the person ctx acts for on p. Every
 // way of having none is ErrNoPersonCredential, with a note for the model.
 func (g *Grants) personFor(ctx context.Context, p toolprovider.Provider) (*person, error) {
-	actor, ok := envelope.ActorFrom(ctx)
+	actor, ok := event.ActorFrom(ctx)
 	if !ok {
 		return nil, actingForNobody(p.Name)
 	}

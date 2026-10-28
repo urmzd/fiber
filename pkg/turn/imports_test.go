@@ -17,10 +17,10 @@ const (
 )
 
 // mayImportSaige reports whether a package may import saige: the native
-// runtime and its alias packages, the agentrt bridge, and pkg/definition,
+// runtime and its alias packages, and pkg/definition,
 // whose agents are saige definitions.
 func mayImportSaige(pkg string) bool {
-	for _, root := range []string{module + "/pkg/turn/native", module + "/pkg/agentrt", module + "/pkg/definition"} {
+	for _, root := range []string{module + "/pkg/turn/native", module + "/pkg/definition"} {
 		if pkg == root || strings.HasPrefix(pkg, root+"/") {
 			return true
 		}
@@ -29,8 +29,8 @@ func mayImportSaige(pkg string) bool {
 }
 
 // testsMayImportSaige lists the test files that still import saige directly.
-// These runtime tests are kept unchanged while the agentrt bridge exists. A
-// new test file in the same package is checked like any other.
+// These runtime tests build saige scripts and tools directly. A new test file
+// in the same package is checked like any other.
 var testsMayImportSaige = map[string]map[string]bool{
 	module + "/pkg/runtime": {
 		"actor_test.go":             true,
@@ -79,7 +79,7 @@ func testFileImports(t *testing.T, dir string, files []string, allowed map[strin
 }
 
 // Every package in the module, its tests and the examples import saige only
-// under pkg/turn/native and the agentrt bridge.
+// under pkg/turn/native and pkg/definition.
 func TestOnlyNativeImportsSaige(t *testing.T) {
 	t.Parallel()
 	out, err := exec.Command("go", "list", "-json=ImportPath,Dir,Imports,TestImports,XTestImports,TestGoFiles,XTestGoFiles", module+"/...").Output()

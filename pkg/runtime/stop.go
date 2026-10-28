@@ -11,11 +11,10 @@ import (
 
 	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/event"
 	turnrt "github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // Stopping a run.
@@ -336,10 +335,10 @@ func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
 	}
 	reason := clip(req.Reason)
 	if reason == "" {
-		reason = agentrt.DefaultStopReason
+		reason = native.DefaultStopReason
 	}
 	at := r.now().UTC()
-	body, err := payload.Encode(payload.StopRequest{
+	body, err := json.Marshal(event.StopRequest{
 		RunID:  req.RunID,
 		Reason: reason,
 		By:     clip(req.By),
@@ -456,7 +455,7 @@ func (r *Runtime) StopRequested(ctx context.Context, tenant, runID string) (Stop
 		if record.Key != stopRecordKey || record.Status != run.RecordOK {
 			continue
 		}
-		var body payload.StopRequest
+		var body event.StopRequest
 		if err := json.Unmarshal(record.Output, &body); err != nil || body.RunID != runID {
 			continue
 		}
@@ -489,27 +488,27 @@ func (r *Runtime) loadRun(ctx context.Context, runID string) (run.Run, error) {
 // again. A ledger that cannot be read is logged and treated as no request:
 // the bus is still listening, and refusing to run because a read failed
 // would turn a ledger hiccup into a failed run.
-func (r *Runtime) recordedStop(ctx context.Context, runID string) (agentrt.Stop, bool) {
+func (r *Runtime) recordedStop(ctx context.Context, runID string) (native.Stop, bool) {
 	if r.stops == nil {
-		return agentrt.Stop{}, false
+		return native.Stop{}, false
 	}
 	_, records, err := r.recordsOf(ctx, runID, false, prefixStop)
 	if err != nil {
 		r.logger.Warn("fiber/runtime: could not read recorded stop requests; relying on the bus",
 			"run_id", runID, "error", err)
-		return agentrt.Stop{}, false
+		return native.Stop{}, false
 	}
 	for _, rec := range records {
 		if rec.Key != stopRecordKey || rec.Status != run.RecordOK {
 			continue
 		}
-		var body payload.StopRequest
+		var body event.StopRequest
 		if err := json.Unmarshal(rec.Output, &body); err != nil || body.RunID != runID {
 			continue
 		}
-		return agentrt.Stop{Reason: body.Reason, By: body.By}, true
+		return native.Stop{Reason: body.Reason, By: body.By}, true
 	}
-	return agentrt.Stop{}, false
+	return native.Stop{}, false
 }
 
 // clip trims free text from a stop request and bounds it, on a rune boundary.
@@ -528,36 +527,35 @@ func clip(s string) string {
 // StopSignal returns the channel on which the turn executing under ctx is
 // asked to stop, or nil when it cannot be.
 //
-// It is how an Executor learns of a stop. The runtime puts the channel on the
-// context it calls Execute with and sends at most one value on it. An executor
-// that reads it wraps the turn up and returns an Outcome with Stopped set and
-// no error. One that never reads it is cancelled through the same context once
-// the grace period is over (see WithStopGrace), and the run ends stopped
-// either way.
+// It is how a turn.Runtime learns of a stop. The runtime puts the channel on
+// the context it calls Turn with and sends at most one value on it. A turn
+// that reads it wraps up and returns with Stopped set and no error. One that
+// never reads it is cancelled through the same context once the grace period
+// is over (see WithStopGrace), and the run ends stopped either way.
 //
-// It is a channel on the context rather than a method on Executor so that the
-// request waits for the turn: a stop that arrives before the executor has set
-// the turn up is still there when it looks.
-func StopSignal(ctx context.Context) <-chan agentrt.Stop { return turnrt.StopSignal(ctx) }
+// It is a channel on the context rather than a method so that the request
+// waits for the turn: a stop that arrives before the turn has started is
+// still there when it looks.
+func StopSignal(ctx context.Context) <-chan native.Stop { return turnrt.StopSignal(ctx) }
 
-// execute runs the turn through the executor, listening for a stop request for
+// execute runs the turn, listening for a stop request for
 // as long as it runs.
 //
-// It returns what the executor returned, with one exception: a turn that was
+// It returns what the turn returned, with one exception: a turn that was
 // asked to stop and then returned an error has done what was asked, by a
 // rougher route, and is reported as stopped with the text it had published.
 // Retrying it would restart work a person asked to end.
-func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
+func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(context.Context, event.Body) error) (Outcome, error) {
 	// A request recorded before this attempt began ends the turn before it
-	// starts: no executor, no model call.
+	// starts: no turn, no model call.
 	if stop, ok := r.recordedStop(ctx, req.RunID); ok {
-		return Outcome{Prompt: agentrt.RequestText(req.Text, req.Meta), Stopped: &stop, StopRecorded: true}, nil
+		return Outcome{Prompt: native.RequestText(req.Text, req.Meta), Stopped: &stop, StopRecorded: true}, nil
 	}
 	// Requests to compact are heard for as long as the turn runs (compact.go).
 	ctx, stopListening := r.listenCompact(ctx, in, req.RunID)
 	defer stopListening()
 	if r.control == nil && r.stops == nil {
-		return r.exec.Execute(ctx, req, emit)
+		return r.runOne(ctx, in, req, emit)
 	}
 	out, err := r.executeListening(ctx, in, req, emit)
 	if err == nil && r.stops != nil {
@@ -570,25 +568,25 @@ func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(
 }
 
 // executeListening is execute for a runtime that can hear a stop request.
-func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
+func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, emit func(context.Context, event.Body) error) (Outcome, error) {
 
 	requests, release := r.listen(ctx, in, req.RunID)
 	defer release()
 
-	signal := make(chan agentrt.Stop, 1)
+	signal := make(chan native.Stop, 1)
 	turnCtx, cancel := context.WithCancel(turnrt.WithStopSignal(ctx, signal))
 	defer cancel()
 
 	var (
 		mu     sync.Mutex
-		asked  *agentrt.Stop
+		asked  *native.Stop
 		said   strings.Builder
 		chunks int
 	)
 	returned := make(chan struct{})
 	relayed := make(chan struct{})
 	// settle ends the relay and waits for it. It is deferred as well as
-	// called, so an executor that panics leaves no goroutine behind: the
+	// called, so a turn that panics leaves no goroutine behind: the
 	// worker recovers the panic, and nothing else would ever close returned.
 	var settled sync.Once
 	settle := func() {
@@ -600,7 +598,7 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 	defer settle()
 	go func() {
 		defer close(relayed)
-		var stop agentrt.Stop
+		var stop native.Stop
 		select {
 		case stop = <-requests:
 		case <-returned:
@@ -622,17 +620,15 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 		}
 	}()
 
-	out, err := r.exec.Execute(turnCtx, req, func(ctx context.Context, c agentrt.Chunk) error {
-		if err := emit(ctx, c); err != nil {
+	out, err := r.runOne(turnCtx, in, req, func(ctx context.Context, b event.Body) error {
+		if err := emit(ctx, b); err != nil {
 			return err
 		}
 		mu.Lock()
 		defer mu.Unlock()
 		chunks++
-		if b, derr := agentrt.BodyOf(c); derr == nil {
-			if txt, ok := b.(event.Text); ok {
-				said.WriteString(txt.Text)
-			}
+		if txt, ok := b.(event.Text); ok {
+			said.WriteString(txt.Text)
 		}
 		return nil
 	})
@@ -642,7 +638,7 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 	defer mu.Unlock()
 	switch {
 	case err == nil:
-		// The executor's account stands. A turn that returned its whole
+		// The turn's account stands. A turn that returned its whole
 		// answer before the request took effect completed: "stopped" means
 		// cut short, and an answer that was finished was not.
 		return out, nil
@@ -656,12 +652,12 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 	}
 	r.logger.Warn("fiber/runtime: turn ended with an error after a stop request; the run ends stopped",
 		"run_id", req.RunID, "error", err)
-	// The executor never said what it sent, so the request is recorded as the
+	// The turn never said what it sent, so the request is recorded as the
 	// agent renders it before retrieval: the same words a turn stopped before
 	// it began records.
 	return Outcome{
 		Text: said.String(), Chunks: chunks, Stopped: asked,
-		Prompt: firstNonEmpty(out.Prompt, agentrt.RequestText(req.Text, req.Meta)),
+		Prompt: firstNonEmpty(out.Prompt, native.RequestText(req.Text, req.Meta)),
 	}, nil
 }
 
@@ -681,10 +677,10 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 // the isolation: a request stamped with another tenant is skipped as though it
 // had never been published. A ledger request was checked against the run's
 // tenant before it was written.
-func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan agentrt.Stop, func()) {
-	out := make(chan agentrt.Stop, 1)
+func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan native.Stop, func()) {
+	out := make(chan native.Stop, 1)
 	var once sync.Once
-	deliver := func(stop agentrt.Stop) {
+	deliver := func(stop native.Stop) {
 		once.Do(func() { out <- stop }) // buffered, and only one send happens
 	}
 
@@ -748,16 +744,16 @@ func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan ag
 
 // firstStop reads one subscription until it yields a request this run should
 // honour, or ends.
-func (r *Runtime) firstStop(ctx context.Context, sub bus.Subscription, runID string) (agentrt.Stop, bool, error) {
+func (r *Runtime) firstStop(ctx context.Context, sub bus.Subscription, runID string) (native.Stop, bool, error) {
 	stream, err := r.control.Subscribe(ctx, sub)
 	if err != nil {
-		return agentrt.Stop{}, false, err
+		return native.Stop{}, false, err
 	}
 	defer func() { _ = stream.Close() }()
 	for {
 		e, err := stream.Recv(ctx)
 		if err != nil {
-			return agentrt.Stop{}, false, err
+			return native.Stop{}, false, err
 		}
 		body, ok := e.Data.(event.StopRequest)
 		if !ok || e.Tenant != sub.Tenant || body.RunID != runID {
@@ -765,7 +761,7 @@ func (r *Runtime) firstStop(ctx context.Context, sub bus.Subscription, runID str
 			// with it was not written by Stop, and is not obeyed.
 			continue
 		}
-		return agentrt.Stop{Reason: body.Reason, By: body.By}, true, nil
+		return native.Stop{Reason: body.Reason, By: body.By}, true, nil
 	}
 }
 

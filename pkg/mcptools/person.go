@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
 
@@ -75,7 +75,7 @@ func (c PersonCredential) resolve(ctx context.Context, r Resolver, provider stri
 // person-scoped provider, so that person's session is opened with their own.
 //
 // actor is the actor on the run's durable record (pkg/runtime puts it on the
-// turn's context, see envelope.ActorFrom), never anything a model or a
+// turn's context, see event.ActorFrom), never anything a model or a
 // request body said. The resolver decides who that actor is: an actor's ID is
 // connector-native and two surfaces may share one, while User is the host's
 // own account for them, which is what a host that keeps credentials per
@@ -87,14 +87,14 @@ func (c PersonCredential) resolve(ctx context.Context, r Resolver, provider stri
 // other error means the credential could not be looked up now; the group is
 // unavailable for the turn and the operator is told why.
 type PersonResolver interface {
-	ResolvePerson(ctx context.Context, tenant string, p toolprovider.Provider, actor envelope.Actor) (PersonCredential, error)
+	ResolvePerson(ctx context.Context, tenant string, p toolprovider.Provider, actor event.Actor) (PersonCredential, error)
 }
 
 // PersonResolverFunc adapts a function into a PersonResolver.
-type PersonResolverFunc func(ctx context.Context, tenant string, p toolprovider.Provider, actor envelope.Actor) (PersonCredential, error)
+type PersonResolverFunc func(ctx context.Context, tenant string, p toolprovider.Provider, actor event.Actor) (PersonCredential, error)
 
 // ResolvePerson implements PersonResolver.
-func (f PersonResolverFunc) ResolvePerson(ctx context.Context, tenant string, p toolprovider.Provider, actor envelope.Actor) (PersonCredential, error) {
+func (f PersonResolverFunc) ResolvePerson(ctx context.Context, tenant string, p toolprovider.Provider, actor event.Actor) (PersonCredential, error) {
 	return f(ctx, tenant, p, actor)
 }
 
@@ -106,7 +106,7 @@ type personKey struct {
 	bot      bool
 }
 
-func keyOf(a envelope.Actor) personKey { return personKey{id: a.ID, user: a.User, bot: a.Bot} }
+func keyOf(a event.Actor) personKey { return personKey{id: a.ID, user: a.User, bot: a.Bot} }
 
 // personCtxKey carries the credential Grants dials a person's session with
 // through Dial, which takes only a context and a record, to Connect.
@@ -123,7 +123,7 @@ func personCredentialFrom(ctx context.Context) (PersonCredential, bool) {
 
 // noPersonCredential is ErrNoPersonCredential for one provider and one turn,
 // with a reason for the operator and a note the model may be told
-// (agentrt.ModelNote), which names neither the actor nor anything about the
+// (native.ModelNote), which names neither the actor nor anything about the
 // deployment.
 type noPersonCredential struct {
 	provider string
@@ -152,7 +152,7 @@ func noPersonResolver(provider string) error {
 		note:   "These tools use a credential of the person you are acting for, and this deployment cannot look one up."}
 }
 
-func notConnected(provider string, a envelope.Actor) error {
+func notConnected(provider string, a event.Actor) error {
 	who := fmt.Sprintf("actor %q", a.ID)
 	if a.User != "" {
 		who += fmt.Sprintf(" (user %q)", a.User)

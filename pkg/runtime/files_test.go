@@ -17,13 +17,13 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/attachment/intake"
 	"github.com/urmzd/fiber/pkg/attachment/resolve"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // A file attached in one turn is part of the conversation from then on: the
@@ -53,8 +53,8 @@ func TestAFileAttachedInOneTurnIsStillSeenInTheNextWithAByteIdenticalPrefix(t *t
 	tools := tool.NewRegistry()
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	sandbox, err := runtime.NewSandbox(plane, tools, sp, runtime.WithAgentOptions(
-		agentrt.WithAttachments(resolve.New(files)),
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil }),
+		native.WithAttachments(resolve.New(files)),
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil }),
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestAFileAttachedInOneTurnIsStillSeenInTheNextWithAByteIdenticalPrefix(t *t
 
 	w := newWorld(t)
 	w.specs = sp
-	rt, err := runtime.New(anchor.New(w.ledger, w.queue), sp, w.bus, sandbox, runtime.WithThreads(w.threads))
+	rt, err := runtime.New(anchor.New(w.ledger, w.queue), sp, w.bus, runtime.WithRuntime(sandbox), runtime.WithThreads(w.threads))
 	if err != nil {
 		t.Fatal(err)
 	}

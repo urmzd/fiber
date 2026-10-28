@@ -4,58 +4,71 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/event/legacy"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 var at = time.Date(2026, 10, 28, 14, 3, 11, 0, time.UTC)
 
-// oldKinds reads every envelope.Kind constant from its source, so a kind
-// added there without a mapping here fails the test.
-func oldKinds(t *testing.T) map[string]string {
-	t.Helper()
-	f, err := parser.ParseFile(token.NewFileSet(), filepath.Join("..", "..", "envelope", "envelope.go"), nil, 0)
-	if err != nil {
-		t.Fatal(err)
+// kind is a v0.25 envelope.Kind. The package is gone, so its constants are
+// pinned here: every kind stored data can still carry.
+type kind string
+
+// family is the kind's leading component, as envelope.Kind.Family was.
+func (k kind) family() string {
+	if i := strings.IndexByte(string(k), '.'); i >= 0 {
+		return string(k[:i])
 	}
+	return string(k)
+}
+
+// matches is envelope.Kind.Matches: the exact kind or its family.
+func (k kind) matches(sel string) bool {
+	return sel == "" || sel == string(k) || sel == k.family()
+}
+
+const (
+	kindText         kind = "delta.text"
+	kindThinking     kind = "delta.thinking"
+	kindToolCall     kind = "delta.tool.call"
+	kindToolDone     kind = "delta.tool.done"
+	kindCitation     kind = "delta.citation"
+	kindAccepted     kind = "lifecycle.accepted"
+	kindStarted      kind = "lifecycle.started"
+	kindParked       kind = "lifecycle.parked"
+	kindResumed      kind = "lifecycle.resumed"
+	kindCompleted    kind = "lifecycle.completed"
+	kindFailed       kind = "lifecycle.failed"
+	kindChildParked  kind = "lifecycle.child.parked"
+	kindStopped      kind = "lifecycle.stopped"
+	kindActionTaken  kind = "action.taken"
+	kindUsageCall    kind = "usage.call"
+	kindUsageChild   kind = "usage.child"
+	kindCompacted    kind = "context.compacted"
+	kindAgentCreated kind = "control.created"
+	kindAgentRevised kind = "control.revised"
+	kindAgentDeleted kind = "control.deleted"
+	kindStop         kind = "control.stop"
+	kindCompact      kind = "control.compact"
+)
+
+// oldKinds is every v0.25 kind by its constant's name.
+func oldKinds(*testing.T) map[string]string {
 	out := map[string]string{}
-	for _, d := range f.Decls {
-		g, ok := d.(*ast.GenDecl)
-		if !ok || g.Tok != token.CONST {
-			continue
-		}
-		for _, s := range g.Specs {
-			v := s.(*ast.ValueSpec)
-			if id, ok := v.Type.(*ast.Ident); !ok || id.Name != "Kind" {
-				continue
-			}
-			for i, n := range v.Names {
-				lit := v.Values[i].(*ast.BasicLit)
-				val, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					t.Fatal(err)
-				}
-				out[n.Name] = val
-			}
-		}
-	}
-	if len(out) < 20 {
-		t.Fatalf("found only %d Kind constants: %v", len(out), out)
+	for _, k := range []kind{
+		kindText, kindThinking, kindToolCall, kindToolDone, kindCitation,
+		kindAccepted, kindStarted, kindParked, kindResumed, kindCompleted, kindFailed, kindChildParked, kindStopped,
+		kindActionTaken, kindUsageCall, kindUsageChild, kindCompacted,
+		kindAgentCreated, kindAgentRevised, kindAgentDeleted, kindStop, kindCompact,
+	} {
+		out[string(k)] = string(k)
 	}
 	return out
 }
@@ -93,7 +106,7 @@ func TestEveryOldKindMaps(t *testing.T) {
 	})
 	for _, k := range legacy.KeptKinds() {
 		if !slices.Contains(values, k) {
-			t.Errorf("KeptKinds has %q, which is no envelope.Kind", k)
+			t.Errorf("KeptKinds has %q, which is no v0.25 kind", k)
 		}
 	}
 	if len(legacy.KeptKinds())+len(dropped) != len(kinds) {
@@ -111,7 +124,7 @@ func TestKindSelectorSelectsWhatItDid(t *testing.T) {
 	selectors := map[string]bool{}
 	for _, k := range kinds {
 		selectors[k] = true
-		selectors[envelope.Kind(k).Family()] = true
+		selectors[kind(k).family()] = true
 	}
 	for sel := range selectors {
 		prefixes, err := legacy.KindSelector(sel)
@@ -127,7 +140,7 @@ func TestKindSelectorSelectsWhatItDid(t *testing.T) {
 			if err != nil {
 				continue
 			}
-			was := envelope.Kind(k).Matches(sel)
+			was := kind(k).matches(sel)
 			now := slices.ContainsFunc(prefixes, func(p string) bool { return event.Selects(p, typ) })
 			if was != now {
 				t.Errorf("selector %q on %q: was %v, now %v (prefixes %v)", sel, k, was, now, prefixes)
@@ -157,71 +170,94 @@ func TestKindSelectorSelectsWhatItDid(t *testing.T) {
 	}
 }
 
-// wireEvent is the v0.25 bus encoding, as pkg/bus wrote it.
-type wireEvent struct {
-	envelope.Event
-	Topic string `json:"topic"`
-	Seq   uint64 `json:"seq,omitempty"`
+// oldEvent is the JSON of a v0.25 envelope.Event.
+type oldEvent struct {
+	Seq     uint64    `json:"seq"`
+	Topic   string    `json:"topic"`
+	RunID   string    `json:"run_id"`
+	Tenant  string    `json:"tenant"`
+	Agent   string    `json:"agent"`
+	Rev     int       `json:"rev"`
+	Origin  string    `json:"origin"`
+	Kind    kind      `json:"kind"`
+	Payload []byte    `json:"payload,omitempty"`
+	At      time.Time `json:"at"`
 }
 
-func oldEvent(t *testing.T, kind envelope.Kind, body any) envelope.Event {
+// wireEvent is the v0.25 bus encoding, as pkg/bus wrote it: the event with
+// its sequence left to the row.
+type wireEvent struct {
+	oldEvent
+	Seq uint64 `json:"seq,omitempty"`
+}
+
+// oldLifecycle is the v0.25 payload of every lifecycle kind but stopped.
+type oldLifecycle struct {
+	Attempt  int             `json:"attempt,omitempty"`
+	Rev      int             `json:"rev,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	Terminal bool            `json:"terminal,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
+	Text     string          `json:"text,omitempty"`
+	Usage    *event.RunUsage `json:"usage,omitempty"`
+	Question *event.Question `json:"question,omitempty"`
+	Answer   *event.Answer   `json:"answer,omitempty"`
+}
+
+func newOldEvent(t *testing.T, k kind, body any) oldEvent {
 	t.Helper()
-	p, err := payload.Encode(body)
+	p, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	top, err := topic.Run("helper", "r1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return envelope.Event{
-		Seq: 7, Topic: top, RunID: "r1", Tenant: "acme", Agent: "helper", Rev: 3,
-		Origin: "slack", Kind: kind, Payload: p, At: at,
+	return oldEvent{
+		Seq: 7, Topic: "agent:helper:r1", RunID: "r1", Tenant: "acme", Agent: "helper", Rev: 3,
+		Origin: "slack", Kind: k, Payload: p, At: at,
 	}
 }
 
 type oldCase struct {
-	kind envelope.Kind
+	kind kind
 	in   any
 	want event.Body
 }
 
 func oldCases() []oldCase {
-	q := payload.Question{ID: "q1", Kind: "approval", Prompt: "May I?", Options: []string{"yes", "no"}}
-	usage := &payload.RunUsage{Own: payload.Usage{PromptTokens: 9, Cost: &payload.Cost{Micros: 12, Currency: "USD"}}}
+	q := event.Question{ID: "q1", Kind: "approval", Prompt: "May I?", Options: []string{"yes", "no"}}
+	usage := &event.RunUsage{Own: event.Usage{PromptTokens: 9, Cost: &event.Cost{Micros: 12, Currency: "USD"}}}
 	wantUsage := &event.RunUsage{Own: event.Usage{PromptTokens: 9, Cost: &event.Cost{Micros: 12, Currency: "USD"}}}
 	// A lifecycle payload with every field set: each type keeps its own.
-	full := payload.Lifecycle{
+	full := oldLifecycle{
 		Attempt: 2, Rev: 3, Error: "boom", Terminal: true, Reason: "waiting", Text: "done", Usage: usage,
-		Question: &q, Answer: &payload.Answer{QuestionID: "q1", Decision: "approve"},
+		Question: &q, Answer: &event.Answer{QuestionID: "q1", Decision: "approve"},
 	}
 	wq := event.Question{ID: "q1", Kind: "approval", Prompt: "May I?", Options: []string{"yes", "no"}}
 	return []oldCase{
-		{envelope.KindAccepted, full, event.Accepted{Attempt: 2}},
-		{envelope.KindStarted, full, event.Started{Attempt: 2}},
-		{envelope.KindParked, full, event.Parked{Attempt: 2, Reason: "waiting", Question: &wq}},
-		{envelope.KindResumed, full, event.Resumed{Attempt: 2, Answer: &event.Answer{QuestionID: "q1", Decision: "approve"}}},
-		{envelope.KindCompleted, full, event.Completed{Attempt: 2, Text: "done", Usage: wantUsage}},
-		{envelope.KindFailed, full, event.Failed{Attempt: 2, Error: "boom", Terminal: true}},
-		{envelope.KindStopped, payload.Stopped{Attempt: 1, Reason: "enough", By: "ana", Text: "so far"}, event.Stopped{Attempt: 1, Reason: "enough", By: "ana", Text: "so far"}},
-		{envelope.KindChildParked, payload.ChildQuestion{RunID: "r2", Agent: "deployer", Question: q}, event.ChildParked{RunID: "r2", Agent: "deployer", Question: wq}},
-		{envelope.KindText, payload.Text{Text: "Hello"}, event.Text{Text: "Hello"}},
-		{envelope.KindThinking, payload.Thinking{Text: "Hmm"}, event.Thinking{Text: "Hmm"}},
-		{envelope.KindToolCall, payload.ToolCall{ID: "c1", Name: "search", Phase: "executing", Arguments: json.RawMessage(`{"q":"x"}`)},
+		{kindAccepted, full, event.Accepted{Attempt: 2}},
+		{kindStarted, full, event.Started{Attempt: 2}},
+		{kindParked, full, event.Parked{Attempt: 2, Reason: "waiting", Question: &wq}},
+		{kindResumed, full, event.Resumed{Attempt: 2, Answer: &event.Answer{QuestionID: "q1", Decision: "approve"}}},
+		{kindCompleted, full, event.Completed{Attempt: 2, Text: "done", Usage: wantUsage}},
+		{kindFailed, full, event.Failed{Attempt: 2, Error: "boom", Terminal: true}},
+		{kindStopped, event.Stopped{Attempt: 1, Reason: "enough", By: "ana", Text: "so far"}, event.Stopped{Attempt: 1, Reason: "enough", By: "ana", Text: "so far"}},
+		{kindChildParked, event.ChildParked{RunID: "r2", Agent: "deployer", Question: q}, event.ChildParked{RunID: "r2", Agent: "deployer", Question: wq}},
+		{kindText, event.Text{Text: "Hello"}, event.Text{Text: "Hello"}},
+		{kindThinking, event.Thinking{Text: "Hmm"}, event.Thinking{Text: "Hmm"}},
+		{kindToolCall, event.ToolCall{ID: "c1", Name: "search", Phase: "executing", Arguments: json.RawMessage(`{"q":"x"}`)},
 			event.ToolCall{ID: "c1", Name: "search", Phase: "executing", Arguments: json.RawMessage(`{"q":"x"}`)}},
-		{envelope.KindToolDone, payload.ToolDone{ID: "c1", Name: "search", Result: "3 hits"}, event.ToolDone{ID: "c1", Name: "search", Result: "3 hits"}},
-		{envelope.KindCitation, payload.Citation{Label: "[1]", Text: "q", Source: payload.Provenance{SourceURI: "https://x"}},
+		{kindToolDone, event.ToolDone{ID: "c1", Name: "search", Result: "3 hits"}, event.ToolDone{ID: "c1", Name: "search", Result: "3 hits"}},
+		{kindCitation, event.Citation{Label: "[1]", Text: "q", Source: event.Provenance{SourceURI: "https://x"}},
 			event.Citation{Label: "[1]", Text: "q", Source: event.Provenance{SourceURI: "https://x"}}},
-		{envelope.KindActionTaken, payload.Action{Name: "jira_comment", Target: "jira://acme/P-1", Summary: "ok"},
+		{kindActionTaken, event.Action{Name: "jira_comment", Target: "jira://acme/P-1", Summary: "ok"},
 			event.Action{Name: "jira_comment", Target: "jira://acme/P-1", Summary: "ok"}},
-		{envelope.KindUsageCall, payload.UsageCall{AccountingID: "r1/a1/1", Model: "m", PromptTokens: 9},
+		{kindUsageCall, event.UsageCall{AccountingID: "r1/a1/1", Model: "m", PromptTokens: 9},
 			event.UsageCall{AccountingID: "r1/a1/1", Model: "m", PromptTokens: 9}},
-		{envelope.KindUsageChild, payload.UsageChild{AccountingID: "run:r2", RunID: "r2", Usage: payload.Usage{CompletionTokens: 4}},
+		{kindUsageChild, event.UsageChild{AccountingID: "run:r2", RunID: "r2", Usage: event.Usage{CompletionTokens: 4}},
 			event.UsageChild{AccountingID: "run:r2", RunID: "r2", Usage: event.Usage{CompletionTokens: 4}}},
-		{envelope.KindCompacted, map[string]any{"trigger": "input_pressure", "summarized": 3, "kept": 1},
+		{kindCompacted, map[string]any{"trigger": "input_pressure", "summarized": 3, "kept": 1},
 			event.Compaction{Trigger: "input_pressure", Summarized: 3, Kept: 1}},
-		{envelope.KindStop, payload.StopRequest{RunID: "r1", Reason: "stop", By: "ana", At: at}, event.StopRequest{RunID: "r1", Reason: "stop", By: "ana", At: at}},
-		{envelope.KindCompact, payload.CompactRequest{RunID: "r1", By: "ana", At: at}, event.CompactRequest{RunID: "r1", By: "ana", At: at}},
+		{kindStop, event.StopRequest{RunID: "r1", Reason: "stop", By: "ana", At: at}, event.StopRequest{RunID: "r1", Reason: "stop", By: "ana", At: at}},
+		{kindCompact, event.CompactRequest{RunID: "r1", By: "ana", At: at}, event.CompactRequest{RunID: "r1", By: "ana", At: at}},
 	}
 }
 
@@ -242,8 +278,7 @@ func checkDecoded(t *testing.T, c oldCase, got event.Envelope) {
 
 func TestDecodeBusRow(t *testing.T) {
 	for _, c := range oldCases() {
-		e := oldEvent(t, c.kind, c.in)
-		body, err := json.Marshal(wireEvent{Event: e, Topic: e.Topic.String()})
+		body, err := json.Marshal(wireEvent{oldEvent: newOldEvent(t, c.kind, c.in)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -253,18 +288,16 @@ func TestDecodeBusRow(t *testing.T) {
 		}
 		checkDecoded(t, c, got)
 	}
-	for kind, want := range map[envelope.Kind]error{
-		envelope.KindAgentCreated: legacy.ErrDropped,
-		"delta.future":            legacy.ErrUnknown,
+	for k, want := range map[kind]error{
+		kindAgentCreated: legacy.ErrDropped,
+		"delta.future":   legacy.ErrUnknown,
 	} {
-		e := oldEvent(t, kind, map[string]any{})
-		body, _ := json.Marshal(wireEvent{Event: e, Topic: e.Topic.String()})
+		body, _ := json.Marshal(wireEvent{oldEvent: newOldEvent(t, k, map[string]any{})})
 		if _, err := legacy.DecodeBusRow(7, body); !errors.Is(err, want) {
-			t.Errorf("%s: err = %v, want %v", kind, err, want)
+			t.Errorf("%s: err = %v, want %v", k, err, want)
 		}
 	}
-	e := oldEvent(t, envelope.KindText, map[string]any{"text": 5})
-	body, _ := json.Marshal(wireEvent{Event: e, Topic: e.Topic.String()})
+	body, _ := json.Marshal(wireEvent{oldEvent: newOldEvent(t, kindText, map[string]any{"text": 5})})
 	if _, err := legacy.DecodeBusRow(7, body); err == nil {
 		t.Error("a broken known payload decoded")
 	}
@@ -279,14 +312,14 @@ type oldEntry struct {
 	Agent   string          `json:"agent"`
 	Rev     int             `json:"rev"`
 	Origin  string          `json:"origin,omitempty"`
-	Kind    envelope.Kind   `json:"kind"`
+	Kind    kind            `json:"kind"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 	At      time.Time       `json:"at"`
 }
 
-func oldEntryOf(e envelope.Event) oldEntry {
+func oldEntryOf(e oldEvent) oldEntry {
 	return oldEntry{
-		Seq: e.Seq, Topic: e.Topic.String(), RunID: e.RunID, Tenant: e.Tenant,
+		Seq: e.Seq, Topic: e.Topic, RunID: e.RunID, Tenant: e.Tenant,
 		Agent: e.Agent, Rev: e.Rev, Origin: e.Origin, Kind: e.Kind,
 		Payload: json.RawMessage(e.Payload), At: e.At,
 	}
@@ -294,7 +327,7 @@ func oldEntryOf(e envelope.Event) oldEntry {
 
 func TestDecodeEntry(t *testing.T) {
 	for _, c := range oldCases() {
-		raw, err := json.Marshal(oldEntryOf(oldEvent(t, c.kind, c.in)))
+		raw, err := json.Marshal(oldEntryOf(newOldEvent(t, c.kind, c.in)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -342,7 +375,7 @@ func decodeTag(t *testing.T, tag oldTag) legacy.Trigger {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := agentrt.RequestText(tag.Text, tag.Meta); got != want {
+	if want := event.RequestText(tag.Text, tag.Meta); got != want {
 		t.Errorf("%s renders\n%q, want\n%q", tr.Event.Type, got, want)
 	}
 	return tr

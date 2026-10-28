@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // held is a model that says part of an answer and then keeps the call open
@@ -57,10 +57,10 @@ func (h *held) count() int {
 	return h.calls
 }
 
-func heldRunner(t *testing.T, h *held) *agentrt.Runner {
+func heldRunner(t *testing.T, h *held) *native.Runner {
 	t.Helper()
-	r, err := agentrt.New(offlineRevision(1, "You document things."),
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return h, nil }))
+	r, err := native.New(offlineRevision(1, "You document things."),
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return h, nil }))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -78,20 +78,20 @@ func TestAStopMidStreamEndsTheTurnStoppedAndKeepsWhatWasSaid(t *testing.T) {
 	model := &held{partial: "The deploy failed because"}
 	r := heldRunner(t, model)
 
-	stop := make(chan agentrt.Stop, 1)
+	stop := make(chan native.Stop, 1)
 	var said sync.Once
 	type outcome struct {
-		res agentrt.Result
+		res native.Result
 		err error
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		res, err := r.Run(context.Background(), agentrt.Turn{Text: "why did the deploy fail?", Stop: stop},
-			func(_ context.Context, c agentrt.Chunk) error {
-				if c.Kind == envelope.KindText {
+		res, err := r.Run(context.Background(), native.Turn{Text: "why did the deploy fail?", Stop: stop},
+			func(_ context.Context, c event.Body) error {
+				if c.Type() == event.TypeText {
 					// Stop only once the partial text is out, so the test
 					// stops a turn that is demonstrably mid-stream.
-					said.Do(func() { stop <- agentrt.Stop{Reason: "Stopped by a user", By: "slack:U1"} })
+					said.Do(func() { stop <- native.Stop{Reason: "Stopped by a user", By: "slack:U1"} })
 				}
 				return nil
 			})
@@ -110,7 +110,7 @@ func TestAStopMidStreamEndsTheTurnStoppedAndKeepsWhatWasSaid(t *testing.T) {
 	if got.res.Stopped == nil {
 		t.Fatal("Result.Stopped is nil: the turn reads as completed")
 	}
-	if *got.res.Stopped != (agentrt.Stop{Reason: "Stopped by a user", By: "slack:U1"}) {
+	if *got.res.Stopped != (native.Stop{Reason: "Stopped by a user", By: "slack:U1"}) {
 		t.Errorf("Stopped = %+v, want the reason and the asker that were sent", *got.res.Stopped)
 	}
 	if got.res.Text != "The deploy failed because" {
@@ -133,10 +133,10 @@ func TestAStopWaitingBeforeTheTurnBeginsNeverCallsTheModel(t *testing.T) {
 	model := &held{partial: "never said"}
 	r := heldRunner(t, model)
 
-	stop := make(chan agentrt.Stop, 1)
-	stop <- agentrt.Stop{Reason: "changed my mind", By: "U1"}
+	stop := make(chan native.Stop, 1)
+	stop <- native.Stop{Reason: "changed my mind", By: "U1"}
 
-	chunks, res := collect(t, r, agentrt.Turn{
+	chunks, res := collect(t, r, native.Turn{
 		Text: "summarise the thread", Meta: map[string]string{"channel": "ops"}, Stop: stop,
 	})
 	if res.Stopped == nil || res.Stopped.Reason != "changed my mind" {
@@ -158,13 +158,13 @@ func TestAStopWaitingBeforeTheTurnBeginsNeverCallsTheModel(t *testing.T) {
 func TestATurnNobodyStopsCompletes(t *testing.T) {
 	t.Parallel()
 
-	r, err := agentrt.New(offlineRevision(1, "You document things."),
-		agentrt.WithScript(agenttest.TextResponse("the docs are updated")))
+	r, err := native.New(offlineRevision(1, "You document things."),
+		native.WithScript(agenttest.TextResponse("the docs are updated")))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	stop := make(chan agentrt.Stop, 1)
-	_, res := collect(t, r, agentrt.Turn{Text: "update the docs", Stop: stop})
+	stop := make(chan native.Stop, 1)
+	_, res := collect(t, r, native.Turn{Text: "update the docs", Stop: stop})
 	if res.Stopped != nil {
 		t.Fatalf("Stopped = %+v on a turn nobody stopped", res.Stopped)
 	}
@@ -175,7 +175,7 @@ func TestATurnNobodyStopsCompletes(t *testing.T) {
 	// A request that arrives after the turn returned is nobody's: it must
 	// still be in the channel, not consumed by a goroutine the turn left
 	// behind.
-	stop <- agentrt.Stop{Reason: "too late"}
+	stop <- native.Stop{Reason: "too late"}
 	select {
 	case <-stop:
 	case <-time.After(time.Second):
@@ -187,8 +187,8 @@ func TestATurnNobodyStopsCompletes(t *testing.T) {
 // goroutine that watches for a stop goes with it rather than waiting forever
 // on a channel nobody will close.
 func TestAPanickingTurnLeavesNoStopWatcherBehind(t *testing.T) {
-	r, err := agentrt.New(offlineRevision(1, "You document things."),
-		agentrt.WithScript(agenttest.TextResponse("the docs are updated")))
+	r, err := native.New(offlineRevision(1, "You document things."),
+		native.WithScript(agenttest.TextResponse("the docs are updated")))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -196,8 +196,8 @@ func TestAPanickingTurnLeavesNoStopWatcherBehind(t *testing.T) {
 	for range 5 {
 		func() {
 			defer func() { _ = recover() }()
-			_, _ = r.Run(context.Background(), agentrt.Turn{Text: "update the docs", Stop: make(chan agentrt.Stop)},
-				func(context.Context, agentrt.Chunk) error { panic("emit bug") })
+			_, _ = r.Run(context.Background(), native.Turn{Text: "update the docs", Stop: make(chan native.Stop)},
+				func(context.Context, event.Body) error { panic("emit bug") })
 		}()
 	}
 	deadline := time.Now().Add(5 * time.Second)

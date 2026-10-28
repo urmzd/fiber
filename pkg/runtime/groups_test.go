@@ -15,10 +15,11 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // issuesServer is an MCP server with a read tool, a write tool and a tool
@@ -100,11 +101,11 @@ func groupsSandbox(t *testing.T, script map[string][][]saigetypes.Delta) (*runti
 	return sb, history, ran
 }
 
-func runTurnAs(t *testing.T, s *runtime.Sandbox, tenant string, rev agentrt.Revision) (runtime.Outcome, []agentrt.Chunk, error) {
+func runTurnAs(t *testing.T, s *runtime.Sandbox, tenant string, rev native.Revision) (runtime.Outcome, []event.Body, error) {
 	t.Helper()
-	var chunks []agentrt.Chunk
+	var chunks []event.Body
 	out, err := s.Execute(context.Background(), withPin(runtime.Request{RunID: "run-" + rev.Spec.Name, Tenant: tenant, Attempt: 1, Text: "go"}, rev),
-		func(_ context.Context, c agentrt.Chunk) error {
+		func(_ context.Context, c event.Body) error {
 			chunks = append(chunks, c)
 			return nil
 		})
@@ -122,7 +123,7 @@ func TestAStoreBackedGroupGrantGivesTheAgentTheProvidersTools(t *testing.T) {
 		},
 	})
 	history.revise("triage", "Triage.")
-	rev := history.edit("triage", func(s *agentrt.Spec) { s.Tools = []string{agentrt.MCPGroup("issues")} })
+	rev := history.edit("triage", func(s *native.Spec) { s.Tools = []string{native.MCPGroup("issues")} })
 
 	out, chunks, err := runTurnAs(t, sb, "acme", rev)
 	if err != nil {
@@ -147,9 +148,9 @@ func TestAGroupGrantsClassDecidesWhichToolsRun(t *testing.T) {
 		grant, call string
 		runs        bool
 	}{
-		{agentrt.MCPGroup("issues"), "issues__close_issue", false},
-		{agentrt.MCPWriteGroup("issues"), "issues__close_issue", true},
-		{agentrt.MCPWriteGroup("issues"), "issues__drop_db", false},
+		{native.MCPGroup("issues"), "issues__close_issue", false},
+		{native.MCPWriteGroup("issues"), "issues__close_issue", true},
+		{native.MCPWriteGroup("issues"), "issues__drop_db", false},
 	} {
 		t.Run(tc.grant+"/"+tc.call, func(t *testing.T) {
 			sb, history, ran := groupsSandbox(t, map[string][][]saigetypes.Delta{
@@ -159,7 +160,7 @@ func TestAGroupGrantsClassDecidesWhichToolsRun(t *testing.T) {
 				},
 			})
 			history.revise("triage", "Triage.")
-			rev := history.edit("triage", func(s *agentrt.Spec) { s.Tools = []string{tc.grant} })
+			rev := history.edit("triage", func(s *native.Spec) { s.Tools = []string{tc.grant} })
 			_, chunks, err := runTurnAs(t, sb, "acme", rev)
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
@@ -182,15 +183,15 @@ func TestAGroupGrantsClassDecidesWhichToolsRun(t *testing.T) {
 func TestAnApprovalOnAToolTheGrantsClassExcludesRefusesToBuild(t *testing.T) {
 	sb, history, _ := groupsSandbox(t, map[string][][]saigetypes.Delta{"triage": {agenttest.TextResponse("ok")}})
 	history.revise("triage", "Triage.")
-	rev := history.edit("triage", func(s *agentrt.Spec) {
-		s.Tools = []string{agentrt.MCPGroup("issues")}
+	rev := history.edit("triage", func(s *native.Spec) {
+		s.Tools = []string{native.MCPGroup("issues")}
 		s.Approvals = []string{"issues__close_issue"}
 	})
 	if _, _, err := runTurnAs(t, sb, "acme", rev); err == nil || !strings.Contains(err.Error(), "issues__close_issue") {
 		t.Fatalf("Execute = %v, want the approval refused", err)
 	}
 
-	rev = history.edit("triage", func(s *agentrt.Spec) { s.Tools = []string{agentrt.MCPWriteGroup("issues")} })
+	rev = history.edit("triage", func(s *native.Spec) { s.Tools = []string{native.MCPWriteGroup("issues")} })
 	if _, _, err := runTurnAs(t, sb, "acme", rev); err != nil {
 		t.Fatalf("under the write grant: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestAnApprovalOnAToolTheGrantsClassExcludesRefusesToBuild(t *testing.T) {
 func TestAGroupGrantExpandsForTheTurnsTenantOnly(t *testing.T) {
 	sb, history, ran := groupsSandbox(t, map[string][][]saigetypes.Delta{"triage": {agenttest.TextResponse("ok")}})
 	history.revise("triage", "Triage.")
-	rev := history.edit("triage", func(s *agentrt.Spec) { s.Tools = []string{agentrt.MCPGroup("issues")} })
+	rev := history.edit("triage", func(s *native.Spec) { s.Tools = []string{native.MCPGroup("issues")} })
 	if _, _, err := runTurnAs(t, sb, "globex", rev); err != nil {
 		t.Fatalf("globex's turn: %v, want it to run without the group", err)
 	}

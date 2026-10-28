@@ -223,8 +223,8 @@ func TestOnlyToolsAnAdminAcceptedAreCallable(t *testing.T) {
 	}
 }
 
-// The agentrt seam: *Toolset satisfies the Lookup shape agentrt.Tools has,
-// asserted here structurally so this package need not import agentrt.
+// The native seam: *Toolset satisfies the Lookup shape native.Tools has,
+// asserted here structurally so this package need not import native.
 func TestToolsetHasTheShapeAgentrtConsumes(t *testing.T) {
 	var _ interface {
 		Lookup(name string) (saigetypes.Tool, error)

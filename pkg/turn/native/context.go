@@ -10,7 +10,7 @@ import (
 	saige "github.com/urmzd/saige/agent"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/turn"
 )
 
@@ -264,7 +264,7 @@ func (g *compactionGuard) after(_ context.Context, ev *saige.CompactionEvent) er
 // model call. See Turn.Compact.
 type CompactRequest = turn.CompactRequest
 
-// TriggerRequested is payload.Compaction.Trigger for a compaction a host
+// TriggerRequested is event.Compaction.Trigger for a compaction a host
 // asked for.
 const TriggerRequested = string(saigetypes.CompactionTriggerRequested)
 
@@ -349,7 +349,7 @@ func (q *compactRequests) ended(compacted bool) {
 // record attributes a compaction record to the attempt that made it: the
 // oldest one not read yet, since compactions run one at a time and each
 // sends its record before the next starts.
-func (q *compactRequests) record(c payload.Compaction) payload.Compaction {
+func (q *compactRequests) record(c event.Compaction) event.Compaction {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if len(q.attempts) == 0 {
@@ -409,8 +409,8 @@ func (q *compactRequests) peek() bool {
 // compactionRecord reduces saige's compaction record to the facts a caller
 // can act on. The node ids it drops name messages in a conversation tree that
 // does not outlive the turn.
-func compactionRecord(d saigetypes.CompactionDelta) payload.Compaction {
-	return payload.Compaction{
+func compactionRecord(d saigetypes.CompactionDelta) event.Compaction {
+	return event.Compaction{
 		Trigger:      string(d.Record.Trigger),
 		Strategy:     d.Record.Strategy,
 		TokensBefore: d.Record.TokensBefore,

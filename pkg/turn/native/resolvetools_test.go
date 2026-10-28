@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ResolveTools is what a host shows before it runs an agent, so it must say
@@ -21,25 +21,25 @@ func TestResolveToolsReportsWhatATurnOffersTheModel(t *testing.T) {
 	t.Parallel()
 
 	refusal := notedErr{operator: "issues: carol has no credential", model: "they have not connected one for issues"}
-	catalog := noted{groupCatalog: groupCatalog{Tools: agentrt.StaticTools(lookupTool("lookup"), lookupTool("search"))}, err: refusal}
+	catalog := noted{groupCatalog: groupCatalog{Tools: native.StaticTools(lookupTool("lookup"), lookupTool("search"))}, err: refusal}
 	rev := offlineRevision(1, "You look things up.")
 	rev.Spec.Provider = "spy"
-	rev.Spec.Tools = []string{"search", "jira_transition", agentrt.AskPersonToolName, agentrt.MCPGroup("issues"), "lookup"}
+	rev.Spec.Tools = []string{"search", "jira_transition", native.AskPersonToolName, native.MCPGroup("issues"), "lookup"}
 	rev.Spec.Approvals = []string{"lookup"}
 
 	var shown [][]saigetypes.ToolDef
 	var msgs []saigetypes.Message
-	opts := []agentrt.Option{agentrt.WithProvider("spy", spyRequests(&shown, &msgs)), agentrt.WithTools(catalog)}
-	r, err := agentrt.New(rev, opts...)
+	opts := []native.Option{native.WithProvider("spy", spyRequests(&shown, &msgs)), native.WithTools(catalog)}
+	r, err := native.New(rev, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	collect(t, r, agentrt.Turn{Text: "look it up"})
+	collect(t, r, native.Turn{Text: "look it up"})
 	if len(shown) == 0 {
 		t.Fatal("the model was never asked")
 	}
 
-	got, err := agentrt.ResolveTools(rev, opts...)
+	got, err := native.ResolveTools(rev, opts...)
 	if err != nil {
 		t.Fatalf("ResolveTools: %v", err)
 	}
@@ -53,11 +53,11 @@ func TestResolveToolsReportsWhatATurnOffersTheModel(t *testing.T) {
 	for _, d := range got.Tools {
 		names = append(names, d.Name)
 	}
-	if want := []string{agentrt.AskPersonToolName, "lookup", "search"}; !reflect.DeepEqual(names, want) {
+	if want := []string{native.AskPersonToolName, "lookup", "search"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("tools %v, want %v sorted by name", names, want)
 	}
 	if len(got.Unavailable) != 2 || got.Unavailable[0].Name != "jira_transition" ||
-		got.Unavailable[1].Name != agentrt.MCPGroup("issues") || got.Unavailable[1].Note != refusal.model {
+		got.Unavailable[1].Name != native.MCPGroup("issues") || got.Unavailable[1].Note != refusal.model {
 		t.Errorf("unavailable %+v, want jira_transition, then the group with the model's note", got.Unavailable)
 	}
 }
@@ -66,16 +66,16 @@ func TestResolveToolsReportsWhatATurnOffersTheModel(t *testing.T) {
 // them builds no model client: an agent whose provider has no key can still
 // be shown its tools, where New refuses to build it.
 func TestResolveToolsNeedsNoModelCredential(t *testing.T) {
-	t.Setenv(agentrt.EnvAnthropicKey, "")
+	t.Setenv(native.EnvAnthropicKey, "")
 
 	rev := offlineRevision(1, "You look things up.")
-	rev.Spec.Provider = agentrt.ProviderAnthropic
+	rev.Spec.Provider = native.ProviderAnthropic
 	rev.Spec.Tools = []string{"lookup"}
-	opts := []agentrt.Option{agentrt.WithTools(agentrt.StaticTools(lookupTool("lookup")))}
-	if _, err := agentrt.New(rev, opts...); err == nil || !strings.Contains(err.Error(), agentrt.EnvAnthropicKey) {
-		t.Fatalf("New = %v, want it refused for want of %s", err, agentrt.EnvAnthropicKey)
+	opts := []native.Option{native.WithTools(native.StaticTools(lookupTool("lookup")))}
+	if _, err := native.New(rev, opts...); err == nil || !strings.Contains(err.Error(), native.EnvAnthropicKey) {
+		t.Fatalf("New = %v, want it refused for want of %s", err, native.EnvAnthropicKey)
 	}
-	got, err := agentrt.ResolveTools(rev, opts...)
+	got, err := native.ResolveTools(rev, opts...)
 	if err != nil {
 		t.Fatalf("ResolveTools = %v, want the tools listed without a key", err)
 	}
@@ -85,7 +85,7 @@ func TestResolveToolsNeedsNoModelCredential(t *testing.T) {
 
 	// And no tool is called to list it.
 	called := &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "lookup", Parameters: saigetypes.ParameterSchema{Type: "object"}}}
-	if _, err := agentrt.ResolveTools(rev, agentrt.WithTools(agentrt.StaticTools(called))); err != nil {
+	if _, err := native.ResolveTools(rev, native.WithTools(native.StaticTools(called))); err != nil {
 		t.Fatal(err)
 	}
 	if len(called.Calls) != 0 {
@@ -98,28 +98,28 @@ func TestResolveToolsNeedsNoModelCredential(t *testing.T) {
 func TestResolveToolsRefusesWhatNewRefuses(t *testing.T) {
 	t.Parallel()
 
-	catalog := agentrt.ToolsFunc(func(name string) (saigetypes.Tool, error) {
+	catalog := native.ToolsFunc(func(name string) (saigetypes.Tool, error) {
 		if name == "lookup" {
 			return lookupTool("lookup"), nil
 		}
-		return nil, fmt.Errorf("%w: %q", agentrt.ErrNoSuchTool, name)
+		return nil, fmt.Errorf("%w: %q", native.ErrNoSuchTool, name)
 	})
 	for _, tc := range []struct {
 		name      string
 		tools     []string
 		approvals []string
-		opts      []agentrt.Option
+		opts      []native.Option
 		want      error
 	}{
-		{name: "an approval for a tool it is not granted", tools: []string{"lookup"}, approvals: []string{"deploy"}, want: agentrt.ErrInvalid},
-		{name: "a missing tool under strict tools", tools: []string{"lookup", "deploy"}, opts: []agentrt.Option{agentrt.WithStrictTools()}, want: agentrt.ErrNoSuchTool},
+		{name: "an approval for a tool it is not granted", tools: []string{"lookup"}, approvals: []string{"deploy"}, want: native.ErrInvalid},
+		{name: "a missing tool under strict tools", tools: []string{"lookup", "deploy"}, opts: []native.Option{native.WithStrictTools()}, want: native.ErrNoSuchTool},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rev := offlineRevision(1, "You look things up.")
 			rev.Spec.Tools, rev.Spec.Approvals = tc.tools, tc.approvals
-			opts := append([]agentrt.Option{agentrt.WithTools(catalog)}, tc.opts...)
-			_, newErr := agentrt.New(rev, opts...)
-			_, err := agentrt.ResolveTools(rev, opts...)
+			opts := append([]native.Option{native.WithTools(catalog)}, tc.opts...)
+			_, newErr := native.New(rev, opts...)
+			_, err := native.ResolveTools(rev, opts...)
 			if !errors.Is(err, tc.want) || newErr == nil || err.Error() != newErr.Error() {
 				t.Errorf("ResolveTools = %v, New = %v; want both to refuse with %v", err, newErr, tc.want)
 			}

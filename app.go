@@ -26,8 +26,6 @@ import (
 	"github.com/urmzd/playscape/pkg/workspace"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/attachment/resolve"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
@@ -37,7 +35,6 @@ import (
 	"github.com/urmzd/fiber/pkg/dispatch"
 	"github.com/urmzd/fiber/pkg/durable"
 	"github.com/urmzd/fiber/pkg/egress"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
@@ -45,6 +42,8 @@ import (
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // App is fiber assembled: every long-lived component a process owns, in the
@@ -77,7 +76,7 @@ type App struct {
 	out     *egress.Engine
 	rt      *runtime.Runtime
 	disp    *dispatch.Dispatcher
-	exec    runtime.Executor
+	exec    turn.Runtime
 	ledger  Ledger
 	queue   dqueue.Queue
 
@@ -199,9 +198,9 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 
 	// The agent side. A turn runs as a playscape task under the NGAC policy
 	// compiled from the pinned revision's Access grant.
-	a.exec = o.Executor
+	a.exec = o.Runtime
 	if a.exec == nil {
-		if a.exec, err = a.newExecutor(grants); err != nil {
+		if a.exec, err = a.newSandbox(grants); err != nil {
 			return fail(err)
 		}
 	}
@@ -230,7 +229,7 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 		rtOpts = append(rtOpts, runtime.WithCompactRequests())
 	}
 	rtOpts = append(rtOpts, o.RuntimeOpts...)
-	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), a.defs, a.broker, a.exec, rtOpts...); err != nil {
+	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), a.defs, a.broker, append([]runtime.Option{runtime.WithRuntime(a.exec)}, rtOpts...)...); err != nil {
 		return fail(fmt.Errorf("fiber: runtime: %w", err))
 	}
 	if a.disp, err = dispatch.New(a.broker, a.members, a.rt, dispatch.WithLogger(a.log)); err != nil {
@@ -398,14 +397,14 @@ func commentID(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
 
-// newExecutor builds the sandbox a turn runs in.
+// newSandbox builds the sandbox a turn runs in.
 //
 // The tool registry and the workspace are shared with the control plane
 // rather than owned by the sandbox: playscape resolves a tool by name on the
 // node that executes it. The policy that scopes what that tool can see comes
 // from the pinned revision, one deployment per (agent, revision), which is
 // what stops a revised Access grant from widening a run already in flight.
-func (a *App) newExecutor(groups runtime.ToolGroupSource) (runtime.Executor, error) {
+func (a *App) newSandbox(groups runtime.ToolGroupSource) (turn.Runtime, error) {
 	dir := a.opt.Workspace
 	ws, err := workspace.NewLocal(dir)
 	if err != nil {
@@ -414,14 +413,14 @@ func (a *App) newExecutor(groups runtime.ToolGroupSource) (runtime.Executor, err
 	tools := tool.NewRegistry()
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), a.opt.Metrics)
 
-	agentOpts := []agentrt.Option{agentrt.WithAttachments(resolve.New(a.blobs))}
+	agentOpts := []native.Option{native.WithAttachments(resolve.New(a.blobs))}
 	// Extension providers come after the built-ins, so one named like a
 	// built-in replaces it.
 	for _, name := range slices.Sorted(maps.Keys(a.opt.Providers)) {
-		agentOpts = append(agentOpts, agentrt.WithProvider(name, a.opt.Providers[name]))
+		agentOpts = append(agentOpts, native.WithProvider(name, a.opt.Providers[name]))
 	}
 	if c := a.opt.Compaction; c.MaxInputTokens > 0 || c.OnRequest {
-		agentOpts = append(agentOpts, agentrt.WithCompaction(c))
+		agentOpts = append(agentOpts, native.WithCompaction(c))
 	}
 	exec, err := runtime.NewSandbox(plane, tools, a.defs,
 		runtime.WithAgentOptions(agentOpts...),
@@ -532,26 +531,26 @@ func (a *App) Publish(ctx context.Context, e event.Envelope) error {
 // no model credential. The trigger is trusted as given, as Publish trusts it,
 // and needs only a tenant (or the App's, WithTenant).
 //
-// It asks the App's sandbox. An executor passed by WithExecutor is asked
+// It asks the App's sandbox. A turn runtime passed by WithTurnRuntime is asked
 // too if it has a method ToolsFor(context.Context, runtime.Request)
-// (agentrt.Granted, error); otherwise the error is errors.ErrUnsupported.
-func (a *App) ToolsFor(ctx context.Context, trigger event.Envelope, agent string) (agentrt.Granted, error) {
+// (native.Granted, error); otherwise the error is errors.ErrUnsupported.
+func (a *App) ToolsFor(ctx context.Context, trigger event.Envelope, agent string) (native.Granted, error) {
 	lister, ok := a.exec.(interface {
-		ToolsFor(context.Context, runtime.Request) (agentrt.Granted, error)
+		ToolsFor(context.Context, runtime.Request) (native.Granted, error)
 	})
 	if !ok {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: the executor cannot report them: %w", agent, errors.ErrUnsupported)
+		return native.Granted{}, fmt.Errorf("fiber: tools for %q: the turn runtime cannot report them: %w", agent, errors.ErrUnsupported)
 	}
 	if trigger.Tenant == "" {
 		trigger.Tenant = a.opt.Tenant
 	}
 	pin, err := a.defs.Resolve(ctx, trigger.Tenant, agent)
 	if err != nil {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
+		return native.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
 	}
 	loaded, err := a.defs.Verify(ctx, trigger.Tenant, pin)
 	if err != nil {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
+		return native.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
 	}
 	in := runtime.Input{Trigger: trigger, Subscriber: agent, Run: runtime.RunKey(trigger.Tenant, trigger.ID, agent)}
 	text, meta, _ := event.Prompt(trigger.Data)
@@ -567,15 +566,15 @@ func (a *App) ToolsFor(ctx context.Context, trigger event.Envelope, agent string
 		Source:  source,
 		Text:    text,
 		Meta:    meta,
-		Definition: agentrt.Revision{
+		Definition: native.Revision{
 			Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec,
 		},
 		Pin:    pin,
 		Policy: loaded.Agent.Policy,
 	}
-	granted, err := lister.ToolsFor(envelope.WithActor(ctx, in.Actor()), req)
+	granted, err := lister.ToolsFor(event.WithActor(ctx, in.Actor()), req)
 	if err != nil {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
+		return native.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
 	}
 	return granted, nil
 }
@@ -596,7 +595,7 @@ func (a *App) Compact(ctx context.Context, req runtime.CompactRequest) error {
 // Answer answers a question a run is parked on, and returns the answer the
 // question has, which is this one only when first is true. See
 // runtime.Runtime.Answer for the errors.
-func (a *App) Answer(ctx context.Context, req runtime.AnswerRequest) (answer payload.Answer, first bool, err error) {
+func (a *App) Answer(ctx context.Context, req runtime.AnswerRequest) (answer event.Answer, first bool, err error) {
 	return a.rt.Answer(ctx, req)
 }
 

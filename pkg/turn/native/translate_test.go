@@ -1,4 +1,4 @@
-package agentrt_test
+package native_test
 
 import (
 	"encoding/json"
@@ -7,9 +7,8 @@ import (
 
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // Every delta the mapping claims to carry must produce an event of the declared
@@ -21,49 +20,49 @@ func TestEveryMappedDeltaBecomesItsKind(t *testing.T) {
 	tests := []struct {
 		name string
 		in   saigetypes.Delta
-		kind envelope.Kind
+		kind string
 		want string // the expected payload JSON
 	}{
 		{
 			name: "text content",
 			in:   saigetypes.PartDelta{Text: "hello"},
-			kind: envelope.KindText,
+			kind: event.TypeText,
 			want: `{"text":"hello"}`,
 		},
 		{
 			name: "thinking content",
 			in:   saigetypes.PartDelta{Thinking: "weighing options"},
-			kind: envelope.KindThinking,
+			kind: event.TypeThinking,
 			want: `{"text":"weighing options"}`,
 		},
 		{
 			name: "tool call start",
 			in:   saigetypes.PartStart{Kind: saigetypes.KindToolCall, ID: "call_1", Name: "grep"},
-			kind: envelope.KindToolCall,
+			kind: event.TypeToolCall,
 			want: `{"id":"call_1","name":"grep","phase":"requested"}`,
 		},
 		{
 			name: "tool exec start",
 			in:   saigetypes.ToolExecStartDelta{ToolCallID: "call_2", Name: "build"},
-			kind: envelope.KindToolCall,
+			kind: event.TypeToolCall,
 			want: `{"id":"call_2","name":"build","phase":"executing"}`,
 		},
 		{
 			name: "tool exec end",
 			in:   saigetypes.ToolExecEndDelta{ToolCallID: "call_3", Name: "build", Result: "ok"},
-			kind: envelope.KindToolDone,
+			kind: event.TypeToolDone,
 			want: `{"id":"call_3","name":"build","result":"ok"}`,
 		},
 		{
 			name: "tool exec end with error",
 			in:   saigetypes.ToolExecEndDelta{ToolCallID: "call_4", Result: "failed", Error: "exit 1"},
-			kind: envelope.KindToolDone,
+			kind: event.TypeToolDone,
 			want: `{"id":"call_4","result":"failed","error":"exit 1"}`,
 		},
 		{
 			name: "nested tool delta unwraps to its inner kind",
 			in:   saigetypes.ToolExecDelta{ToolCallID: "call_5", Inner: saigetypes.PartDelta{Text: "from a sub-agent"}},
-			kind: envelope.KindText,
+			kind: event.TypeText,
 			want: `{"text":"from a sub-agent"}`,
 		},
 	}
@@ -71,15 +70,15 @@ func TestEveryMappedDeltaBecomesItsKind(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := agentrt.NewTranslator().Delta(tc.in)
+			got, ok := native.NewTranslator().Delta(tc.in)
 			if !ok {
 				t.Fatalf("%T produced no event", tc.in)
 			}
-			if got.Kind != tc.kind {
-				t.Errorf("kind is %s, want %s", got.Kind, tc.kind)
+			if got.Type() != tc.kind {
+				t.Errorf("kind is %s, want %s", got.Type(), tc.kind)
 			}
-			if string(got.Payload) != tc.want {
-				t.Errorf("payload is %s, want %s", got.Payload, tc.want)
+			if string(raw(got)) != tc.want {
+				t.Errorf("payload is %s, want %s", raw(got), tc.want)
 			}
 		})
 	}
@@ -91,7 +90,7 @@ func TestEveryMappedDeltaBecomesItsKind(t *testing.T) {
 func TestToolDoneReportsItsOwnName(t *testing.T) {
 	t.Parallel()
 
-	tr := agentrt.NewTranslator()
+	tr := native.NewTranslator()
 	tr.Delta(saigetypes.ToolExecStartDelta{ToolCallID: "a", Name: "read"})
 	tr.Delta(saigetypes.ToolExecStartDelta{ToolCallID: "b", Name: "write"})
 
@@ -103,8 +102,8 @@ func TestToolDoneReportsItsOwnName(t *testing.T) {
 		if !ok {
 			t.Fatalf("call %s produced no done event", end.ToolCallID)
 		}
-		var body payload.ToolDone
-		if err := json.Unmarshal(c.Payload, &body); err != nil {
+		var body event.ToolDone
+		if err := json.Unmarshal(raw(c), &body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
 		if body.ID != end.ToolCallID || body.Name != end.Name {
@@ -114,7 +113,7 @@ func TestToolDoneReportsItsOwnName(t *testing.T) {
 }
 
 // The deltas that are framing, telemetry, or lifecycle must NOT become events:
-// envelope.Kind is a published contract and this package does not get to invent
+// string is a published contract and this package does not get to invent
 // members of it.
 func TestFramingAndTelemetryDeltasProduceNoEvents(t *testing.T) {
 	t.Parallel()
@@ -134,10 +133,10 @@ func TestFramingAndTelemetryDeltasProduceNoEvents(t *testing.T) {
 		saigetypes.CitationDelta{Citation: saigetypes.Citation{Title: "model-cited"}}, // not translated yet: citations come from retrieval
 		saigetypes.PartDelta{}, // empty fragment: nothing to render
 	}
-	tr := agentrt.NewTranslator()
+	tr := native.NewTranslator()
 	for _, d := range dropped {
 		if c, ok := tr.Delta(d); ok {
-			t.Errorf("%T became a %s event, want no event", d, c.Kind)
+			t.Errorf("%T became a %s event, want no event", d, c.Type())
 		}
 	}
 }

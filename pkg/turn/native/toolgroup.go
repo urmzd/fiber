@@ -62,7 +62,7 @@ func groupMembers(name string) string {
 // per tenant; a host with a single session can also build one by hand:
 //
 //	ts, err := session.Toolset(ctx, snapshot, toolprovider.GrantRead)
-//	group := agentrt.ToolGroup{Name: agentrt.MCPGroup(provider.Name), Tools: ts.All()}
+//	group := native.ToolGroup{Name: native.MCPGroup(provider.Name), Tools: ts.All()}
 //
 // The read/write class is part of the group's name: "mcp:<provider>" is read
 // only and "mcp:<provider>:write" admits write tools too, and whoever builds

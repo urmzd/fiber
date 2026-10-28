@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/event"
 	turnrt "github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // Compacting a run on request.
@@ -21,7 +21,7 @@ import (
 // turn compacts before its next model call, exactly as the budget would have
 // made it, and publishes context.compacted with Trigger "requested" and who
 // asked. The deployment has to take requests: WithCompactRequests on the
-// runtime and agentrt.Compaction.OnRequest on its agents, both of which
+// runtime and native.Compaction.OnRequest on its agents, both of which
 // fiber.WithCompaction sets.
 //
 // # How the request reaches the turn
@@ -57,7 +57,7 @@ const compactVerb = "compact"
 var ErrCompactUnavailable = errors.New("runtime: compaction on request is not available")
 
 // WithCompactRequests makes every turn listen for requests to compact, and
-// Compact publish them. Pass it with agentrt.Compaction.OnRequest on the
+// Compact publish them. Pass it with native.Compaction.OnRequest on the
 // executor's agents: one without the other either listens for requests no
 // turn obeys, or obeys requests no turn hears.
 //
@@ -128,10 +128,10 @@ func (r *Runtime) Compact(ctx context.Context, req CompactRequest) error {
 }
 
 // CompactSignal returns the channel on which the turn executing under ctx is
-// asked to compact, or nil when it cannot be. An Executor hands it to the
-// agent loop as agentrt.Turn.Compact; one that does not simply never
+// asked to compact, or nil when it cannot be. A turn runtime hands it to the
+// agent loop as native.Turn.Compact; one that does not simply never
 // compacts on request.
-func CompactSignal(ctx context.Context) <-chan agentrt.CompactRequest {
+func CompactSignal(ctx context.Context) <-chan native.CompactRequest {
 	return turnrt.CompactSignal(ctx)
 }
 
@@ -148,7 +148,7 @@ func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (co
 	}
 	// One slot: a request that finds it full folds into the one waiting,
 	// which is what the turn would do with it anyway.
-	signal := make(chan agentrt.CompactRequest, 1)
+	signal := make(chan native.CompactRequest, 1)
 	since := r.now().UTC()
 	listenCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -181,7 +181,7 @@ func (r *Runtime) listenCompact(ctx context.Context, in Input, runID string) (co
 // relayCompact reads one subscription and relays every request this attempt
 // should honour, until the subscription ends. It records every request it
 // reads in seen, so the caller resubscribes without relaying one twice.
-func (r *Runtime) relayCompact(ctx context.Context, sub bus.Subscription, seen map[string]bool, runID string, since time.Time, signal chan<- agentrt.CompactRequest) error {
+func (r *Runtime) relayCompact(ctx context.Context, sub bus.Subscription, seen map[string]bool, runID string, since time.Time, signal chan<- native.CompactRequest) error {
 	stream, err := r.control.Subscribe(ctx, sub)
 	if err != nil {
 		return err
@@ -203,7 +203,7 @@ func (r *Runtime) relayCompact(ctx context.Context, sub bus.Subscription, seen m
 			continue
 		}
 		select {
-		case signal <- agentrt.CompactRequest{By: body.By}:
+		case signal <- native.CompactRequest{By: body.By}:
 		default:
 		}
 	}

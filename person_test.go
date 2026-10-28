@@ -19,7 +19,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -96,8 +95,8 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	}
 	search.Class = toolprovider.ClassRead
 
-	var asked []envelope.Actor
-	people := mcptools.PersonResolverFunc(func(_ context.Context, tn string, p toolprovider.Provider, a envelope.Actor) (mcptools.PersonCredential, error) {
+	var asked []event.Actor
+	people := mcptools.PersonResolverFunc(func(_ context.Context, tn string, p toolprovider.Provider, a event.Actor) (mcptools.PersonCredential, error) {
 		mu.Lock()
 		asked = append(asked, a)
 		mu.Unlock()
@@ -143,7 +142,7 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	if _, err := createAgent(c.Definitions(), ctx, tenant, spec, "test"); err != nil {
 		t.Fatal(err)
 	}
-	people3 := []envelope.Actor{{ID: "U-ana", User: "u-ana"}, {ID: "U-bob", User: "u-bob"}, {ID: "U-carol", User: "u-carol"}}
+	people3 := []event.Actor{{ID: "U-ana", User: "u-ana"}, {ID: "U-bob", User: "u-bob"}, {ID: "U-carol", User: "u-carol"}}
 	for _, a := range people3 {
 		target, _ := address.Parse("inbox://" + tenant + "/" + a.User)
 		e := posted("Ev-"+a.User, tenant, "triage", target.String(), "how many for "+a.User+"?")

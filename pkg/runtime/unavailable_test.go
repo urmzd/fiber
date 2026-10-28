@@ -15,8 +15,9 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // A revision granting a tool this deployment does not have used to fail every
@@ -32,7 +33,7 @@ func TestARunGrantedAToolTheDeploymentLacksStillRuns(t *testing.T) {
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
 	history.revise("triage", "Triage.")
-	rev := history.edit("triage", func(s *agentrt.Spec) { s.Tools = []string{"jira.transition"} })
+	rev := history.edit("triage", func(s *native.Spec) { s.Tools = []string{"jira.transition"} })
 
 	var logs bytes.Buffer
 	s, err := runtime.NewSandbox(plane, tools, history,
@@ -45,7 +46,7 @@ func TestARunGrantedAToolTheDeploymentLacksStillRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := s.Execute(context.Background(), withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "Move PROJ-1"}, rev),
-		func(context.Context, agentrt.Chunk) error { return nil })
+		func(context.Context, event.Body) error { return nil })
 	if err != nil {
 		t.Fatalf("Execute = %v, want the run to go ahead without jira.transition", err)
 	}
@@ -59,12 +60,12 @@ func TestARunGrantedAToolTheDeploymentLacksStillRuns(t *testing.T) {
 	// A host that wants the old refusal still gets it.
 	strict, err := runtime.NewSandbox(plane, tools, history,
 		runtime.WithCatalog(runtime.Connectors(nil)),
-		runtime.WithAgentOptions(agentrt.WithStrictTools()))
+		runtime.WithAgentOptions(native.WithStrictTools()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := strict.Execute(context.Background(), withPin(runtime.Request{RunID: "run-2", Tenant: "acme", Attempt: 1, Text: "Move PROJ-1"}, rev),
-		func(context.Context, agentrt.Chunk) error { return nil }); err == nil {
+		func(context.Context, event.Body) error { return nil }); err == nil {
 		t.Error("a strict sandbox ran a revision granted a tool it lacks")
 	}
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/internal/pgrename"
 )
 
@@ -289,7 +289,7 @@ func collect(rows pgx.Rows) ([]Entry, error) {
 			e     Entry
 			seq   int64
 			role  string
-			a     envelope.Actor
+			a     event.Actor
 			files []byte
 		)
 		if err := rows.Scan(&seq, &role, &e.Text, &a.ID, &a.Display, &a.Bot, &e.RunID, &e.SurfaceID, &e.At, &files); err != nil {

@@ -379,7 +379,7 @@ in your own program and turn them into these options; fiber reads neither.
 | `WithBus(b)` | `bus.NewMemory`, `bus.NewRedis(client)`, `bus.NewPostgres(pool)` | memory |
 | `WithRegistry`, `WithDurable(ledger, queue)`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders` | One store, built by the caller | memory, or the `WithPostgres` one |
 | `WithEmbedder(e)` | The embedder of the knowledge store New builds | offline hashing |
-| `WithExecutor`, `WithRuntimeOptions`, `WithWorkerOptions` | The sandbox, and options for the runtime and worker | built-in sandbox |
+| `WithTurnRuntime`, `WithRuntimeOptions`, `WithWorkerOptions` | The turn runtime (a `turn.Runtime`), and options for the runtime and worker | built-in sandbox |
 | `WithWorkspace(dir)` | Where the sandbox writes agent artifacts | a temporary directory |
 | `WithTenant`, `WithConcurrency`, `WithCompaction`, `WithAuthor`, `WithLogger`, `WithMetrics` | Deployment | none, one, off, offline, discard, none |
 | `WithSlack`, `WithGitHub`, `WithJira`, `WithWebhooks`, `WithSchedules` | Built-in connectors, typed Go values | off |
