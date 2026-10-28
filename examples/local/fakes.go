@@ -5,8 +5,8 @@ package main
 // be told to fail once.
 //
 // They are fakes only in the sense that they do not open sockets. Each one
-// implements exactly the interface the real thing implements — connector.Sink,
-// turn.Runtime, native.Retriever, bus.Bus — so nothing in main.go is
+// implements exactly the interface the real thing implements (connector.Sink,
+// turn.Runtime, native.Retriever, bus.Bus), so nothing in main.go is
 // simplified for the demo. Swapping pkg/connectors/slack in for slackSink is a
 // constructor change and nothing else.
 
@@ -42,7 +42,7 @@ import (
 // So the sinks RECORD what they wrote to their surface, keyed by the sequence
 // that caused the write, and main prints the settled transcript in
 // (seq, surface) order once the run is terminal. Nothing about what each sink
-// received, or when, is changed by this — only when the ink dries.
+// received, or when, is changed by this, only when the ink dries.
 
 type transcript struct {
 	mu    sync.Mutex
@@ -180,7 +180,7 @@ func (s *slackSink) delivered(runID string) (n int, done bool) {
 
 // ── the webhook sink ────────────────────────────────────────────────
 //
-// The other half of the N:M claim. Same run, same bus, same moment — but this
+// The other half of the N:M claim. Same run, same bus, same moment, but this
 // subscription asked for run.completed and nothing else, so this sink never
 // learns that deltas exist. It POSTs a JSON body once and is finished.
 
@@ -344,8 +344,8 @@ func (c corpus) Retrieve(context.Context, string) (*ragtypes.AssembledContext, e
 //
 // pkg/bus.Memory is a complete broker, not a stub, so there is no failure
 // injection in it and there should not be. Section 7 needs one specific
-// publish to fail once — that is how it forces anchor to replay a turn whose
-// agent activity is already recorded — so the failure is wrapped around the
+// publish to fail once (that is how it forces anchor to replay a turn whose
+// agent activity is already recorded), so the failure is wrapped around the
 // bus instead of built into it.
 //
 // Only Publish is overridden. Subscribe passes through, so the observer and the

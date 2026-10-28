@@ -1,20 +1,19 @@
 # Events, channels, definitions and the Runtime
 
-> **Design, being implemented.** This document is the target for the event
-> union work. It replaces the Tag, topic, registry and Executor sections of
-> [overview.md](overview.md). Where the code still uses the old shapes, the
-> old sections describe what runs today, and this document describes where
-> each piece goes.
+> **Implemented.** This document specifies the event union, the channel bus,
+> definitions and the `Runtime` seam as built. [overview.md](overview.md)
+> covers how a run behaves on top of them. Moving data and hosts from the
+> shapes before the union is in [Upgrade](#10-upgrade).
 
 The design turns on four decisions:
 
 1. Every event is one envelope with a typed body. `type` names the body.
 2. One bus carries every event. Subscribers listen by channel and type prefix.
-3. Agents are saige definitions. fiber keeps no registry and no `AgentSpec`.
+3. Agents are saige definitions plus a fiber Policy, stored insert only and pinned per run.
 4. A run executes through a small `Runtime` interface. saige is the default.
 
-A run is no longer started by a free-text `Tag`. It is started by an event: a
-chat message is `message.posted.v1` with a `text` field.
+A run is started by an event: a chat message is `message.posted.v1` with a
+`text` field, and the model reads the catalog rendering of that event.
 
 ## 1. Envelope
 
@@ -75,38 +74,33 @@ N       = [1-9][0-9]*
 A breaking change to a body is a new type (`.v2`), registered next to the old
 one. Nothing else in the envelope says what `data` holds.
 
-### Run events, from the old kinds
+### Run events
 
-Every `envelope.Kind` constant in `pkg/envelope` maps to one catalog type.
+| Type | Body | Notes |
+|------|------|-------|
+| `run.accepted.v1` | `Accepted` | |
+| `run.started.v1` | `Started` | |
+| `run.parked.v1` | `Parked` | Carries the question |
+| `run.resumed.v1` | `Resumed` | |
+| `run.completed.v1` | `Completed` | Terminal, carries the run's usage |
+| `run.failed.v1` | `Failed` | Terminal, carries the error |
+| `run.stopped.v1` | `Stopped` | Terminal, carries the reason, the asker and the partial answer |
+| `run.child.parked.v1` | `ChildParked` | |
+| `run.delta.text.v1` | `Text` | |
+| `run.delta.thinking.v1` | `Thinking` | |
+| `run.delta.tool.call.v1` | `ToolCall` | |
+| `run.delta.tool.done.v1` | `ToolDone` | |
+| `run.delta.citation.v1` | `Citation` | |
+| `run.action.taken.v1` | `Action` | |
+| `run.usage.v1` | `UsageCall` | Opt-in |
+| `run.usage.child.v1` | `UsageChild` | Opt-in |
+| `run.context.compacted.v1` | `Compaction` | Opt-in |
+| `control.stop.v1` | `StopRequest` | Control channel only |
+| `control.compact.v1` | `CompactRequest` | Control channel only |
 
-| Old `envelope.Kind` | New type | Notes |
-|---------------------|----------|-------|
-| `lifecycle.accepted` | `run.accepted.v1` | |
-| `lifecycle.started` | `run.started.v1` | |
-| `lifecycle.parked` | `run.parked.v1` | |
-| `lifecycle.resumed` | `run.resumed.v1` | |
-| `lifecycle.completed` | `run.completed.v1` | |
-| `lifecycle.failed` | `run.failed.v1` | |
-| `lifecycle.stopped` | `run.stopped.v1` | |
-| `lifecycle.child.parked` | `run.child.parked.v1` | |
-| `delta.text` | `run.delta.text.v1` | |
-| `delta.thinking` | `run.delta.thinking.v1` | |
-| `delta.tool.call` | `run.delta.tool.call.v1` | |
-| `delta.tool.done` | `run.delta.tool.done.v1` | |
-| `delta.citation` | `run.delta.citation.v1` | |
-| `action.taken` | `run.action.taken.v1` | |
-| `usage.call` | `run.usage.v1` | Opt-in |
-| `usage.child` | `run.usage.child.v1` | Opt-in |
-| `context.compacted` | `run.context.compacted.v1` | Opt-in |
-| `control.stop` | `control.stop.v1` | Control channel only |
-| `control.compact` | `control.compact.v1` | Control channel only |
-| `control.created` | dropped | No producer |
-| `control.revised` | dropped | No producer |
-| `control.deleted` | dropped | No producer |
-
-Lifecycle events used to share one payload. Each now has its own body, so
-`run.failed.v1` carries an error and `run.parked.v1` carries the question,
-and neither carries fields that belong to the other.
+Each run event has its own body, so `run.failed.v1` carries an error and
+`run.parked.v1` carries the question, and neither carries fields that belong
+to the other.
 
 ### Ingress types
 
@@ -247,7 +241,7 @@ type Subscription struct {
 	Channels []string // channel prefixes
 	Types    []string // type prefixes
 	Run      string   // optional: one run only
-	From     string   // optional: resume after this cursor
+	From     uint64   // optional: resume after this sequence in each run
 }
 ```
 
@@ -276,14 +270,15 @@ and `run.delta` does not match `run.deltas.v1`. Channel segments split on
   are today and do not change.
 - **Sequence.** Per-run `seq` banding is kept: each attempt and each child
   writes in its own band, so ordering inside a run survives retries.
-- **Membership.** An agent is woken only by channels it is a member of and
-  types its policy allows. Membership is default deny.
+- **Membership.** An agent is woken only by channels it is a member of
+  (`pkg/membership`), for the type prefixes its membership `Rule` names, and
+  by default only when the event names it. Membership is default deny.
 
 ## 7. Definitions
 
 Agents are saige definitions (`saige/agent/definition`) plus a fiber
-**Policy** sidecar, both in `pkg/definition`. fiber has no `AgentSpec`, no
-revision counter and no registry of its own.
+**Policy** sidecar, both in `pkg/definition`. The version is saige's semantic
+version; fiber keeps no counter of its own.
 
 A definition is one `.agent.md` file: YAML frontmatter, then the system
 prompt.
@@ -314,7 +309,7 @@ its hash (`Policy.Hash`, domain `fiber/policy/v1`) is part of every pin.
 
 | Field (JSON) | Meaning |
 |--------------|---------|
-| `subscriptions` | Channels and type prefixes the agent subscribes to |
+| `subscriptions` | Channels and type prefixes the agent listens on. Recorded and hashed; what wakes an agent today is its membership (`pkg/membership`) |
 | `workspace_areas` | Sandbox areas the agent may touch |
 | `mcp_write` | `tools.mcp` servers whose write tools it may call |
 | `knowledge` | Corpora it may retrieve from |
@@ -359,46 +354,58 @@ new versions; `Get` still reads every version. `Memory` and `Postgres`
 `definitiontest.Run`. A Resolver builds a saige registry over exactly the
 tree a root reaches, per tenant, so saige's reference and cycle checks apply.
 
-**From the old specs.** `FromAgentSpec` converts a stored spec
-deterministically: revision N becomes version N.0.0, `access.spawn` becomes
-`subagents`, `approvals` becomes `approval.ask`, and everything else goes to
-the Policy. A spec whose names break the name rule is refused with a
-`NameError` listing them.
-
 **Local runs.** `fiber run [flags] agent.agent.md MESSAGE` stores the file
-(and `-policy policy.json`) in memory and runs it once.
+(and `-policy policy.json`) in memory, publishes one `message.posted.v1` for it
+and prints the run's events by type.
 
 ## 8. Runtime
 
-A run executes one turn at a time through a small interface:
+A run executes one turn at a time through a small interface in `pkg/turn`:
 
 ```go
-// Runtime runs one turn of a pinned definition for one input event and
-// streams catalog events back.
+// Runtime runs one turn of a pinned definition for one input and streams
+// catalog event bodies back.
 type Runtime interface {
-	Turn(ctx context.Context, in Input, emit func(context.Context, event.Envelope) error) (Outcome, error)
+	Turn(ctx context.Context, def Pinned, in Input, emit func(context.Context, event.Body) error) (Result, error)
+}
+
+type Pinned struct {
+	Name    string
+	Version string
+	Digest  string // the content hash at Version
+	Spec    Spec   // the definition's content
 }
 
 type Input struct {
-	Tenant string
-	Run    string
-	Pin    Pin            // the definition, fixed at accept time
-	Event  event.Envelope // the event that started or resumed the run
+	Trigger      event.Envelope // the event the turn answers
+	History      []Message      // the conversation so far, oldest first
+	Instructions string         // a trusted host return contract, never user text
+	Tenant       string         // from the principal
+	Accounting   string         // the prefix model calls are keyed under
+	Park         bool           // the turn may end at a question
+	QuestionTTL  time.Duration
+	Resume       *Parked        // continue a parked turn with its answers
 }
 ```
 
-- The **native** implementation wraps saige: it resolves the pin, builds the
-  agent and turns saige deltas into `run.delta.*` events.
-- Another implementation can run any agent loop, as long as it emits
-  catalog events.
-- **Sandbox** is a decorator around any `Runtime`. It runs the wrapped turn
-  as a playscape task under the pin's policy, so isolation does not depend on
-  which runtime is inside it.
+- Every body emitted is a registered catalog type. The host stamps run
+  identity (channel, run, sequence, tenant, version, digest) on each body; a
+  Runtime cannot know it and never sets it.
+- A stop reaches the turn on its context (`turn.StopSignal`), as does a
+  request to compact (`turn.CompactSignal`) and the actor the turn acts for
+  (`event.ActorFrom`). A stopped turn returns `Result.Stopped` and no error.
+- The **native** implementation (`pkg/turn/native`) wraps saige: it builds
+  the agent from the pinned definition, renders the trigger through the
+  catalog and turns saige deltas into `run.delta.*` bodies. With
+  `pkg/definition`, it is the only package that imports saige directly.
+- Another implementation can run any agent loop, as long as it emits catalog
+  bodies. Pass it with `fiber.WithTurnRuntime`; `turn.Func` adapts a function.
+- **Sandbox** (`pkg/turn/sandbox`) is a decorator around any `Runtime`. It
+  runs the wrapped turn as a playscape task under the pinned policy, so
+  isolation does not depend on which runtime is inside it.
 - **anchor** stays the durable layer. The turn is still an anchor activity,
-  and `emit` still writes the journal before the bus.
-
-`Runtime` replaces `runtime.Executor` and the `agentrt` coupling between the
-runtime and saige.
+  and every emitted body is written to the journal before the bus.
+- `pkg/turn/runtimetest` holds any `Runtime` to the same contract.
 
 ## 9. Adapters
 
@@ -411,7 +418,7 @@ Surfaces are adapters. Delivery does not know which surface it serves.
   channel plus type prefix and render what arrives onto their surface.
 
 Implemented in `pkg/connector` (`Trigger.Ingest(ctx, publish)`,
-`Subscriber`) and `pkg/egress`, which replaced the router.
+`Subscriber`), `pkg/dispatch`, `pkg/membership` and `pkg/egress`.
 
 - **Ingress.** Slack publishes `message.posted.v1` (mentions from `Bots`),
   `slack.command.invoked.v1` and `slack.session.stopped.v1`. GitHub publishes
@@ -437,6 +444,43 @@ error, not an empty match.
 
 ## 10. Upgrade
 
+This is the one place the names from before the union appear.
+
+**Removed packages and shapes.**
+
+| Before | Now |
+|--------|-----|
+| `pkg/envelope` (`Event`, `Kind`, `Filter`, `Subscription`) | `pkg/event` (`Envelope`, `Body`, the catalog) and `bus.Subscription` |
+| `pkg/topic` (`agent`, `agent:<name>`, `agent:<name>:<run>`, `agent:_control:<verb>-<key>`) | URI channels and `control://<tenant>/<verb>/<hash>` (`event.ControlChannel`) |
+| `pkg/agentspec` (`AgentSpec`, revisions) | saige `.agent.md` definitions plus `definition.Policy` |
+| `pkg/registry` and `registrytest` | `definition.Source` (`Memory`, `Postgres`) and `definitiontest` |
+| `pkg/agentrt` and `pkg/agentrt/payload` | `pkg/turn/native` and the bodies in `pkg/event` |
+| `runtime.Executor` | `turn.Runtime`, with `pkg/turn/sandbox` as a decorator |
+| The router and `Route` kind filters | `pkg/egress` subscriptions by channel and type prefix |
+| `Tag`, with free text in `Tag.Text` and context in `Tag.Meta` | An ingress event; the text is `Request.Text`, the context `Request.Context`, private keys `Envelope.Private` |
+| A connector's `Trigger` choosing an agent | Ingress publishes on the surface's channel; membership and dispatch choose |
+| `fiber.WithRegistry`, `App.Registry` | `fiber.WithDefinitions`, `App.Definitions` |
+| `App.Invoke(ctx, tag)` | `App.Publish(ctx, event)` with `App.Memberships`, or `App.Runtime().Accept(ctx, event, agent)` |
+| `App.ToolsFor(ctx, tag)` | `App.ToolsFor(ctx, event, agent)` |
+| `fiber.WithExecutor` | `fiber.WithTurnRuntime` |
+| `App.Router` | `App.Egress`, and `App.Dispatcher` for waking members |
+| Webhook body v1 (`kind`, `topic`, `payload`) | Webhook body v2, the envelope itself, with `Fiber-Event-Version: 2` |
+
+**Old kinds to types.** Every `envelope.Kind` maps to one type, through
+`legacy.TypeOf`:
+
+| Old kind | Type |
+|----------|------|
+| `lifecycle.<state>` (`accepted`, `started`, `parked`, `resumed`, `completed`, `failed`, `stopped`) | `run.<state>.v1` |
+| `lifecycle.child.parked` | `run.child.parked.v1` |
+| `delta.<name>` (`text`, `thinking`, `tool.call`, `tool.done`, `citation`) | `run.delta.<name>.v1` |
+| `action.taken` | `run.action.taken.v1` |
+| `usage.call` | `run.usage.v1` |
+| `usage.child` | `run.usage.child.v1` |
+| `context.compacted` | `run.context.compacted.v1` |
+| `control.stop`, `control.compact` | `control.stop.v1`, `control.compact.v1` |
+| `control.created`, `control.revised`, `control.deleted` | dropped: they had no producer |
+
 - **Activity names.** The durable turn registers `fiber.turn.v2`,
   `fiber.turn.agent.v2` and `fiber.turn.resume.v2`. A run recorded under the
   v1 names (`fiber.turn`, `fiber.turn.agent`, `fiber.turn.resume`) or before
@@ -446,10 +490,30 @@ error, not an empty match.
 - **Bus tables.** The channel bus writes new tables. The old `fiber_bus_*`
   tables are read by nothing after the upgrade and are safe to drop after
   24 hours, when every row in them has aged out.
-- **Legacy decoders.** Stored JSON written before the union (thread entries,
-  run records, journal events with a `kind`) is read through legacy decoders
-  that map each old kind to its new type, using the table in
-  [Types](#2-types).
+- **Legacy decoders.** Stored JSON written before the union is read through
+  `pkg/event/legacy`, which reads raw JSON and imports none of the old
+  packages: `DecodeBusRow` and `DecodeEntry` for bus rows and journal events
+  with a `kind`, and `DecodeTag` for an old run input. `DecodeTag` chooses the
+  type from the tag's meta (`cron_*` keys make `cron.tick.v1`, `github_*` a
+  `github.*` type, `jira_*` a `jira.*` type, a slash command
+  `slack.command.invoked.v1`, anything else `message.posted.v1`) and renders
+  exactly the request text the tag rendered.
+- **Agents.** `definition.FromAgentSpec` converts a stored spec
+  deterministically: revision N becomes version N.0.0, provider and model
+  become `model.use`, fallbacks `model.fallback`, `access.spawn` becomes
+  `subagents`, `approvals` becomes `approval.ask`, `mcp:<p>[:write]` becomes
+  `tools.mcp` with the write bit in `Policy.MCPWrite`, and everything else goes
+  to the Policy. A spec whose names break saige's name rule is refused with a
+  `NameError` listing them. The registry's tables `fiber_agents` and
+  `fiber_agent_revisions` are no longer read or written, and can be dropped
+  once no run pinned to a revision is still replayable.
+- **Webhook selectors.** An endpoint's old `Kinds` (`lifecycle.completed`,
+  `delta`, `usage`) are read through `legacy.KindSelector` at config load. An
+  unknown or dropped selector is a config error, not an empty match.
+- **Subscribers to topics.** A host that let callers subscribe to
+  `agent:<name>` or `agent:<name>:<run>` translates those to channel and run
+  subscriptions itself. `legacy.Topic` spells a run's old address, and
+  `legacy.RunChannel` is the channel its old events are read onto.
 - **Deploy.** Deploy with a single replica, or stop old replicas briefly
   before starting new ones. Old and new replicas do not share a bus.
 
@@ -462,8 +526,3 @@ These names are in stored data and do not change:
 | Tables | `fiber_runs`, `fiber_run_records`, `fiber_run_queue`, `fiber_threads`, `fiber_thread_entries`, `fiber_knowledge_documents`, `fiber_knowledge_chunks`, `fiber_tool_providers`, `fiber_tool_snapshots` |
 | Record keys | `fiber.question.<id>`, `fiber.answer.<id>`, `fiber.child.<id>`, `fiber.stop`, `fiber.usage.a<attempt>`, `fiber.knowledge.v1` |
 | Activity names | `fiber.turn`, `fiber.turn.agent`, `fiber.turn.resume`, kept only so a v1 run is recognised and failed terminally |
-
-The tables `fiber_agents` and `fiber_agent_revisions` belonged to the
-registry. They are no longer read or written. Their agents move to
-`fiber_definitions` through `FromAgentSpec`, and the tables can be dropped
-once no run pinned to a revision is still replayable.

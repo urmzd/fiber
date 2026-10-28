@@ -24,19 +24,22 @@
 </p>
 <p align="center"><em>Real output from the offline example. The model and destination services are simulated.</em></p>
 
-fiber is a Go library for agents and a low-latency pub/sub bus. Define an agent
-with a spec, tag it from Slack, GitHub, Jira or a schedule, and its events
-stream to any subscriber while being delivered to any destination you name.
-You compose it in Go: there is no service, no configuration file and no
-environment variable. Every backend is a value passed to `fiber.New`, and
-anything you do not pass is the in-memory implementation.
+fiber is a Go library for agents and a low-latency pub/sub bus. Store an agent
+as a saige `.agent.md` definition, make it a member of a channel, and publish a
+typed event there: a Slack message, a GitHub comment, a Jira issue or a
+schedule. The run's events stream to any subscriber and are delivered wherever
+the channel leads. You compose it in Go: there is no service, no configuration
+file and no environment variable. Every backend is a value passed to
+`fiber.New`, and anything you do not pass is the in-memory implementation.
 
-**Where a tag is raised and where its answer lands are independent.** A GitHub
-request can stream into Slack while a webhook receives only its completion
-event. Each run pins an agent revision, so retries use the same definition.
+**Where an event arrives and where its answer lands are independent.** A
+GitHub comment can stream into Slack while a webhook receives only its
+completion event. Each run pins its definition's version and digest, so a
+retry never runs a newer prompt.
 
 ## Contents
 
+- [Concepts](#concepts)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -48,15 +51,28 @@ event. Each run pins an agent revision, so retries use the same definition.
 - [Documentation](#documentation)
 - [License](#license)
 
+## Concepts
+
+| Concept | What it is |
+|---------|------------|
+| **Event** | One `event.Envelope` (`id`, `source`, `type`, `subject`, `channel`, `time`, `hops`, plus `tenant`, `run`, `seq` on run events) whose `data` is a typed body. `type` is the only discriminator and carries the version: `message.posted.v1`, `github.pull_request.opened.v1`, `cron.tick.v1`, `run.delta.text.v1`, `run.completed.v1`. |
+| **Catalog** | Every type is registered once with its decoder, a renderer that turns it into model input, and a sensitivity flag. A type this build does not know decodes to `event.Unknown` and keeps its bytes. |
+| **Channel** | Where an event is published, a URI: `slack://T01/C02`, `github://acme/handbook/issues/42`, `cron://acme/nightly`. A run publishes on the channel of the event that started it. |
+| **Subscription** | A tenant, channel prefixes and type prefixes. Default deny: an empty list matches nothing. `run.usage` and `run.context` arrive only when named. |
+| **Definition** | A saige `.agent.md` file plus a fiber `Policy` sidecar, stored insert only. A run pins its name, version, saige digest, sub-agent versions and policy hash, and fails terminally if any of them moved. |
+| **Membership** | Which agents a channel's events wake, and for which types. Default deny, and by default only for events that name the agent. An agent's own output never wakes it, and a hop limit stops two agents answering each other forever. |
+| **Runtime** | `turn.Runtime`, the one seam that runs a turn: a pinned definition and an input event in, catalog events out. saige is the default; bring your own with `fiber.WithTurnRuntime`. |
+| **Adapters** | Ingress adapters (Slack, GitHub, Jira, cron) publish typed events and choose no agent. Egress adapters (Slack, GitHub, Jira, webhook) subscribe by channel and type. |
+
 ## Features
 
-- **Agents are documents.** Create one by submitting a spec. No redeploy, no code, no restart. A run accepted under revision 6 executes as revision 6 forever, even after a revise.
-- **Subscribe by channel and type.** A run publishes on the channel of the event that started it. Every sink subscribed to that channel receives it, and each picks text, citations, lifecycle events, or all of them by type prefix.
-- **Connectors act, not just talk.** Connectors contribute native verbs (transition a Jira ticket, request a review) as sandboxed agent tools, each emitting an auditable `action.taken` event.
+- **Agents are documents.** Store a saige definition and it runs: no redeploy, no code, no restart. A run accepted under version 1.0.0 executes as 1.0.0 forever, even after 2.0.0 is stored.
+- **Subscribe by channel and type.** Every adapter subscribed to a run's channel receives it, and each picks text, citations, run states, or all of them by type prefix.
+- **Connectors act, not just talk.** Connectors contribute native verbs (transition a Jira ticket, request a review) as sandboxed agent tools, each emitting an auditable `run.action.taken.v1` event.
 - **Backends are values.** `fiber.WithPostgres(pool)` puts every store on one pool; `fiber.WithBus` takes the in-memory, Redis Streams or Postgres bus. Memory is a complete implementation, not a stub.
 - **Citations are first-class events**, carrying the exact quoted source and resolvable provenance.
-- **Every run reports what it spent.** Each model call is a `usage.call` event (tokens, cache share, model, context window, and cost for priced models), and the run's total is on its terminal event and `App.Status`.
-- **A run can wait for a person.** A tool listed in a spec's `approvals`, or the built-in `ask_person` tool, parks the run on a question. The run frees its worker, survives restarts, and resumes with the first answer (`App.Answer`) or takes its default when the question expires.
+- **Every run reports what it spent.** Each model call is a `run.usage.v1` event (tokens, cache share, model, context window, and cost in int64 micro-units for priced models), and the run's total is on its terminal event and `App.Status`.
+- **A run can wait for a person.** A tool listed in a definition's `approval.ask`, or the built-in `ask_person` tool, parks the run on a question. The run frees its worker, survives restarts, and resumes with the first answer (`App.Answer`) or takes its default when the question expires.
 
 **Early development:** v0 alpha, pre-1.0, not recommended for production. Interfaces may change between minor versions. The in-memory composition, durable replay and the Slack, GitHub, Jira, cron and webhook connectors are tested; the Postgres backends, knowledge layer, built-in `author` agent and history compaction pass CI's conformance suites but have not seen production load. See [Limitations](#limitations).
 
@@ -81,57 +97,90 @@ cd fiber
 go run ./examples/local
 ```
 
-It creates an agent, revises it, asks it from a simulated GitHub event whose
-channel a Slack sink and a webhook subscribe to, shows a third party listening
-to the channels, and demonstrates that a replayed run does not pay for the model
-twice.
+It stores an agent, stores a second version, answers a simulated GitHub event
+on a channel a Slack sink and a webhook subscribe to, shows a third party
+listening to the channels, and demonstrates that a replayed run does not pay
+for the model twice.
 
 ### Compose it
 
+An agent is a saige definition: YAML frontmatter, then the system prompt.
+
+```markdown
+---
+apiVersion: saige/v1
+name: docs-bot
+version: 1.0.0
+model:
+  use: anthropic/claude-haiku-5-5   # offline/scripted runs with no key
+---
+You answer questions about the deploy pipeline. Cite your sources.
+```
+
+Store it, make it a member of a channel, and publish a message there:
+
 ```go
-pool, err := pgxpool.New(ctx, dsn) // your pool, from your configuration
-pg := bus.NewPostgres(pool)        // or bus.NewRedis(client), or omit for memory
-if err := pg.Migrate(ctx); err != nil {
-    return err
-}
-app, err := fiber.New(ctx,
-    fiber.WithTenant("acme"),
-    fiber.WithPostgres(pool), // every store family, migrated by New
-    fiber.WithBus(pg),
-)
+app, err := fiber.New(ctx, fiber.WithTenant("acme")) // memory for everything
 if err != nil {
     return err
 }
 defer app.Close()
 go app.Run(ctx) // delivery and execution, in this process
 
-app.Definitions().Put(ctx, definition.Record{Tenant: "acme", CreatedBy: "ada", Content: `---
-apiVersion: saige/v1
-name: docs-bot
-version: 1.0.0
-model:
-  use: anthropic/claude-haiku-5-5
----
-You answer questions about the deploy pipeline. Cite your sources.
-`})
-// docs-bot answers what is posted on its channel.
-app.Memberships().Join(ctx, "acme", "slack://T01/C02", "docs-bot", membership.Rule{Types: []string{"message"}})
-err = app.Publish(ctx, event.Envelope{
-    ID: "req-1", Tenant: "acme", Time: time.Now(),
-    Source: "slack://T01/C02", Channel: "slack://T01/C02", Type: event.TypeMessagePosted,
+// 1. Store the agent. Put is insert only: a version never changes.
+if _, err := app.Definitions().Put(ctx, definition.Record{
+    Tenant: "acme", CreatedBy: "ada", Content: docsBot,
+}); err != nil {
+    return err
+}
+// 2. Make it a member of a channel. It wakes for messages that name it.
+if err := app.Memberships().Join(ctx, "acme", "slack://T01/C02", "docs-bot",
+    membership.Rule{Types: []string{"message"}}); err != nil {
+    return err
+}
+// 3. Listen to the channel's run events.
+stream, err := app.Bus().Subscribe(ctx, bus.Subscription{
+    Tenant: "acme", Channels: []string{"slack://T01/C02"}, Types: []string{"run"},
+})
+if err != nil {
+    return err
+}
+defer stream.Close()
+// 4. Publish a message. The channel's members decide who answers.
+if err := app.Publish(ctx, event.Envelope{
+    ID: "msg-1", Tenant: "acme", Time: time.Now(),
+    Source: "slack://T01", Channel: "slack://T01/C02", Type: event.TypeMessagePosted,
     Data: event.MessagePosted{Request: event.Request{
         Text: "how does a release get out the door?", Mentions: []string{"docs-bot"},
     }},
-})
+}); err != nil {
+    return err
+}
+for {
+    e, err := stream.Recv(ctx)
+    if err != nil {
+        return err
+    }
+    switch b := e.Data.(type) {
+    case event.Text: // run.delta.text.v1
+        fmt.Print(b.Text)
+    case event.Completed, event.Failed, event.Stopped:
+        fmt.Println("\n" + e.Type)
+        return nil
+    }
+}
 ```
 
+For production, pass your backends: `fiber.WithPostgres(pool)` for every
+store and `fiber.WithBus(bus.NewPostgres(pool))` or
+`fiber.WithBus(bus.NewRedis(client))` for the bus.
 [`examples/downstream`](examples/downstream/main.go) is a complete program.
 
 ## Examples
 
 | Example | Description |
 |---------|-------------|
-| [`local`](examples/local/) | Offline agent revisions, selective delivery, citations, and replay, composed by `fiber.New` |
+| [`local`](examples/local/) | Offline definitions and versions, selective delivery, citations, and replay, composed by `fiber.New` |
 | [`downstream`](examples/downstream/) | A program composing fiber with its own model provider and tool |
 
 See [`examples/`](examples/README.md) for all runnable examples.
@@ -140,79 +189,87 @@ See [`examples/`](examples/README.md) for all runnable examples.
 
 ### Use a model
 
-Set `ANTHROPIC_API_KEY` for `"provider": "anthropic"`. To use OpenAI, or any
-server that speaks its Chat Completions API (vLLM, LM Studio, llama.cpp,
-OpenRouter, Groq), set `"provider": "openai"` and the model that server hosts.
-For a local server, point fiber at it instead of setting a key:
+A definition names its model as `provider/model` in `model.use`. Set
+`ANTHROPIC_API_KEY` for `anthropic/...`. To use OpenAI, or any server that
+speaks its Chat Completions API (vLLM, LM Studio, llama.cpp, OpenRouter, Groq),
+use `openai/<the model that server hosts>`. For a local server, point fiber at
+it instead of setting a key:
 
 ```sh
 export OPENAI_BASE_URL="http://localhost:8000/v1"   # omit for OpenAI itself
 export OPENAI_API_KEY="your-api-key"                # optional for a local server
 ```
 
-Models the price catalog does not know report their token usage and no cost.
+`offline/scripted` calls no model and needs no key. Models the price catalog
+does not know report their token usage and no cost.
 
 ### Fall back to other models
 
-An agent can name fallback models, tried in order when a call to its primary
-model fails with an error another model could fix (an outage, a rate limit, a
-refused credential):
+A definition can name fallback models, tried in order when a call to its
+primary model fails with an error another model could fix (an outage, a rate
+limit, a refused credential):
 
-```json
-"fallbacks": [
-  {"provider": "openai", "model": "gpt-5"},
-  {"provider": "ollama", "model": "llama4"}
-]
+```yaml
+model:
+  use: anthropic/claude-haiku-5-5
+  fallback: [openai/gpt-5, ollama/llama4]
 ```
 
 Each fallback names a provider the deployment knows and a model, none repeats
 the primary or another fallback, and there are at most four. By default any
-error another model could fix falls through. `"fallback_on"` narrows that to
-named classes: `unavailable` (an outage), `rate_limit`, `transient` (a timeout
-or reset connection, and also a rate limit or outage), `auth`,
-`context_length` and `content_filter`, or `any` alone, which is the default.
-For example `"fallback_on": ["rate_limit", "unavailable"]`. It is a set, and
-naming it without fallbacks is refused. Whatever it names, an invalid
+error another model could fix falls through. The Policy's `fallback_on`
+narrows that to named classes: `unavailable` (an outage), `rate_limit`,
+`transient` (a timeout or reset connection, and also a rate limit or outage),
+`auth`, `context_length` and `content_filter`, or `any` alone, which is the
+default. For example `"fallback_on": ["rate_limit", "unavailable"]`. It is a
+set, and naming it without fallbacks is refused. Whatever it names, an invalid
 request, a stopped run or an exhausted budget does not fall through, and a
 stream that already produced output is not replayed on another model. Every
 fallback is built with the agent, so one whose provider is not configured
 (say, `OPENAI_API_KEY` is unset) fails the build like the primary would. Each
 call is priced on the rate card of the model that answered it. Order is part
-of the revision: reordering fallbacks is an edit. A spec without fallbacks
-hashes exactly as it did before they existed.
+of the definition, so reordering fallbacks is a new version.
 
 ### Grant MCP tools
 
-An agent can be granted an MCP provider's tools as one name:
-`"tools": ["mcp:urmzd"]` grants the tools an admin accepted on the provider
-`urmzd` as read, and `"mcp:urmzd:write"` its write tools as well. Read only is
-the default, so leaving the class off can only grant less, and the class is
-checked again on every call. The model is shown each member tool
-(`urmzd__create_issue`), never the group, and approvals name members:
-`"approvals": ["urmzd__create_issue"]`. The group is expanded for the run's
-tenant each time a run builds the agent, so a newly accepted tool reaches the
-agent without a new revision; tools that are not accepted, or that changed
-since, are never offered. An App expands groups against its tool
-provider store (Postgres with `fiber.WithPostgres`) and resolves
-`env:NAME` credential references from its environment. A host embedding
-`pkg/runtime` does the same with `runtime.WithToolGroupSource` and an
-`mcptools.Grants`; one embedding `pkg/agentrt` alone supplies groups with
-`agentrt.WithToolGroups` or from its tool catalog.
+A definition is granted an MCP provider's tools by naming the server:
+
+```yaml
+tools:
+  mcp:
+    - server: urmzd
+approval:
+  ask: [urmzd__create_issue]
+```
+
+That grants the tools an admin accepted on the provider `urmzd` as read. Its
+write tools are granted only when the Policy names the server in `mcp_write`
+(`"mcp_write": ["urmzd"]`). Read only is the default, so leaving it out can
+only grant less, and the class is checked again on every call. The model is
+shown each member tool (`urmzd__create_issue`), never the group, and approvals
+name members. The group is expanded for the run's tenant each time a run
+builds the agent, so a newly accepted tool reaches the agent without a new
+version; tools that are not accepted, or that changed since, are never
+offered. An App expands groups against its tool provider store (Postgres with
+`fiber.WithPostgres`) and resolves `env:NAME` credential references from its
+environment. A host embedding `pkg/runtime` does the same with
+`runtime.WithToolGroupSource` and an `mcptools.Grants`; one embedding
+`pkg/turn/native` alone supplies groups with `native.WithToolGroups`.
 
 A provider is reached with one shared credential, its `CredentialRef`, unless
 it is person-scoped (`CredentialScope: toolprovider.ScopePerson`): then each
 run reaches it with the credential of the person the run acts for, the actor
-on its tag, which `fiber.WithPersonCredentials` looks up. That actor is the
-one recorded when the run was accepted, so nothing a model says can change
-it. Each person gets a session of their own, opened with their own
-credential. A person with none gets no tools from the provider, the model is
-told they have not connected one, and the operator log names them; a shared
+on the event that started it, which `fiber.WithPersonCredentials` looks up.
+That actor is the one recorded when the run was accepted, so nothing a model
+says can change it. Each person gets a session of their own, opened with their
+own credential. A person with none gets no tools from the provider, the model
+is told they have not connected one, and the operator log names them; a shared
 credential is never used instead, and a person-scoped provider cannot even
 name one.
 
 ```go
 fiber.WithPersonCredentials(mcptools.PersonResolverFunc(
-    func(ctx context.Context, tenant string, p toolprovider.Provider, who envelope.Actor) (mcptools.PersonCredential, error) {
+    func(ctx context.Context, tenant string, p toolprovider.Provider, who event.Actor) (mcptools.PersonCredential, error) {
         tok, ok := vault.Token(ctx, tenant, who.User, p.Name) // your own store, keyed by your account id
         if !ok {
             return mcptools.PersonCredential{}, mcptools.ErrNoPersonCredential
@@ -221,14 +278,77 @@ fiber.WithPersonCredentials(mcptools.PersonResolverFunc(
     }))
 ```
 
-### Validate a spec locally
+### Bring your own Runtime
 
-`fiber run` runs one agent spec once, in process, and prints what the run
-does. It composes `fiber.New` with the in-memory backends and a temporary
-workspace, registers the spec, raises one tag with your message, and prints
-the run's events as they stream. It listens on nothing, reads no
-configuration file and no environment variable of its own, and keeps nothing
-once it exits.
+A turn runs through one interface, `turn.Runtime`: a pinned definition and an
+input event in, catalog event bodies out.
+
+```go
+type Runtime interface {
+    Turn(ctx context.Context, def turn.Pinned, in turn.Input,
+        emit func(context.Context, event.Body) error) (turn.Result, error)
+}
+```
+
+The default wraps saige (`pkg/turn/native`) inside a playscape sandbox. Pass
+your own with `fiber.WithTurnRuntime`; `turn.Func` adapts a function, and
+`sandbox.Sandboxed(inner, plane)` puts any Runtime inside playscape under the
+pinned policy. Durability stays anchor's whatever runs the turn: the runtime
+pins the definition, journals what you emit, and replays from the ledger. Hold
+an implementation to the contract with `runtimetest.Run`.
+
+```go
+app, err := fiber.New(ctx, fiber.WithTurnRuntime(turn.Func(
+    func(ctx context.Context, def turn.Pinned, in turn.Input, emit func(context.Context, event.Body) error) (turn.Result, error) {
+        text := "echo: " + in.Trigger.Type
+        if err := emit(ctx, event.Text{Text: text}); err != nil {
+            return turn.Result{}, err
+        }
+        return turn.Result{Text: text}, nil
+    })))
+```
+
+### Deliver to a webhook
+
+The outbound webhook is an egress adapter. Each endpoint names the channels
+and type prefixes it receives, and POSTs one event per request:
+
+```go
+fiber.WithWebhooks(map[string]webhook.Endpoint{
+    "acme": { // webhook://acme/... addresses
+        BaseURL:  "https://hooks.example.com/fiber",
+        Secret:   deploySecret,
+        Channels: []string{"github://acme/"},
+        Types:    []string{"run.completed", "run.failed"},
+    },
+})
+```
+
+The body is version 2, the envelope itself in CloudEvents shape, with the
+header `Fiber-Event-Version: 2`:
+
+```json
+{"specversion": "1.0", "id": "...", "source": "fiber://run/r1", "type": "run.completed.v1",
+ "channel": "github://acme/handbook/issues/42", "time": "2026-10-28T14:03:11Z", "hops": 1,
+ "tenant": "acme", "run": "r1", "seq": 200, "agent": "docs-bot", "version": "1.0.0",
+ "digest": "sha256:...", "data": {"text": "..."}}
+```
+
+Every request is signed with the endpoint's secret and carries
+`X-Fiber-Delivery: <run>/<seq>`, the same on every retry, for the receiver to
+dedupe on. A body the catalog marks sensitive (human-authored text, private
+host data) is sent with its `data` left out and `"redacted": true` unless the
+endpoint sets `Sensitive`. Old `Kinds` selectors are still read; see
+[Upgrade](docs/architecture/events.md#10-upgrade).
+
+### Validate a definition locally
+
+`fiber run` runs one agent definition once, in process, and prints what the
+run does. It composes `fiber.New` with the in-memory backends and a temporary
+workspace, stores the definition, publishes one `message.posted.v1` with your
+message, and prints the run's events as they stream. It listens on nothing,
+reads no configuration file and no environment variable of its own, and keeps
+nothing once it exits.
 
 Releases publish the Go module, not a prebuilt binary. Install the command at
 the version of fiber you build against, or run it from a checkout with
@@ -236,53 +356,50 @@ the version of fiber you build against, or run it from a checkout with
 
 ```sh
 go install github.com/urmzd/fiber/cmd/fiber@latest
-fiber run -offline docs-bot.json "how does a release get out the door?"
+fiber run -offline docs-bot.agent.md "how does a release get out the door?"
 ```
 
 ```text
-[lifecycle.accepted] docs-bot revision 1, run r22e035b6d38cc721ba356a8a0290f805
-[lifecycle.started] attempt 1
+[run.accepted.v1] docs-bot version 1.0.0, run r05babec9a8ca80435267133937f7a93c
+[run.started.v1] attempt 1
 docs-bot is running with the offline provider, so no model was called. ...
-[usage.call] MODEL: 0 tokens in (0 cached), 0 out
-[lifecycle.completed] attempt 1, 1 model calls, 0 tokens in, 0 out
+[run.usage.v1] scripted: 0 tokens in (0 cached), 0 out
+[run.completed.v1] attempt 1, 1 model calls, 0 tokens in, 0 out
 ```
 
-Each line is one event under its kind, the name an old webhook `kinds` selector names,
-except the answer and any reasoning, which stream inline as they arrive.
-Warnings from the operator log, such as a granted tool this composition
-cannot resolve, go to standard error.
+Each line is one event under its type, except the answer and any reasoning,
+which stream inline as they arrive. Warnings from the operator log, such as a
+granted tool this composition cannot resolve, go to standard error.
 
 | Flag | Does |
 |------|------|
-| `-offline` | Runs on the offline provider: no model is called and no key is needed. The spec's fallbacks are dropped with its provider. |
-| `-provider NAME`, `-model NAME` | Replace the spec's provider and model. A real provider reads its vendor's variables when the agent is built (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`, `OLLAMA_HOST`). |
+| `-offline` | Runs on the offline provider: no model is called and no key is needed. The definition's fallbacks are dropped with its provider. |
+| `-provider NAME`, `-model NAME` | Replace the definition's provider and model. A real provider reads its vendor's variables when the agent is built (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`, `OLLAMA_HOST`). |
+| `-policy FILE` | Reads the agent's Policy sidecar from JSON. Without it the policy is the zero value, which grants nothing. A field that does not exist is an error rather than ignored. |
 | `-tools` | Lists the tools the agent would be granted, marks those whose calls wait for approval, and names each grant left out and why, then exits without running anything. It needs no key and no MESSAGE. |
-| `-json` | Prints one JSON object per event, per line: the event as the bus carries it, with its payload as JSON. With `-tools`, the listing as one object. |
+| `-json` | Prints one JSON object per event, per line: the envelope as the bus carries it. With `-tools`, the listing as one object. |
 | `-timeout D` | Gives up after `D`, such as `30s` (default `5m`; `0` waits forever). |
 
-Flags go before DEFINITION. DEFINITION is an `.agent.md` file (a saige
-definition: YAML frontmatter, then the system prompt), or `-` for standard
-input. `-policy FILE` reads the agent's policy sidecar from JSON; without it
-the policy is the zero value, which grants nothing. A policy field that does
-not exist is an error rather than ignored.
+Flags go before DEFINITION. DEFINITION is an `.agent.md` file, or `-` for
+standard input.
 
 | Exit status | Means |
 |-------------|-------|
 | `0` | The run completed, or the listing was printed. |
 | `1` | The run did not complete: it failed, was stopped, parked on a question, or ran out of time. A failed attempt is retried as in any deployment, and the run counts as failed only once the run ledger says so. |
-| `2` | The command line or the spec is wrong, and nothing ran. |
+| `2` | The command line, the definition or the policy is wrong, and nothing ran. |
 
 A local run has what this composition has: the built-in providers, the
 `ask_person` tool, the `author_*` tools every App carries, and a
-`tag_<agent>` tool per agent the spec may spawn (only the one spec is
-registered, so a delegation finds no agent to tag). No connector and no MCP
-tool provider is configured, so a connector's actions (`jira_transition`) and
-`mcp:` grants are unavailable here: the run goes ahead without them, as a
+`tag_<agent>` tool per sub-agent the definition names (only the one definition
+is stored, so a delegation finds no agent). No connector and no MCP tool
+provider is configured, so a connector's actions (`jira_transition`) and MCP
+grants are unavailable here: the run goes ahead without them, as a
 deployment's would, and `-tools` says which and why. Nothing here can answer
 a question, so a run that parks on an approval or on `ask_person` exits `1`.
-The knowledge store is empty, so `sources` retrieve nothing. To list what a
-run would be granted in your own composition, call `App.ToolsFor(ctx, tag)`
-there.
+The knowledge store is empty, so the Policy's `knowledge` retrieves nothing. To
+list what a run would be granted in your own composition, call
+`App.ToolsFor(ctx, event, agent)` there.
 
 ### Extend fiber
 
@@ -292,7 +409,7 @@ options to `fiber.New`:
 ```go
 app, err := fiber.New(ctx,
     fiber.WithModelProvider("house", houseProvider),
-    fiber.WithOpenAICompatible(agentrt.OpenAICompatible{
+    fiber.WithOpenAICompatible(native.OpenAICompatible{
         Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1", KeyEnv: "FIREWORKS_API_KEY"}),
     fiber.WithTools(runbookTool{}),
     fiber.WithToolProvider(toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP,
@@ -314,8 +431,19 @@ Review one with a credential of your own
 (`mcptools.Connect(ctx, p, mcptools.WithPersonCredential(mine))`).
 
 To add a backend, implement the package's interface and pass its conformance
-suite: `bustest`, `registrytest`, `knowledgetest`, `threadtest`,
-`toolprovidertest`, `blobtest`.
+suite: `bustest`, `definitiontest`, `membershiptest`, `knowledgetest`,
+`threadtest`, `toolprovidertest`, `blobtest`, and `runtimetest` for a
+`turn.Runtime`.
+
+### Upgrade to the event union
+
+Every event is now one envelope with a typed body, the bus is keyed by channel,
+agents are saige definitions, and a turn runs through `turn.Runtime`. Runs
+recorded before the upgrade fail terminally on replay instead of running a body
+they were not recorded with, so drain them first. The table of removed packages
+and their replacements, the old kind to type mapping, the legacy decoders and
+the agent converter are in
+[docs/architecture/events.md](docs/architecture/events.md#10-upgrade).
 
 ### Upgrade from the server binary
 
@@ -339,8 +467,7 @@ its workspace; the library keeps them in memory unless you pass
 `WithBlobs(blob.NewFS(dir))`.
 
 **Persisted names moved to `fiber`.** Postgres objects, Redis keys, durable
-activity and record names and the agent-spec hash domain no longer use the
-old name. Drain runs before upgrading, including runs parked on a question,
+activity and record names no longer use the old name. Drain runs before upgrading, including runs parked on a question,
 which wait until they are answered, stopped or expire: a run still pending
 from the old version is failed with a reason when the new one first claims
 it, and is not resumed. Stop every old process before the first new one
@@ -351,21 +478,22 @@ starts. Postgres migrates itself and keeps its rows. See
 
 - The bus is chosen independently of the stores: `WithPostgres` does not move the bus, `WithBus` does.
 - The Postgres bus serializes publishes on one advisory lock per schema, so its throughput is one short transaction per event; Redis is the better bus for a chatty deployment.
-- The Postgres bus stores every event it carries, body included, as a row in the `fiber_bus_events` table of the database it is given. A row stays until its run's retention trim drops it or a sweep finds it older than `bus.WithIndexTTL` (24 hours by default; the sweep runs from publishes, so with none nothing is removed). Those rows reach that database's WAL, replicas and backups like any other, and tool events carry their call's arguments. Where arguments can hold secrets, scrub them with `agentrt.WithToolArguments`, shorten the TTL, or use the Redis bus.
+- The Postgres bus stores every event it carries, body included, as a row in the `fiber_events` table of the database it is given. A row stays until its run's retention trim drops it or a sweep finds it older than `bus.WithIndexTTL` (24 hours by default; the sweep runs from publishes, so with none nothing is removed). Those rows reach that database's WAL, replicas and backups like any other, and tool events carry their call's arguments. Where arguments can hold secrets, scrub them with `native.WithToolArguments`, shorten the TTL, or use the Redis bus.
 - Every store is in memory unless `WithPostgres` or its own option is given. On Postgres they survive a restart, but the run queue fiber builds has no `DeltaLog`, so the per-run delta journal is not written; the bus still carries every event.
 - Files (`blob`) are in memory unless `WithBlobs(blob.NewFS(dir))` puts them on disk; there is no Postgres blob store.
-- fiber authenticates nothing. An embedding program that accepts tags or stop and answer requests from callers sets the tenant and actor from the caller's credential.
+- fiber authenticates nothing. An embedding program that accepts events or stop and answer requests from callers sets the tenant and actor from the caller's credential.
 - Citations are derived from RAG context blocks. Citations a model or tool reports itself are not translated into events yet.
 - The bus is at-least-once with no consumer groups.
-- Agent specs load from JSON, not YAML.
+- fiber refuses the saige definition fields it cannot honor (dials, skills, memory, guardrails, compaction, harness tools, MCP allow lists) rather than ignoring them.
+- A Policy's `subscriptions` are recorded and hashed but do not join channels yet. Memberships (`App.Memberships().Join`, or a cron schedule, which joins its own agent) decide who an event wakes.
 - `App.Status` reports a stopped run as `stopped`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A sink that subscribes only to `run.completed` is not told about a stop.
 - A request to compact a running turn (`App.Compact`) is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
-- A program declares MCP tool providers with `fiber.WithToolProvider`, or writes them to the tool provider store (`App.ToolProviders`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) is dropped like a single unavailable tool: the run continues without it, the model is told it is unavailable, the operator is logged why, and `Runner.Unavailable` lists it. `agentrt.WithStrictTools` fails the build with `agentrt.ErrNoSuchToolGroup` instead.
+- A program declares MCP tool providers with `fiber.WithToolProvider`, or writes them to the tool provider store (`App.ToolProviders`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) is dropped like a single unavailable tool: the run continues without it, the model is told it is unavailable, the operator is logged why, and `Runner.Unavailable` lists it. `native.WithStrictTools` fails the build with `native.ErrNoSuchToolGroup` instead.
 - A person-scoped MCP provider's tools are expanded per person, so two people in one thread can be offered different tools, and the thread's prompt cache misses when the person changes. At most 128 person sessions are kept open (`mcptools.WithPersonSessions` on a hand-built `Grants`); past that the one used longest ago is closed and a turn still holding its tools sees a tool error. A stdio provider runs a server per open person session. The resolver is asked on every turn, and a new value behind an unchanged reference is not noticed until the reference, the secret or the provider record changes.
 - Only MCP tool providers take a person's credential. The Slack, GitHub and Jira connectors' actions and sinks still act with the credential the deployment configured for them.
-- A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
-- Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
-- A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. `tagged_only` is a hint for hosts: an agent that sets it runs only when a message names it, and is never asked to take an untagged one on its own; fiber itself carries and hashes it, nothing more. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
+- A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `native.WithStrictTools` restores the old refusal.
+- Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `native.WithToolArguments`.
+- A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the Policy sets `self_approval`, and `approvers`/`answerers` restrict who may answer. `tagged_only` is a hint for hosts: an agent that sets it runs only when a message names it, and is never asked to take an unnamed one on its own; fiber itself carries and hashes it, nothing more. A tool implementing `native.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the Policy's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
 - Cost is reported only for models the price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to sinks that subscribe to `run.usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
 
 ## Configuration
@@ -375,11 +503,12 @@ in your own program and turn them into these options; fiber reads neither.
 
 | Option | Chooses | Default |
 |--------|---------|---------|
-| `WithPostgres(pool)` | Registry, run ledger and queue, knowledge, threads, tool providers on one pool | memory |
+| `WithPostgres(pool)` | Definitions, memberships, run ledger and queue, knowledge, threads, tool providers on one pool | memory |
 | `WithBus(b)` | `bus.NewMemory`, `bus.NewRedis(client)`, `bus.NewPostgres(pool)` | memory |
-| `WithRegistry`, `WithDurable(ledger, queue)`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders` | One store, built by the caller | memory, or the `WithPostgres` one |
+| `WithDefinitions`, `WithMemberships`, `WithDurable(ledger, queue)`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders` | One store, built by the caller | memory, or the `WithPostgres` one |
 | `WithEmbedder(e)` | The embedder of the knowledge store New builds | offline hashing |
-| `WithTurnRuntime`, `WithRuntimeOptions`, `WithWorkerOptions` | The turn runtime (a `turn.Runtime`), and options for the runtime and worker | built-in sandbox |
+| `WithTurnRuntime(rt)` | The `turn.Runtime` a turn runs on | saige (`pkg/turn/native`) in the playscape sandbox |
+| `WithRuntimeOptions`, `WithWorkerOptions`, `WithEgressOptions` | Options for the durable runtime, the worker and egress | none |
 | `WithWorkspace(dir)` | Where the sandbox writes agent artifacts | a temporary directory |
 | `WithTenant`, `WithConcurrency`, `WithCompaction`, `WithAuthor`, `WithLogger`, `WithMetrics` | Deployment | none, one, off, offline, discard, none |
 | `WithSlack`, `WithGitHub`, `WithJira`, `WithWebhooks`, `WithSchedules` | Built-in connectors, typed Go values | off |
@@ -399,6 +528,8 @@ guides.
 | Method | Does |
 |--------|------|
 | `App.Publish` | Puts an ingress event on the bus; the channel's members each start a run |
+| `App.Definitions().Put` | Stores an agent definition (insert only) |
+| `App.Memberships().Join` | Makes an agent a member of a channel prefix, with the types it wakes for |
 | `App.Runtime().Accept` | Starts one agent's run for an event, without membership |
 | `App.Bus().Subscribe` | Streams a tenant's events by channel and type prefix |
 | `App.Status`, `App.Stop`, `App.Compact`, `App.Answer` | Act on a run |
@@ -435,7 +566,8 @@ The first run warms Go's build cache. The capture runs the real demo and writes
 
 | Document | Covers |
 |----------|--------|
-| [docs/architecture/overview.md](docs/architecture/overview.md) | Topics, connector faces, delivery, revision pinning, design |
+| [docs/architecture/events.md](docs/architecture/events.md) | The event union, catalog, channels, definitions and pins, the Runtime seam, adapters, and upgrading |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | Channels, membership, delivery, durability, stopping, usage, parking, credentials, limitations |
 | [docs/architecture/github.md](docs/architecture/github.md) | GitHub connector setup |
 | [docs/architecture/slack.md](docs/architecture/slack.md) | Slack connector setup |
 | [docs/renaming.md](docs/renaming.md) | Upgrading persisted data across the rename |

@@ -18,7 +18,7 @@ for accepted old names and identifiers kept for stored data.
 | Postgres tables, indexes and constraints | `mandatum_*` | `fiber_*` |
 | Redis bus key namespace (`bus.DefaultKeyPrefix`) | `mandatum:` | `fiber:` |
 | anchor activities and records | `mandatum.turn`, `mandatum.turn.agent`, `mandatum.turn.resume`, `mandatum.park`, `mandatum.stop`, `mandatum.question.*`, `mandatum.answer.*`, `mandatum.usage.*`, `mandatum.child.*` | the same under `fiber.` |
-| Agent-spec hash domain | `mandatum/agentspec/v1` | `fiber/agentspec/v1` |
+| Agent hash domain | the old spec domain under `mandatum/` | the same under `fiber/`, retired with the event union (see [events.md](architecture/events.md#10-upgrade)) |
 | Knowledge document hash domain | `mandatum.knowledge.v1` | `fiber.knowledge.v1` |
 
 ## Upgrading a deployment

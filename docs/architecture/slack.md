@@ -5,41 +5,45 @@ threaded message delivery, reaction APIs, and the optional `AgentAPI` methods
 for session status and command registration. Ordinary messaging clients need
 only implement `API`; agent-session features are a separate capability.
 
-`Config.Prepare` lets an application validate a verified tag before handoff.
-The configured team boundary applies to mentions, direct messages, stop events,
-and slash commands after signature verification. A delivery from another team
-is acknowledged without invoking application policy or raising a tag.
+`Config.Prepare` lets an application check a verified event (`*event.Envelope`)
+before it is published. The configured team boundary applies to mentions,
+direct messages, stop events, and slash commands after signature verification.
+A delivery from another team is acknowledged without invoking application
+policy or publishing anything.
 
 Session lifecycle policy, command discovery, refusal logging, app manifests,
 and installation configuration live in
 [Humagen](https://github.com/urmzd/humagen/blob/main/docs/slack.md).
 Use `HUMAGEN_SLACK_*` with `humagen serve` for that experience.
-`fiber.WithSlack` supports the token, signing secret, team,
-bot mapping and default agent; it does not enable product session or command
-policy; that is Humagen's.
+`fiber.WithSlack` takes the token, signing secret, team, app id and bot
+mapping; it does not enable product session or command policy, which is
+Humagen's.
+
+## What Slack publishes
+
+| Type | Raised by |
+|------|-----------|
+| `message.posted.v1` | A mention of the app or a direct message, with the agents it names (through `Bots`) in `Mentions` |
+| `slack.command.invoked.v1` | A slash command |
+| `slack.session.stopped.v1` | A person pressing stop on an agent session |
+
+Each is published on the conversation's channel,
+`slack://<team>/<channel>[?thread=<ts>]`. The connector chooses no agent: the
+channel's members do (`pkg/membership`), and the Slack sink answers on the
+same channel, editing one message per run.
 
 ## Stopping a session
 
 Slack sends `agent_session_stopped` when a person presses stop, and the
-connector hands it to `Config.Stopped` as a `slack.Stop`: the session's address
-and the user who pressed it. The connector knows sessions, not runs, so the
-application maps the session to the run it stands for and asks the runtime to
-stop that run:
+connector publishes it as `slack.session.stopped.v1` on the session's channel.
+It starts nothing. The dispatcher (`pkg/dispatch`) maps it to a stop request
+(`control.stop.v1`) for each run it started on that channel, with the person
+who pressed stop as the asker, so no application bookkeeping is needed.
 
-```go
-Stopped: func(ctx context.Context, stop slack.Stop) error {
-    runID := runFor(stop.Session) // the application's own bookkeeping
-    return rt.Stop(ctx, runtime.StopRequest{
-        Tenant: tenant, RunID: runID,
-        Reason: "Stopped in Slack", By: "slack:" + stop.User,
-    })
-},
-```
-
-The run id is the one `Acceptance.RunID` reported and every event of the run
-carries, `runtime.RunID(tenant, tagID)`. It is not the Slack event id the tag
-was raised with. The runtime must be built with `runtime.WithStopLedger` for
-the stop to be recorded before it is announced. The run then ends
-with `lifecycle.stopped`, and the sink edits the session's message to say so
-under what the agent had written. `fiber.WithSlack` does not set
-`Stopped`, because it keeps no session-to-run mapping.
+The runtime records a stop before it announces it when built with
+`runtime.WithStopLedger`, as `fiber.New` does. The run then ends with
+`run.stopped.v1`, and the sink edits the session's message to say so under
+what the agent had written. A host that keeps its own mapping can still stop
+a run directly with `App.Stop`, using the run id `Acceptance.RunID` reported
+and every event of the run carries, `runtime.RunKey(tenant, event id, agent)`.
+It is not the Slack event id.

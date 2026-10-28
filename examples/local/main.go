@@ -11,7 +11,7 @@
 //	ledger + queue  anchor's ledger.Memory   (a real ledger would be Postgres)
 //	                and queue.Memory
 //	model           saige's agenttest.ScriptedProvider, reached through the
-//	                agent's own "offline" provider — the agent loop, the typed
+//	                agent's own "offline" provider: the agent loop, the typed
 //	                deltas and the translation to events are all the real ones
 //	connectors      two fakes in fakes.go, implementing connector.Subscriber exactly
 //
@@ -55,8 +55,8 @@ import (
 )
 
 // tenant is the authorization scope. It comes from the caller's credential in
-// a real deployment and is never on the wire and never a topic segment: an
-// agent is addressed as agent:docs-bot, not agent:acme:docs-bot.
+// a real deployment and is never on the wire and never a channel segment: a
+// subscription names it beside its channels, never inside them.
 const tenant = "acme"
 
 // issue is the GitHub issue the demo request arrives on.
@@ -77,7 +77,7 @@ var (
 
 // demoStride shrinks the per-attempt sequence band from its default of 2^20 so
 // that the numbers in the output stay readable. Every attempt of a run gets its
-// own band — attempt 1 opens at 101, attempt 2 at 201 — which is what lets a
+// own band (attempt 1 opens at 101, attempt 2 at 201), which is what lets a
 // retry append its real output after an interrupted attempt's partial output
 // instead of vanishing behind the bus's high-water mark. Section 7 shows it.
 const demoStride = 100
@@ -216,7 +216,7 @@ func run() error {
 	fmt.Printf("  created  %s  version %s\n", v1.Name, v1.Version)
 	fmt.Printf("  digest   %s\n", v1.Digest)
 	fmt.Printf("  policy   %s\n", v1.PolicyHash)
-	fmt.Printf("  address  agent:%s          ← this is now a topic anyone can subscribe to\n", v1.Name)
+	fmt.Printf("  name     %s          ← what a channel membership names to wake it\n", v1.Name)
 
 	// ── 2 ───────────────────────────────────────────────────────────
 	section(2, "A VERSION IS IMMUTABLE; REVISING WRITES THE NEXT ONE")
@@ -288,8 +288,8 @@ func run() error {
 	fmt.Println("  subscribes to the channels it renders. that indirection is the")
 	fmt.Println("  difference between a mesh and a pile of integrations.")
 
-	// The third party attaches BEFORE anything is accepted, on the agent
-	// topic rather than the run topic. It will pick up this run and the next
+	// The third party attaches BEFORE anything is accepted, on channel
+	// prefixes rather than one run. It will pick up this run and the next
 	// one without ever being told either exists. Section 5 reads its log.
 	watcher := &observer{}
 	watching, err := watcher.watch(ctx, broker, bus.Subscription{
@@ -304,7 +304,7 @@ func run() error {
 	// ── 4 ───────────────────────────────────────────────────────────
 	section(4, "ONE RUN, TWO SINKS, TWO GRANULARITIES   ← N:M selectivity")
 
-	fmt.Println("  slack   takes every kind and edits one message as the answer arrives")
+	fmt.Println("  slack   takes every run type and edits one message as the answer arrives")
 	fmt.Println("  webhook takes run.completed only and posts exactly once")
 	fmt.Println()
 
@@ -347,11 +347,11 @@ func run() error {
 	slackCount, _ := slack.delivered(meshRun)
 	fmt.Println()
 	fmt.Printf("  the run published %d events, sequences 1..%d.\n", out.Events, out.LastSeq)
-	fmt.Printf("  slack   was delivered %d of them (every kind)\n", slackCount)
+	fmt.Printf("  slack   was delivered %d of them (every run type)\n", slackCount)
 	fmt.Printf("  webhook was delivered %d of them (%s)\n", hook.delivered(meshRun), kindList(hook.seenKinds()))
 	fmt.Println()
 	fmt.Println("  same run, same bus, same events. selectivity is a field on the")
-	fmt.Println("  subscription, not a separate topic or run, which is why adding the")
+	fmt.Println("  subscription, not a separate channel or run, which is why adding the")
 	fmt.Println("  webhook cost nothing on the agent side.")
 
 	// ── 5 ───────────────────────────────────────────────────────────
@@ -363,11 +363,11 @@ func run() error {
 		return err
 	}
 
-	fmt.Println("  this subscriber holds one subscription to agent:docs-bot.")
+	fmt.Println("  this subscriber holds one subscription to github:// and cron://.")
 	fmt.Println("  it did not raise the event, no sink names it, and the run cannot")
 	fmt.Println("  tell it is there. it sees the whole stream anyway:")
 	fmt.Println()
-	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "kind", "payload")
+	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "type", "data")
 	fmt.Printf("    %-5s  %-22s  %s\n", "─────", "──────────────────────", "───────")
 	for _, e := range watcher.events(meshRun) {
 		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Type, summarize(e))
@@ -397,8 +397,8 @@ func run() error {
 		return errors.New("no citation events were published; the retriever was not consulted")
 	}
 	fmt.Println()
-	fmt.Println("  a citation is an event of kind delta.citation, on the same stream and")
-	fmt.Println("  in the same order as the text — not an attachment on the final answer.")
+	fmt.Println("  a citation is a run.delta.citation.v1 event, on the same stream and")
+	fmt.Println("  in the same order as the text, not an attachment on the final answer.")
 	fmt.Println("  it is derived from what the turn RETRIEVED, not from what the model")
 	fmt.Println("  claimed, so a reader can resolve the URI and check it.")
 
@@ -426,8 +426,8 @@ func run() error {
 	cronRun := runtime.RunKey(tenant, nightly.ID, "docs-bot")
 
 	// Arm one failure: the first attempt's run.completed will not reach
-	// the bus. The runtime treats a failed publish as a failed turn — a run
-	// whose events nobody can see has not done its job — so anchor will
+	// the bus. The runtime treats a failed publish as a failed turn (a run
+	// whose events nobody can see has not done its job), so anchor will
 	// replay the turn. Everything the turn recorded before that point is
 	// already in the ledger, including the ENTIRE agent execution.
 	published.failOnce(cronRun, event.TypeCompleted)
@@ -452,7 +452,7 @@ func run() error {
 
 	fmt.Println("  what the third party saw, on the same subscription as before:")
 	fmt.Println()
-	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "kind", "payload")
+	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "type", "data")
 	fmt.Printf("    %-5s  %-22s  %s\n", "─────", "──────────────────────", "───────")
 	for _, e := range watcher.events(cronRun) {
 		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Type, summarize(e))
@@ -461,7 +461,7 @@ func run() error {
 	after := exec.modelCalls()
 	fmt.Println()
 	fmt.Printf("  attempts on this run         %d\n", nightlyOut.Attempt)
-	fmt.Printf("  model calls after the replay %d   (was %d — the difference is %d)\n",
+	fmt.Printf("  model calls after the replay %d   (was %d: the difference is %d)\n",
 		after, before, after-before)
 	fmt.Println()
 	if after-before != 1 {
@@ -471,7 +471,7 @@ func run() error {
 	fmt.Println("  read the stream above: attempt 1 published started (101) and six deltas")
 	fmt.Println("  (102..107), then its completed event was lost and the turn failed.")
 	fmt.Println("  attempt 2 re-executed the workflow body from the top and published")
-	fmt.Println("  resumed (201) and completed (300) — and NO deltas, because the agent")
+	fmt.Println("  resumed (201) and completed (300), and NO deltas, because the agent")
 	fmt.Println("  activity was already recorded and was served from the ledger.")
 	fmt.Println()
 	fmt.Println("  that is the durability claim in one line: the workflow replays, the")
@@ -509,7 +509,7 @@ const rule = "──────────────────────
 
 func banner() {
 	fmt.Println()
-	fmt.Println("  fiber: tag an agent from anywhere, run it durably, stream it to")
+	fmt.Println("  fiber: wake an agent from any channel, run it durably, stream it to")
 	fmt.Println("            everyone, deliver it anywhere.")
 	fmt.Println()
 	fmt.Println("  one process, no API key, no network, no infrastructure.")
