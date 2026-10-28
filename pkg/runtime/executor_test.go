@@ -4,14 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/urmzd/saige/agent/agenttest"
-
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/turn"
 	"github.com/urmzd/fiber/pkg/turn/native"
+	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 )
 
 func bridgeRequest() runtime.Request {
