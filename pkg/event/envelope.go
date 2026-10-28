@@ -77,9 +77,18 @@ func (e Envelope) Validate() error {
 	case runScoped(e.Type) && e.Run == "":
 		return fmt.Errorf("%w: %s names no run", ErrInvalid, e.Type)
 	}
+	u, unknown := e.Data.(Unknown)
 	if _, known := Lookup(e.Type); !known {
-		if _, ok := e.Data.(Unknown); !ok {
+		if !unknown {
 			return fmt.Errorf("%w: unregistered type %q with a typed body", ErrInvalid, e.Type)
+		}
+		return nil
+	}
+	// A registered type carried as Unknown must decode as that type, so a
+	// body no reader can decode is never published.
+	if unknown {
+		if _, err := Decode(e.Type, u.Raw); err != nil {
+			return fmt.Errorf("%w: %s body does not decode: %v", ErrInvalid, e.Type, err)
 		}
 	}
 	return nil

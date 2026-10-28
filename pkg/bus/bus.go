@@ -71,8 +71,10 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	goruntime "runtime"
 	"slices"
 	"time"
@@ -199,6 +201,7 @@ type options struct {
 	poll      time.Duration
 	indexTTL  time.Duration
 	now       func() time.Time
+	log       *slog.Logger
 }
 
 func defaults() options {
@@ -211,6 +214,7 @@ func defaults() options {
 		poll:      DefaultPollInterval,
 		indexTTL:  DefaultIndexTTL,
 		now:       time.Now,
+		log:       slog.Default(),
 	}
 }
 
@@ -254,6 +258,44 @@ func WithMaxRuns(n int) Option {
 			o.maxRuns = n
 		}
 	}
+}
+
+// WithLogger sets where a durable backend reports a stored event it skips
+// because it does not decode (default slog.Default).
+func WithLogger(l *slog.Logger) Option {
+	return func(o *options) {
+		if l != nil {
+			o.log = l
+		}
+	}
+}
+
+// storedHeader is the part of a stored envelope a subscription filters on.
+type storedHeader struct {
+	Type    string `json:"type"`
+	Channel string `json:"channel"`
+	Tenant  string `json:"tenant"`
+	Run     string `json:"run"`
+	Seq     uint64 `json:"seq"`
+}
+
+// readStored decodes a stored event for sub. It matches the header first, so
+// a body that does not decode never reaches a subscriber that did not select
+// its type. keep is false for an event sub does not accept. A selected event
+// whose body does not decode is an error; the caller skips it and moves on.
+func readStored(raw []byte, sub Subscription) (e event.Envelope, keep bool, err error) {
+	var h storedHeader
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return event.Envelope{}, false, err
+	}
+	head := event.Envelope{Type: h.Type, Channel: h.Channel, Tenant: h.Tenant, Run: h.Run, Seq: h.Seq}
+	if !sub.Accepts(head) {
+		return event.Envelope{}, false, nil
+	}
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return event.Envelope{}, false, err
+	}
+	return e, sub.Accepts(e), nil
 }
 
 // WithMaxHops sets the most hops an event may carry (default 8).

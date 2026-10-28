@@ -427,12 +427,13 @@ func (s *redisStream) tail(ctx context.Context, cursors map[string]string) error
 // the subscription accepts to the consumer.
 func (s *redisStream) emit(ctx context.Context, key string, msgs []redis.XMessage, cursors map[string]string) (int, error) {
 	for i, msg := range msgs {
-		e, err := decodeEntry(msg)
-		if err != nil {
-			return i, fmt.Errorf("bus: decode %s entry %s: %w", key, msg.ID, err)
-		}
+		e, keep, err := decodeEntry(msg, s.sub)
 		cursors[key] = msg.ID
-		if !s.sub.Accepts(e) {
+		if err != nil {
+			s.r.opts.log.Warn("bus: skipping a stored event that does not decode", "tenant", s.sub.Tenant, "stream", key, "entry", msg.ID, "err", err)
+			continue
+		}
+		if !keep {
 			continue
 		}
 		select {
@@ -465,14 +466,10 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func decodeEntry(msg redis.XMessage) (event.Envelope, error) {
+func decodeEntry(msg redis.XMessage, sub Subscription) (event.Envelope, bool, error) {
 	raw, ok := msg.Values[fieldEvent].(string)
 	if !ok {
-		return event.Envelope{}, fmt.Errorf("entry has no %q field", fieldEvent)
+		return event.Envelope{}, false, fmt.Errorf("entry has no %q field", fieldEvent)
 	}
-	var e event.Envelope
-	if err := json.Unmarshal([]byte(raw), &e); err != nil {
-		return event.Envelope{}, err
-	}
-	return e, nil
+	return readStored([]byte(raw), sub)
 }

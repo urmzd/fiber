@@ -221,12 +221,23 @@ func TestValidate(t *testing.T) {
 		"wrong body":    func(e *event.Envelope) { e.Data = event.Thinking{} },
 		"no run":        func(e *event.Envelope) { e.Run = "" },
 		"unknown typed": func(e *event.Envelope) { e.Type = "run.future.v1"; e.Data = event.Unknown{TypeName: "x.v1"} },
+		"known as unknown, broken": func(e *event.Envelope) {
+			e.Data = event.Unknown{TypeName: event.TypeText, Raw: json.RawMessage(`{"text":5}`)}
+		},
 	} {
 		e := good
 		mut(&e)
 		if err := e.Validate(); !errors.Is(err, event.ErrInvalid) {
 			t.Errorf("%s: Validate = %v, want ErrInvalid", name, err)
 		}
+	}
+}
+
+// A registered type carried as Unknown is valid when its data decodes.
+func TestValidateKnownTypeAsUnknown(t *testing.T) {
+	e := sample(event.Unknown{TypeName: event.TypeText, Raw: json.RawMessage(`{"text":"hi"}`)})
+	if err := e.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 }
 

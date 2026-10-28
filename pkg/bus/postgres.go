@@ -350,12 +350,11 @@ func (s *pgStream) batch(ctx context.Context, after *int64) (int, error) {
 			rows.Close()
 			return 0, fmt.Errorf("bus: read %s: %w", s.sub.Tenant, err)
 		}
-		var e event.Envelope
-		if err := json.Unmarshal([]byte(body), &e); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("bus: decode row %d: %w", id, err)
+		e, keep, err := readStored([]byte(body), s.sub)
+		if err != nil {
+			s.p.opts.log.Warn("bus: skipping a stored event that does not decode", "tenant", s.sub.Tenant, "row", id, "err", err)
 		}
-		page = append(page, row{id: id, e: e, keep: s.sub.Accepts(e)})
+		page = append(page, row{id: id, e: e, keep: keep})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
