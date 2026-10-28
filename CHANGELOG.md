@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.26.0 (2026-10-28)
+
+### Breaking
+
+- typed event union, channel bus, saige definitions and a Runtime interface (#47) ([1ecf8b7](https://github.com/urmzd/fiber/commit/1ecf8b7686d53a5322a15a036c2ce6f075fa49c6))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.25.0...v0.26.0)
+
+
 ## 0.25.0 (2026-10-27)
 
 ### Features
