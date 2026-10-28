@@ -76,6 +76,8 @@ for accepted old names and identifiers kept for stored data.
 5. **Knowledge re-embeds once.** A document's hash includes its domain, so
    the first re-index after the upgrade treats every document as changed.
 6. **Anything that stored a revision hash** outside fiber (a link, an audit
-   log) holds the old address. The new one is `App.Registry().Get(...).Hash`.
+   log) holds the old address. The new one is the definition content hash,
+   `App.Definitions().Get(ctx, tenant, name, version)` then `.Digest` (see
+   [events.md](architecture/events.md#7-definitions)).
 
 Historical changelog entries keep the names they were written with.
