@@ -40,7 +40,8 @@ type Body struct {
 }
 
 // BodyOf renders an event as a body. With sensitive false, a body the
-// catalog marks sensitive is left out.
+// catalog marks sensitive is left out, and so is the body of a type this
+// build does not know: its sensitivity cannot be checked, so it fails closed.
 func BodyOf(e event.Envelope, sensitive bool) (Body, error) {
 	b := Body{
 		SpecVersion: SpecVersion,
@@ -58,7 +59,7 @@ func BodyOf(e event.Envelope, sensitive bool) (Body, error) {
 		Version:     e.Version,
 		Digest:      e.Digest,
 	}
-	if entry, ok := event.Lookup(e.Type); ok && entry.Sensitive && !sensitive {
+	if entry, ok := event.Lookup(e.Type); (!ok || entry.Sensitive) && !sensitive {
 		b.Redacted = true
 		return b, nil
 	}

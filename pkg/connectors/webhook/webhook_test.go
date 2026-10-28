@@ -180,6 +180,25 @@ func TestASensitiveBodyIsLeftOutUnlessTheEndpointOptsIn(t *testing.T) {
 	}
 }
 
+// A type this build does not know may carry what a person wrote, so its body
+// is left out unless the endpoint opts in.
+func TestAnUnknownBodyIsLeftOutUnlessTheEndpointOptsIn(t *testing.T) {
+	edited := event.Envelope{
+		ID: "Ev2", Source: "slack://T01/C02", Type: "message.edited.v1", Channel: "slack://T01/C02",
+		Time: time.Unix(1784600000, 0).UTC(), Tenant: "acme",
+		Data: event.Unknown{TypeName: "message.edited.v1", Raw: json.RawMessage(`{"text":"the secret plan"}`)},
+	}
+	for _, sensitive := range []bool{false, true} {
+		body, err := webhook.BodyOf(edited, sensitive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if leaked := strings.Contains(string(body.Data), "secret plan"); leaked != sensitive || body.Redacted == sensitive {
+			t.Errorf("sensitive=%v: redacted=%v, text sent=%v", sensitive, body.Redacted, leaked)
+		}
+	}
+}
+
 // ── Subscriptions ───────────────────────────────────────────────────
 
 // An endpoint subscribes to the channels it names and to its types, or to
