@@ -69,7 +69,9 @@ func (s settings) prepare(rec Record) (Record, error) {
 	rec.Name, rec.Version, rec.Digest = d.Name, d.Version, d.Digest
 	rec.Policy = a.Policy
 	rec.PolicyHash = a.Policy.Hash()
-	rec.CreatedAt = s.clock().UTC()
+	// Postgres keeps microseconds, so a stamp is cut to them here and a
+	// record reads back exactly as it was written on every backend.
+	rec.CreatedAt = s.clock().UTC().Truncate(time.Microsecond)
 	return rec, nil
 }
 

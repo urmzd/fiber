@@ -32,10 +32,24 @@ func TestPostgresSource(t *testing.T) {
 	definitiontest.Run(t, func(t *testing.T) definition.Source { return newPostgres(t, url) })
 }
 
+// A clock with nanoseconds, as Linux has, still reads back what it wrote:
+// Postgres keeps microseconds, so a stamp finer than that would make an
+// identical put look like a rewrite.
+func TestPostgresSourceWithANanosecondClock(t *testing.T) {
+	url := os.Getenv(postgresEnv)
+	if url == "" {
+		t.Skipf("$%s is not set", postgresEnv)
+	}
+	ns := func() time.Time { return time.Date(2026, 10, 28, 21, 53, 5, 184170509, time.UTC) }
+	definitiontest.Run(t, func(t *testing.T) definition.Source {
+		return newPostgres(t, url, definition.WithClock(ns))
+	})
+}
+
 // newPostgres returns a migrated source in a schema of its own.
-func newPostgres(t *testing.T, url string) *definition.Postgres {
+func newPostgres(t *testing.T, url string, opts ...definition.Option) *definition.Postgres {
 	t.Helper()
-	src := definition.NewPostgres(newPool(t, url))
+	src := definition.NewPostgres(newPool(t, url), opts...)
 	for range 2 {
 		if err := src.Migrate(context.Background()); err != nil {
 			t.Fatalf("migrate: %v", err)

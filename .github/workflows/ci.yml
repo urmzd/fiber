@@ -117,6 +117,7 @@ jobs:
             ["internal/pgrename", "TestADatabaseFromBeforeTheRenameKeepsItsData"],
             ["internal/pgrename", "TestAnOldTableRecreatedAfterTheUpgradeFailsTheMigrationNamingBoth"],
             ["definition", "TestPostgresSource"],
+            ["definition", "TestPostgresSourceWithANanosecondClock"],
             ["knowledge", "TestPostgresConformance"],
             ["thread", "TestPostgresConformance"],
             ["toolprovider", "TestPostgresConformance"],

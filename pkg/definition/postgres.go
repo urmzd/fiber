@@ -280,7 +280,7 @@ func (p *Postgres) Retire(ctx context.Context, tenant, name, by string) error {
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO fiber_definition_retirements (tenant, name, retired_at, retired_by)
 			VALUES ($1, $2, $3, $4) ON CONFLICT (tenant, name) DO NOTHING`,
-			tenant, name, p.clock().UTC(), strings.TrimSpace(by))
+			tenant, name, p.clock().UTC().Truncate(time.Microsecond), strings.TrimSpace(by))
 		return err
 	})
 	if err != nil {
