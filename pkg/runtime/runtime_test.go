@@ -1270,3 +1270,52 @@ func TestRunKeyIsDomainSeparatedPerSubscriber(t *testing.T) {
 		}
 	}
 }
+
+// With the ledger to read, a redelivery joins its run from the stored pin:
+// it does not resolve again, so a retired agent cannot fail it and a newer
+// version cannot change what it reports, and it announces nothing again.
+func TestARedeliveryReadsItsRunFromTheLedger(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, newExecutor("answered"))
+	h.rt = mustRuntime(t, h, runtime.WithStopLedger(h.ledger))
+	h.specs.revise("docs-bot", "revision 1 instructions")
+
+	ctx := context.Background()
+	first, err := accept(ctx, h.rt, tag("docs-bot", "Ev-redeliver", "hello"))
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	h.specs.revise("docs-bot", "revision 2 instructions")
+	second, err := accept(ctx, h.rt, tag("docs-bot", "Ev-redeliver", "hello"))
+	if err != nil {
+		t.Fatalf("Accept (redelivery after a bump): %v", err)
+	}
+	if second.RunID != first.RunID || second.Version != "1.0.0" {
+		t.Fatalf("redelivery = %s@%s, want %s@1.0.0", second.RunID, second.Version, first.RunID)
+	}
+	if err := h.specs.src.Retire(ctx, fixtureTenant, "docs-bot", "ada"); err != nil {
+		t.Fatal(err)
+	}
+	third, err := accept(ctx, h.rt, tag("docs-bot", "Ev-redeliver", "hello"))
+	if err != nil {
+		t.Fatalf("Accept (redelivery after retiring): %v", err)
+	}
+	if third.RunID != first.RunID || third.Version != "1.0.0" {
+		t.Fatalf("redelivery = %s@%s, want %s@1.0.0", third.RunID, third.Version, first.RunID)
+	}
+	if n := len(h.bus.ofKind(event.TypeAccepted)); n != 1 {
+		t.Fatalf("got %d accepted events, want 1: a redelivery announces nothing", n)
+	}
+}
+
+// mustRuntime builds a runtime over h's ledger, queue, definitions and bus.
+func mustRuntime(t *testing.T, h *harness, opts ...runtime.Option) *runtime.Runtime {
+	t.Helper()
+	rt, err := runtime.New(anchor.New(h.ledger, h.queue), h.specs, h.bus,
+		append([]runtime.Option{runtime.WithRuntime(runtime.AsRuntime(h.exec))}, opts...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt
+}

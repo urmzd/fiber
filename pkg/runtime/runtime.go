@@ -389,12 +389,11 @@ type Outcome struct {
 // tenant and channel the run publishes on, so the caller never derives them.
 type Acceptance struct {
 	RunID string
-	// Version is the definition version this call resolved. For the
-	// delivery that created the run it is the pinned version. For a
-	// redelivery it is whatever is latest now, which may be newer than what
-	// the run actually pinned: Accept must announce before it submits (see
-	// below), so at the moment it resolves it cannot yet know the run
-	// already exists. The run's own events always carry the pinned version.
+	// Version is the definition version the run pinned. A redelivery of an
+	// event whose run is already in the ledger reads it from the stored
+	// input (WithStopLedger). Without a ledger to read, a redelivery
+	// resolves again and reports what is latest now; the run's own events
+	// always carry the pinned version.
 	Version string
 	// Tenant and Channel are where the run's events are published.
 	Tenant     string
@@ -629,8 +628,12 @@ func (r *Runtime) Registry() *run.Registry { return r.registry }
 // retries the same event, which lands on the same run id and the same
 // sequence 1.
 //
-// Accept is idempotent on (tenant, event id, subscriber): a redelivery cannot
-// change what the run pinned, because anchor returns the existing run
+// Accept is idempotent on (tenant, event id, subscriber). With a ledger to
+// read (WithStopLedger), a redelivery of a run already in it returns that
+// run's acceptance from its stored pin and does nothing else, so a retired or
+// bumped agent cannot fail it or change what it reports. Without one, or
+// when the first delivery failed before the run was stored, a redelivery
+// cannot change what the run pinned either: anchor returns the existing run
 // untouched and the bus keeps the first write of sequence 1. The same holds
 // for the history pin.
 func (r *Runtime) Accept(ctx context.Context, trigger event.Envelope, subscriber string) (Acceptance, error) {
@@ -658,6 +661,14 @@ func (r *Runtime) start(ctx context.Context, in Input, parent definition.Pin) (A
 	runID := in.runID()
 	if err := CheckRun(in.Subscriber, runID); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", id, err)
+	}
+	// A redelivery joins the run it already started: it neither resolves
+	// again, which could fail or name another version, nor publishes again.
+	if acc, ok, err := r.existing(ctx, in, runID); err != nil || ok {
+		if err != nil {
+			return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", id, err)
+		}
+		return acc, nil
 	}
 	var (
 		pin definition.Pin
@@ -699,6 +710,34 @@ func (r *Runtime) start(ctx context.Context, in Input, parent definition.Pin) (A
 		return acc, fmt.Errorf("runtime: accept %s: %w", id, err)
 	}
 	return acc, nil
+}
+
+// existing returns the acceptance of a run already in the ledger, built from
+// its stored input. ok is false when there is no ledger to read
+// (WithStopLedger) or no such run. A run under runID in another tenant is
+// refused, though the run key makes that impossible by construction.
+func (r *Runtime) existing(ctx context.Context, in Input, runID string) (Acceptance, bool, error) {
+	if r.stops == nil {
+		return Acceptance{}, false, nil
+	}
+	rec, err := r.loadRun(ctx, runID)
+	switch {
+	case errors.Is(err, run.ErrNotFound):
+		return Acceptance{}, false, nil
+	case err != nil:
+		return Acceptance{}, false, fmt.Errorf("read run %s: %w", runID, err)
+	}
+	var stored Input
+	if err := json.Unmarshal(rec.Input, &stored); err != nil {
+		return Acceptance{}, false, fmt.Errorf("read run %s: %w", runID, err)
+	}
+	if stored.Trigger.Tenant != in.Trigger.Tenant || stored.Subscriber != in.Subscriber {
+		return Acceptance{}, false, fmt.Errorf("%w: run %s belongs to another event", ErrInvalid, runID)
+	}
+	return Acceptance{
+		RunID: runID, Version: stored.Pin.Version, Tenant: busTenant(stored.Trigger.Tenant),
+		Channel: stored.Trigger.Channel, AcceptedAt: rec.CreatedAt.UTC(),
+	}, true, nil
 }
 
 // Result blocks until a run is terminal and returns its output.
