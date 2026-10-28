@@ -15,6 +15,9 @@ schedule nobody watched can answer into both. That independence is what makes
 this a mesh rather than a collection of integrations, and almost every decision
 below follows from it.
 
+The target design for events, the channel bus, definitions and the
+`Runtime` interface is in [events.md](events.md).
+
 ## What each layer owns
 
 fiber composes three libraries and adds the parts that make them a product.
@@ -33,6 +36,8 @@ owns what a tool is allowed to touch; saige owns what the model does. fiber
 owns addressing, distribution, and the control plane, and delegates the rest.
 
 ## Topics: one namespace, matched by prefix
+
+> **Replaced.** Agent-keyed topics are replaced by one bus on URI channels, matched by channel and type prefix. See [events.md](events.md#5-channels).
 
 The mental model is one line: **users listen to an agent.**
 
@@ -67,6 +72,8 @@ The result is that a consumer only ever needs to know an agent's name to listen
 to it, and no topic name has to be discovered at runtime.
 
 ## Triggers, sinks, and actors
+
+> **Replaced.** Triggers that raise a free-text `Tag` are replaced by ingress adapters that publish typed events, and sinks by egress adapters that subscribe. See [events.md](events.md#9-adapters).
 
 A connector is a peer, not a client. It may implement up to three faces, and the
 faces are independent:
@@ -105,6 +112,8 @@ the conversation that caused it.
 
 ## N:M delivery
 
+> **Replaced.** Route kind filters are replaced by subscriptions on channel and type prefix. See [events.md](events.md#5-channels).
+
 One tag fans out to many sinks; one sink serves many agents. Each route chooses
 its own event kinds, so granularity is per destination.
 
@@ -132,6 +141,8 @@ targets and runs. Ordering within a pair matters concretely: a Slack message
 edited out of order shows the wrong final text.
 
 ## Agent revisions are pinned per run
+
+> **Replaced.** `AgentSpec` and the registry are replaced by saige definitions and a Policy sidecar. The pin keeps the version and digest. See [events.md](events.md#7-definitions).
 
 An `AgentSpec` is immutable. Revising appends revision N+1 and never modifies
 what is already there. A run pins its revision at accept time and executes
@@ -761,6 +772,8 @@ that form when its schema hash matches; every person's session then compares
 what the server offers them with it, as every session does.
 
 ## Package DAG
+
+> **Replaced.** `pkg/registry`, `pkg/agentspec`, `pkg/topic` and the runtime `Executor` are replaced by saige definitions, the channel bus and the `Runtime` interface. See [events.md](events.md#8-runtime).
 
 Dependencies run one way. Leaves are stdlib-only and know nothing about
 transports, storage, or agents.
