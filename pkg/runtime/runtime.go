@@ -615,7 +615,7 @@ func (r *Runtime) Registry() *run.Registry { return r.registry }
 // first, so a tag naming an unknown agent is refused rather than accepted and
 // then failed. The accepted event is published SECOND, before the run is
 // submitted, because submitting makes the run claimable and a fast worker
-// would otherwise publish started first — and the bus treats a sequence at or
+// would otherwise publish started first, and the bus treats a sequence at or
 // below a run's high-water mark as an already-seen event, so an accepted event
 // that lost that race would be dropped rather than delivered late. Events must
 // reach the bus in ascending sequence order, and sequence 1 belongs to
@@ -895,10 +895,9 @@ func (a *attemptLog) report(ctx context.Context, body event.Body) {
 
 // runAgent is the nested activity that executes the agent.
 //
-// It is where the pinned definition is verified — by its pin, never by
-// "latest" —
-// and where the agent's events are published as they stream. Its result is
-// memoized, which is the whole reason it is a separate activity: a replay of the
+// It is where the pinned definition is verified, by its pin and never by
+// "latest", and where the agent's events are published as they stream. Its
+// result is memoized, which is the whole reason it is a separate activity: a replay of the
 // turn must re-publish the run's lifecycle without paying for the model again.
 func (r *Runtime) runAgent(ctx context.Context, in Input) (Outcome, error) {
 	return r.executeAgent(ctx, in, nil)
