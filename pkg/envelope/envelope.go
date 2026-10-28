@@ -30,6 +30,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -133,22 +134,8 @@ func (k Kind) Matches(sel string) bool {
 	return sel == k.Family()
 }
 
-// Actor is the human or system that raised a tag.
-type Actor struct {
-	// ID is the connector-native identifier (a Slack user ID, a GitHub
-	// login). Stable within a workspace.
-	ID string `json:"id"`
-	// Display is a human-readable name, best effort.
-	Display string `json:"display,omitempty"`
-	// Bot reports whether the actor is automation rather than a person.
-	Bot bool `json:"bot,omitempty"`
-	// User is the host's own account for the actor (the user id of the
-	// product a person signed in to), when the surface knows it. It is an
-	// authorization fact like ID: fiber trusts it as given, so a program that
-	// accepts tags from callers keeps it only from a credential trusted to
-	// act for others.
-	User string `json:"user,omitempty"`
-}
+// Actor is the human or system that raised a tag. It is event.Actor.
+type Actor = event.Actor
 
 // Route is one delivery instruction: where to send events, and which ones.
 //
