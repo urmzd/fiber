@@ -19,8 +19,14 @@ var update = flag.Bool("update", false, "rewrite testdata from the samples")
 
 var at = time.Date(2026, 10, 28, 14, 3, 11, 0, time.UTC)
 
-// sample returns a run-scoped envelope around b.
+// sample returns an envelope around b, run scoped for run and control types.
 func sample(b event.Body) event.Envelope {
+	if f := event.Family(b.Type()); f != "run" && f != "control" {
+		return event.Envelope{
+			ID: "ev-1", Source: "slack://T01", Type: b.Type(), Subject: "C02", Channel: "slack://T01/C02",
+			Time: at, Data: b,
+		}
+	}
 	return event.Envelope{
 		ID: "ev-1", Source: "fiber://run/r1", Type: b.Type(), Channel: "slack://T01/C02",
 		Time: at, Hops: 1, Tenant: "acme", Run: "r1", Seq: 7, Agent: "helper", Version: "1.2.0",
@@ -37,7 +43,7 @@ func samples() []event.Body {
 	}
 	cost := &event.Cost{Micros: 1_250, Currency: "USD", AsOf: "2026-07-24"}
 	usage := event.Usage{ModelCalls: 2, Requests: 2, PromptTokens: 900, CachedPromptTokens: 400, CompletionTokens: 120, Cost: cost}
-	return []event.Body{
+	bodies := []event.Body{
 		event.Accepted{Attempt: 1, Rev: 3},
 		event.Started{Attempt: 1, Rev: 3},
 		event.Parked{Attempt: 1, Rev: 3, Reason: "waiting on a person", Question: &q},
@@ -58,6 +64,7 @@ func samples() []event.Body {
 		event.StopRequest{RunID: "r1", Reason: "wrong repo", By: "ana", At: at},
 		event.CompactRequest{RunID: "r1", By: "ana", At: at},
 	}
+	return append(bodies, ingressSamples()...)
 }
 
 // Every registered type decodes into its own body, renders, and round trips

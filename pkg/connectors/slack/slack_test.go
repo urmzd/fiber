@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -667,10 +668,13 @@ func TestNewRejectsAConfigurationThatCouldNotAddress(t *testing.T) {
 	}
 }
 
+// receive waits for a tag and checks it renders through the event catalog
+// as it renders today.
 func receive(t *testing.T, tags <-chan envelope.Tag) envelope.Tag {
 	t.Helper()
 	select {
 	case tag := <-tags:
+		rendertest.Check(t, tag)
 		return tag
 	case <-time.After(2 * time.Second):
 		t.Fatal("no tag was raised")

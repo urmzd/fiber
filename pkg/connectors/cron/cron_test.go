@@ -3,6 +3,7 @@ package cron_test
 import (
 	"context"
 	"errors"
+	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
 	"sync"
 	"testing"
 	"time"
@@ -574,6 +575,7 @@ func drain(t *testing.T, tags chan envelope.Tag, n int) []envelope.Tag {
 	for range n {
 		select {
 		case tag := <-tags:
+			rendertest.Check(t, tag)
 			out = append(out, tag)
 		case <-time.After(2 * time.Second):
 			t.Fatalf("only %d of %d tags arrived", len(out), n)

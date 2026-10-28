@@ -132,6 +132,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/attachment/resolve"
@@ -180,10 +181,7 @@ const DefaultStopReason = saige.DefaultStopReason
 // then the text. It is what a turn that was stopped before it began records as
 // its request, and what a caller can record when it never learned the prompt.
 func RequestText(text string, meta map[string]string) string {
-	if m := renderMeta(meta); m != "" {
-		return m + "\n\n" + text
-	}
-	return text
+	return event.RequestText(text, meta)
 }
 
 // Stop asks a turn to wrap up before it has finished.
@@ -718,8 +716,8 @@ func (r *Runner) Run(ctx context.Context, t Turn, emit func(context.Context, Chu
 			prompt = ac.Prompt + "\n\n" + prompt
 		}
 	}
-	if meta := renderMeta(t.Meta); meta != "" && t.Resume == nil {
-		prompt = meta + "\n\n" + prompt
+	if t.Resume == nil {
+		prompt = event.RequestText(prompt, t.Meta)
 	}
 	res.Prompt = prompt
 
@@ -1120,32 +1118,6 @@ func conversation(history []Message, prompt string) ([]saigetypes.Message, error
 		}
 	}
 	return append(out, saigetypes.UserMsg(saigetypes.Text(prompt))), nil
-}
-
-// renderMeta formats a tag's metadata as a context block, in sorted key order.
-// A private key (envelope.PrivateMeta) is the host's and is left out.
-//
-// Determinism matters more than prettiness here: the rendered prompt is part of
-// the input a durable turn re-executes with, and Go's map iteration order is
-// random, so an unsorted rendering would make two attempts of the same tag ask
-// the model two different questions.
-func renderMeta(meta map[string]string) string {
-	keys := make([]string, 0, len(meta))
-	for k := range meta {
-		if !envelope.PrivateMeta(k) {
-			keys = append(keys, k)
-		}
-	}
-	if len(keys) == 0 {
-		return ""
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	b.WriteString("Context from the trigger:")
-	for _, k := range keys {
-		fmt.Fprintf(&b, "\n- %s: %s", k, meta[k])
-	}
-	return b.String()
 }
 
 func providerNames(m map[string]ProviderFunc) []string {

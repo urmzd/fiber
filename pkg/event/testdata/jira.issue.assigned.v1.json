@@ -1,0 +1,47 @@
+{
+  "id": "ev-1",
+  "source": "slack://T01",
+  "type": "jira.issue.assigned.v1",
+  "subject": "C02",
+  "channel": "slack://T01/C02",
+  "time": "2026-10-28T14:03:11Z",
+  "hops": 0,
+  "data": {
+    "text": "summarise this",
+    "actor": {
+      "id": "U07",
+      "display": "ada"
+    },
+    "mentions": [
+      "helper"
+    ],
+    "attachments": [
+      {
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "media_type": "text/plain",
+        "name": "notes.txt",
+        "size": 5
+      }
+    ],
+    "context": {
+      "project": "handbook"
+    },
+    "site": "acme",
+    "key": "PROJ-7",
+    "webhook_event": "comment_created",
+    "issue_event": "issue_commented",
+    "id": "10007",
+    "summary": "Broken build",
+    "status": "Open",
+    "issue_type": "Bug",
+    "priority": "High",
+    "project": "PROJ",
+    "project_name": "Project",
+    "assignee": "Ada",
+    "reporter": "Grace",
+    "labels": [
+      "ci"
+    ],
+    "url": "https://acme.atlassian.net/browse/PROJ-7"
+  }
+}
