@@ -8,11 +8,11 @@ import (
 	"testing"
 
 	"github.com/urmzd/fiber/pkg/connectors/slack"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 func TestVerifiedMessagesStayWithinTheConfiguredTeam(t *testing.T) {
-	for _, event := range []string{"app_mention", "message"} {
+	for _, kind := range []string{"app_mention", "message"} {
 		for _, tc := range []struct {
 			name, configured, delivered string
 			accepted                    bool
@@ -22,30 +22,30 @@ func TestVerifiedMessagesStayWithinTheConfiguredTeam(t *testing.T) {
 			{"missing team", "T01ABCDEF", "", false},
 			{"unbound connector", "", "T09OTHER", true},
 		} {
-			t.Run(event+"/"+tc.name, func(t *testing.T) {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
 				prepared := false
 				c, tags := start(t, slack.Config{
-					Team: tc.configured, DefaultAgent: "docs-bot",
-					Prepare: func(_ context.Context, _ *envelope.Tag) error {
+					Team: tc.configured,
+					Prepare: func(_ context.Context, _ *event.Envelope) error {
 						prepared = true
 						return nil
 					},
 				})
 				body := strings.ReplaceAll(appMention, "T01ABCDEF", tc.delivered)
-				body = strings.Replace(body, `"type": "app_mention"`, `"type": "`+event+`", "channel_type": "im"`, 1)
+				body = strings.Replace(body, `"type": "app_mention"`, `"type": "`+kind+`", "channel_type": "im"`, 1)
 				w := httptest.NewRecorder()
 				c.ServeHTTP(w, post(t, body))
 				if w.Code != http.StatusOK || prepared != tc.accepted {
 					t.Fatalf("status=%d prepared=%v, want 200/%v", w.Code, prepared, tc.accepted)
 				}
 				if tc.accepted {
-					if tag := receive(t, tags); tag.Source.Workspace != tc.delivered {
-						t.Fatalf("workspace=%q, want %q", tag.Source.Workspace, tc.delivered)
+					if b := posted(t, receive(t, tags)); b.Slack.Team != tc.delivered {
+						t.Fatalf("team=%q, want %q", b.Slack.Team, tc.delivered)
 					}
 				} else {
 					select {
-					case tag := <-tags:
-						t.Fatalf("out-of-team delivery raised a tag: %+v", tag)
+					case e := <-tags:
+						t.Fatalf("out-of-team delivery published %+v", e)
 					default:
 					}
 				}

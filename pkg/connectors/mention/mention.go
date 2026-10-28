@@ -18,7 +18,10 @@
 // This package is a leaf: stdlib only.
 package mention
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // Set decides whether a mention token names an agent and returns the canonical
 // spelling for it.
@@ -26,7 +29,7 @@ import "strings"
 // It is one method because the two questions are one lookup: a deployment that
 // knows its agents answers both from the same map, and a deployment that does
 // not (Any) answers both from the token's syntax. Returning the canonical name
-// means "@Docs-Bot" and "@docs-bot" produce the same Tag.Agent, and therefore
+// means "@Docs-Bot" and "@docs-bot" produce the same mention, and therefore
 // the same topic.
 type Set interface {
 	Lookup(token string) (name string, ok bool)
@@ -127,6 +130,26 @@ func Find(text string, set Set) (agent, stripped string, ok bool) {
 		return name, strip(text, spans, name), true
 	}
 	return "", text, false
+}
+
+// FindAll returns every agent mentioned in text that set accepts, in the
+// order each is first mentioned, and text stripped of every mention of each.
+// It names who the text addresses and chooses none of them.
+func FindAll(text string, set Set) (agents []string, stripped string) {
+	if set == nil {
+		set = Any
+	}
+	for _, s := range scan(text) {
+		name, ok := set.Lookup(text[s.start+1 : s.end])
+		if ok && !slices.Contains(agents, name) {
+			agents = append(agents, name)
+		}
+	}
+	stripped = text
+	for _, a := range agents {
+		stripped = Strip(stripped, a)
+	}
+	return agents, stripped
 }
 
 // Strip removes every mention of agent from text without needing a Set. It is

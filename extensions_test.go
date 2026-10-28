@@ -20,7 +20,6 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
@@ -57,8 +56,7 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 		t.Fatalf("the registry refused an agent on the registered provider: %v", err)
 	}
 	target, _ := address.Parse("inbox://acme/out")
-	if _, err := c.Invoke(ctx, envelope.Tag{ID: "Ev-1", Tenant: "acme", Agent: "oncall", Origin: "test",
-		Text: "api is down", Deliver: []envelope.Route{{Target: target}}, At: time.Now()}); err != nil {
+	if _, err := ask(ctx, c, posted("Ev-1", "acme", "oncall", target.String(), "api is down")); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(15 * time.Second)

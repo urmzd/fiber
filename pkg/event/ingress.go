@@ -452,9 +452,125 @@ func (b CronTick) meta() map[string]string {
 	return m
 }
 
-// request renders a body with a Request: its context, then its text.
-func request[T Body](text func(T) string, meta func(T) map[string]string) func(Envelope) (string, error) {
-	return render(func(_ Envelope, b T) string { return renderContext(text(b), meta(b)) })
+// prompter is an ingress body that asks something of an agent: its request
+// text and the trigger context rendered next to it.
+type prompter interface {
+	Body
+	prompt() (string, map[string]string)
+}
+
+func (b MessagePosted) prompt() (string, map[string]string)       { return b.Text, b.meta() }
+func (b SlackCommandInvoked) prompt() (string, map[string]string) { return b.Text, b.meta() }
+func (b CronTick) prompt() (string, map[string]string)            { return b.Text, b.meta() }
+
+func (b GitHubIssueCommentCreated) prompt() (string, map[string]string)  { return gitHubPrompt(b) }
+func (b GitHubReviewCommentCreated) prompt() (string, map[string]string) { return gitHubPrompt(b) }
+func (b GitHubReviewSubmitted) prompt() (string, map[string]string)      { return gitHubPrompt(b) }
+func (b GitHubIssueOpened) prompt() (string, map[string]string)          { return gitHubPrompt(b) }
+func (b GitHubIssueLabeled) prompt() (string, map[string]string)         { return gitHubPrompt(b) }
+func (b GitHubPullOpened) prompt() (string, map[string]string)           { return gitHubPrompt(b) }
+func (b GitHubPullReadyForReview) prompt() (string, map[string]string)   { return gitHubPrompt(b) }
+func (b GitHubReviewRequested) prompt() (string, map[string]string)      { return gitHubPrompt(b) }
+func (b GitHubPullSynchronize) prompt() (string, map[string]string)      { return gitHubPrompt(b) }
+func (b GitHubPullLabeled) prompt() (string, map[string]string)          { return gitHubPrompt(b) }
+
+func (b JiraCommentCreated) prompt() (string, map[string]string) {
+	m := jiraMeta(b.Request, b.JiraRef)
+	setNonEmpty(m, "jira_comment_id", b.CommentID)
+	return b.Text, m
+}
+
+func (b JiraIssueCreated) prompt() (string, map[string]string) {
+	return b.Text, jiraMeta(b.Request, b.JiraRef)
+}
+
+func (b JiraIssueAssigned) prompt() (string, map[string]string) {
+	m := jiraMeta(b.Request, b.JiraRef)
+	m["jira_assigned"] = "true"
+	return b.Text, m
+}
+
+// Prompt returns what an ingress body asks: its request text and the trigger
+// context a model is shown next to it. The catalog renders exactly
+// RequestText(text, context). ok is false for a body that asks nothing.
+func Prompt(b Body) (text string, context map[string]string, ok bool) {
+	p, ok := b.(prompter)
+	if !ok {
+		return "", nil, false
+	}
+	text, context = p.prompt()
+	return text, context, true
+}
+
+// Render renders an event with its catalog entry. An unregistered type is an
+// error.
+func Render(e Envelope) (string, error) {
+	entry, ok := Lookup(e.Type)
+	if !ok {
+		return "", fmt.Errorf("%w: %s is not registered", ErrInvalid, e.Type)
+	}
+	return entry.Render(e)
+}
+
+// WithRequest returns b with its request replaced by r, and false for a body
+// that carries no request.
+func WithRequest(b Body, r Request) (Body, bool) {
+	switch v := b.(type) {
+	case MessagePosted:
+		v.Request = r
+		return v, true
+	case SlackCommandInvoked:
+		v.Request = r
+		return v, true
+	case GitHubIssueCommentCreated:
+		v.Request = r
+		return v, true
+	case GitHubReviewCommentCreated:
+		v.Request = r
+		return v, true
+	case GitHubReviewSubmitted:
+		v.Request = r
+		return v, true
+	case GitHubIssueOpened:
+		v.Request = r
+		return v, true
+	case GitHubIssueLabeled:
+		v.Request = r
+		return v, true
+	case GitHubPullOpened:
+		v.Request = r
+		return v, true
+	case GitHubPullReadyForReview:
+		v.Request = r
+		return v, true
+	case GitHubReviewRequested:
+		v.Request = r
+		return v, true
+	case GitHubPullSynchronize:
+		v.Request = r
+		return v, true
+	case GitHubPullLabeled:
+		v.Request = r
+		return v, true
+	case JiraCommentCreated:
+		v.Request = r
+		return v, true
+	case JiraIssueCreated:
+		v.Request = r
+		return v, true
+	case JiraIssueAssigned:
+		v.Request = r
+		return v, true
+	case CronTick:
+		v.Request = r
+		return v, true
+	}
+	return b, false
+}
+
+// request renders a body that asks something: its context, then its text.
+func request[T prompter]() func(Envelope) (string, error) {
+	return render(func(_ Envelope, b T) string { return renderContext(b.prompt()) })
 }
 
 // gitHubBody is a GitHub body: its request, its subject and its comment id.
@@ -495,32 +611,28 @@ func (b GitHubPullSynchronize) gitHub() (Request, GitHubRef, int64) {
 
 func (b GitHubPullLabeled) gitHub() (Request, GitHubRef, int64) { return b.Request, b.GitHubRef, 0 }
 
-func gitHubText[T gitHubBody](b T) string {
-	r, _, _ := b.gitHub()
-	return r.Text
-}
-
-func gitHubBodyMeta[T gitHubBody](b T) map[string]string {
+func gitHubPrompt(b gitHubBody) (string, map[string]string) {
 	r, g, comment := b.gitHub()
 	m := gitHubMeta(r, g, b.Type(), comment)
-	if rc, ok := any(b).(GitHubReviewCommentCreated); ok && rc.ReviewRootID != 0 {
+	if rc, ok := b.(GitHubReviewCommentCreated); ok && rc.ReviewRootID != 0 {
 		m["github_review_root_id"] = strconv.FormatInt(rc.ReviewRootID, 10)
 	}
-	return m
+	return r.Text, m
 }
 
-func gitHubEntry[T gitHubBody](typ string, newBody func() Body) Entry {
-	return Entry{Type: typ, Sensitive: true, New: newBody, Render: request(gitHubText[T], gitHubBodyMeta[T])}
+func gitHubEntry[T interface {
+	gitHubBody
+	prompter
+}](typ string, newBody func() Body) Entry {
+	return Entry{Type: typ, Sensitive: true, New: newBody, Render: request[T]()}
 }
 
 func init() {
 	for _, e := range []Entry{
 		// Every body with a Request carries text a person wrote, or that a
 		// person configured, so each is sensitive.
-		{Type: TypeMessagePosted, Sensitive: true, New: func() Body { return new(MessagePosted) },
-			Render: request(func(b MessagePosted) string { return b.Text }, MessagePosted.meta)},
-		{Type: TypeSlackCommandInvoked, Sensitive: true, New: func() Body { return new(SlackCommandInvoked) },
-			Render: request(func(b SlackCommandInvoked) string { return b.Text }, SlackCommandInvoked.meta)},
+		{Type: TypeMessagePosted, Sensitive: true, New: func() Body { return new(MessagePosted) }, Render: request[MessagePosted]()},
+		{Type: TypeSlackCommandInvoked, Sensitive: true, New: func() Body { return new(SlackCommandInvoked) }, Render: request[SlackCommandInvoked]()},
 		{Type: TypeSlackSessionStopped, New: func() Body { return new(SlackSessionStopped) },
 			Render: render(func(_ Envelope, b SlackSessionStopped) string {
 				return line("slack session", b.Channel, b.ThreadTS, "stopped by", b.User)
@@ -537,25 +649,11 @@ func init() {
 		gitHubEntry[GitHubPullSynchronize](TypeGitHubPullSynchronize, func() Body { return new(GitHubPullSynchronize) }),
 		gitHubEntry[GitHubPullLabeled](TypeGitHubPullLabeled, func() Body { return new(GitHubPullLabeled) }),
 
-		{Type: TypeJiraCommentCreated, Sensitive: true, New: func() Body { return new(JiraCommentCreated) },
-			Render: request(func(b JiraCommentCreated) string { return b.Text }, func(b JiraCommentCreated) map[string]string {
-				m := jiraMeta(b.Request, b.JiraRef)
-				setNonEmpty(m, "jira_comment_id", b.CommentID)
-				return m
-			})},
-		{Type: TypeJiraIssueCreated, Sensitive: true, New: func() Body { return new(JiraIssueCreated) },
-			Render: request(func(b JiraIssueCreated) string { return b.Text }, func(b JiraIssueCreated) map[string]string {
-				return jiraMeta(b.Request, b.JiraRef)
-			})},
-		{Type: TypeJiraIssueAssigned, Sensitive: true, New: func() Body { return new(JiraIssueAssigned) },
-			Render: request(func(b JiraIssueAssigned) string { return b.Text }, func(b JiraIssueAssigned) map[string]string {
-				m := jiraMeta(b.Request, b.JiraRef)
-				m["jira_assigned"] = "true"
-				return m
-			})},
+		{Type: TypeJiraCommentCreated, Sensitive: true, New: func() Body { return new(JiraCommentCreated) }, Render: request[JiraCommentCreated]()},
+		{Type: TypeJiraIssueCreated, Sensitive: true, New: func() Body { return new(JiraIssueCreated) }, Render: request[JiraIssueCreated]()},
+		{Type: TypeJiraIssueAssigned, Sensitive: true, New: func() Body { return new(JiraIssueAssigned) }, Render: request[JiraIssueAssigned]()},
 
-		{Type: TypeCronTick, Sensitive: true, New: func() Body { return new(CronTick) },
-			Render: request(func(b CronTick) string { return b.Text }, CronTick.meta)},
+		{Type: TypeCronTick, Sensitive: true, New: func() Body { return new(CronTick) }, Render: request[CronTick]()},
 	} {
 		Register(e)
 	}

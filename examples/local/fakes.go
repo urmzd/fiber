@@ -23,6 +23,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
@@ -32,7 +33,7 @@ import (
 // ── the transcript ──────────────────────────────────────────────────
 //
 // The two sinks below are handed the same run's events on two independent
-// lanes. pkg/router guarantees order within one (run, target) pair and
+// lanes. pkg/egress guarantees order within one (run, target) pair and
 // deliberately imposes none across targets, so a slow Jira sink cannot delay a
 // webhook. That is the right property for a delivery system and the wrong
 // property for a document: printing straight from Deliver makes the two
@@ -82,7 +83,7 @@ func (t *transcript) flush() {
 // ── the Slack sink ──────────────────────────────────────────────────
 //
 // A chat sink renders a run by posting ONE message and editing it as the answer
-// arrives, which is why pkg/router carries events for one (run, target) pair on
+// arrives, which is why pkg/egress carries events for one (run, target) pair on
 // a single goroutine: two edits that overtake each other would leave the wrong
 // final text on the surface permanently.
 //
@@ -113,8 +114,18 @@ func newSlackSink(out *transcript) *slackSink {
 // resolve here. It is the whole of connector.Connector.
 func (s *slackSink) Name() string { return "slack" }
 
-// Deliver implements connector.Sink. It is handed every event whose kind the
-// route selected — for this demo, every kind at all.
+// Subscriptions implements connector.Subscriber: every run event on the
+// issue's channel, rendered into one Slack thread.
+func (s *slackSink) Subscriptions() []connector.Subscription {
+	return []connector.Subscription{{
+		Channels: []string{issue},
+		Types:    []string{"run"},
+		Target:   address.MustParse("slack://T01/C02?thread=1699.001"),
+	}}
+}
+
+// Deliver implements connector.Sink. It is handed every event its
+// subscription selected: for this demo, every run event.
 func (s *slackSink) Deliver(_ context.Context, target address.Address, e event.Envelope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -170,7 +181,7 @@ func (s *slackSink) delivered(runID string) (n int, done bool) {
 // ── the webhook sink ────────────────────────────────────────────────
 //
 // The other half of the N:M claim. Same run, same bus, same moment — but this
-// route asked for lifecycle.completed and nothing else, so this sink never
+// subscription asked for run.completed and nothing else, so this sink never
 // learns that deltas exist. It POSTs a JSON body once and is finished.
 
 type webhookSink struct {
@@ -187,6 +198,15 @@ func newWebhookSink(out *transcript) *webhookSink {
 }
 
 func (w *webhookSink) Name() string { return "webhook" }
+
+// Subscriptions implements connector.Subscriber: only the run's completion.
+func (w *webhookSink) Subscriptions() []connector.Subscription {
+	return []connector.Subscription{{
+		Channels: []string{issue},
+		Types:    []string{event.TypeCompleted},
+		Target:   address.MustParse("webhook://acme/deploys"),
+	}}
+}
 
 func (w *webhookSink) Deliver(_ context.Context, target address.Address, e event.Envelope) error {
 	var text string
@@ -337,7 +357,7 @@ func (c corpus) Retrieve(context.Context, string) (*ragtypes.AssembledContext, e
 // bus instead of built into it.
 //
 // Only Publish is overridden. Subscribe passes through, so the observer and the
-// router read the real broker.
+// egress read the real broker.
 
 type flakyBus struct {
 	bus.Bus
@@ -376,7 +396,7 @@ func (f *flakyBus) Publish(ctx context.Context, e event.Envelope) error {
 //
 // An observer holds ONE subscription to agent:<name> and receives every run of
 // that agent, from every trigger, forever. It never invoked anything, nothing
-// routes to it, and no run knows it exists.
+// sink names it, and no run knows it exists.
 
 type observer struct {
 	mu   sync.Mutex

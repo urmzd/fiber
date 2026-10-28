@@ -29,7 +29,6 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
@@ -89,16 +88,16 @@ func noise(t *testing.T, b bus.Bus, n int) {
 
 // in returns tg answering in its own thread, so two runs of one test do not
 // share a conversation.
-func in(tg envelope.Tag, thread string) envelope.Tag {
+func in(tg fixture, thread string) fixture {
 	tg.Source = address.MustParse("github://urmzd/fiber/issues/" + thread)
 	return tg
 }
 
 // entriesOf returns a run's own entries in its thread.
-func entriesOf(t *testing.T, s thread.Store, tg envelope.Tag, runID string) []string {
+func entriesOf(t *testing.T, s thread.Store, tg fixture, runID string) []string {
 	t.Helper()
 	var mine []thread.Entry
-	for _, e := range journal(t, s, thread.KeyOf(tg)) {
+	for _, e := range journal(t, s, tg.key()) {
 		if e.RunID == runID {
 			mine = append(mine, e)
 		}
@@ -158,7 +157,7 @@ func TestAStopSurvivesAWorkerRestart(t *testing.T) {
 	}
 	ended(t, after.bus.of(runID))
 	want := []string{"user: explain", "assistant: [This turn was stopped before it finished.]"}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); fmt.Sprint(got) != fmt.Sprint(want) {
+	if got := said(journal(t, w.threads, tg.key())); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 }
@@ -313,7 +312,7 @@ func TestACompletedRunRetriedAfterItsJournalEntryStaysCompleted(t *testing.T) {
 		return err
 	})
 	tg := tag("docs-bot", "evt-1", "explain")
-	runID := runtime.RunID(tg.Tenant, tg.ID)
+	runID := tg.runID()
 	var asked sync.Once
 	w.work(t, rt, func() {
 		asked.Do(func() { w.stop(t, rt, "acme", runID, "after the answer", "U1") })
@@ -334,7 +333,7 @@ func TestACompletedRunRetriedAfterItsJournalEntryStaysCompleted(t *testing.T) {
 		}
 	}
 	want := []string{"user: explain", "assistant: The whole answer and the rest."}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); fmt.Sprint(got) != fmt.Sprint(want) {
+	if got := said(journal(t, w.threads, tg.key())); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 	if n := exec.count(); n != 1 {
@@ -354,7 +353,7 @@ func TestAStopIsRecordedOnlyForALiveRunTheAskerOwnsAndAtMostOnce(t *testing.T) {
 	rt := w.runtime(t, exec)
 
 	runID := w.accept(t, rt, tag("docs-bot", "evt-1", "explain"))
-	unknown := runtime.RunID("acme", "never-accepted")
+	unknown := runtime.RunKey("acme", "never-accepted", "docs-bot")
 
 	w.stop(t, rt, "globex", runID, "theirs", "intruder")
 	w.stop(t, rt, "acme", unknown, "nothing", "U1")
@@ -530,7 +529,7 @@ func TestAPanickingExecutorLeavesNoStopGoroutinesBehind(t *testing.T) {
 func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 	meta := map[string]string{"channel": "ops"}
 	want := "user: Context from the trigger:\n- channel: ops\n\nexplain"
-	mk := func(id string) envelope.Tag {
+	mk := func(id string) fixture {
 		tg := in(tag("docs-bot", id, "explain"), id)
 		tg.Meta = meta
 		return tg

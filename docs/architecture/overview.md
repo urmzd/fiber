@@ -782,25 +782,27 @@ transports, storage, or agents.
 leaves (stdlib only)
   pkg/topic        agent:name[:run], prefix containment, the control namespace
   pkg/address      github://urmzd/fiber/issues/42, slack://T01/C02?thread=...
-  pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription, the actor a context acts for
+  pkg/event        the envelope, its typed bodies and the catalog
+  pkg/envelope     old run event shapes for legacy decoders, the actor a context acts for
   pkg/signature    HMAC verification for inbound webhooks
 
 seams
-  pkg/connector    Trigger / Sink / Actor faces, registry
+  pkg/connector    Trigger / Sink / Subscriber / Actor faces, registry
   pkg/bus          Bus interface, Memory, Redis Streams and Postgres, bustest
   pkg/definition   saige definitions, Policy, insert-only Source, Resolver and pins
 
 composition
   pkg/agentrt      builds a saige agent from a pinned revision; citations
   pkg/runtime      the durable anchor turn, playscape sandbox, stop, usage, parking
-  pkg/router       delivery fan-out to sinks
+  pkg/dispatch     wakes channel members for ingress events
+  pkg/egress       delivery to sinks by channel and type
   pkg/connectors   slack, github, jira, cron, webhook
   fiber (root)     the composition root, composed in Go
 ```
 
 `app.go` at the module root (`fiber.New`) is the composition root and the fastest way to
-understand how the system fits together: it assembles the bus, registry,
-router, runtime, sandbox and connectors in the order data flows through them.
+understand how the system fits together: it assembles the bus, dispatch,
+runtime, sandbox, egress and connectors in the order data flows through them.
 Every backend is a constructed value passed by an option (`WithPostgres(pool)`
 for every store family, `WithBus`, or one store at a time), and anything not
 given is memory. The composition reads no configuration file and no
@@ -812,7 +814,7 @@ a conformance suite (`bustest`, `registrytest`, `knowledgetest`,
 
 ## No transport
 
-fiber serves nothing. A program composing fiber calls `App.Invoke`,
+fiber serves nothing. A program composing fiber calls `App.Publish`,
 `Status`, `Stop`, `Compact` and `Answer` in process, subscribes with
 `App.Bus().Subscribe`, and mounts `App.WebhookHandler()` (or the handlers in
 `App.Webhooks()`) wherever it serves HTTP; each webhook connector verifies its

@@ -17,6 +17,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/slack"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/signature"
 	"github.com/urmzd/fiber/pkg/thread"
 )
@@ -43,7 +44,7 @@ func listers(reg *connector.Registry) thread.Listers {
 // sink, one that implements Ingest is a trigger, and the registry works that
 // out from the types. So this function only has to construct; nothing here says
 // what any connector is for.
-func buildConnectors(cfg options, store definition.Source, blobs blob.Store) (*connector.Registry, error) {
+func buildConnectors(cfg options, store definition.Source, blobs blob.Store, members membership.Store) (*connector.Registry, error) {
 	reg := connector.NewRegistry()
 	// Agent names come from the control plane, which is the only place that
 	// knows them. Without a name set, "@urmzd" and "@docs-bot" are the same
@@ -58,7 +59,10 @@ func buildConnectors(cfg options, store definition.Source, blobs blob.Store) (*c
 	}
 
 	for _, build := range []func(options, mention.Set, connectors.Files) (connector.Connector, error){
-		newSlack, newGitHub, newJira, newWebhook, newCron,
+		newSlack, newGitHub, newJira, newWebhook,
+		func(o options, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
+			return newCron(o, members)
+		},
 	} {
 		c, err := build(cfg, agents, files)
 		if err != nil {
@@ -94,16 +98,14 @@ func newSlack(cfg options, agents mention.Set, files connectors.Files) (connecto
 		return nil, err
 	}
 	c, err := slack.New(slack.Config{
-		API:          slack.NewHTTPAPI(token, http.DefaultClient),
-		Verifier:     signature.NewSlack(secret),
-		Team:         sc.Team,
-		Bots:         sc.Bots,
-		Agents:       agents,
-		DefaultAgent: sc.DefaultAgent,
-		Tenant:       cfg.Tenant,
-		Files:        files,
-		FileToken:    token,
-		AppID:        sc.AppID,
+		API:       slack.NewHTTPAPI(token, http.DefaultClient),
+		Verifier:  signature.NewSlack(secret),
+		Team:      sc.Team,
+		Bots:      sc.Bots,
+		Tenant:    cfg.Tenant,
+		Files:     files,
+		FileToken: token,
+		AppID:     sc.AppID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fiber: slack: %w", err)
@@ -132,7 +134,6 @@ func newGitHub(cfg options, agents mention.Set, files connectors.Files) (connect
 		Checks:           gc.Checks,
 		ReadRepositories: gc.ReadRepositories,
 		Login:            gc.Login,
-		DefaultAgent:     gc.DefaultAgent,
 		Tenant:           cfg.Tenant,
 		Files:            files,
 	})
@@ -183,19 +184,19 @@ func newJira(cfg options, agents mention.Set, files connectors.Files) (connector
 
 // needTenant refuses a trigger connector in a deployment with no tenant. A
 // webhook from Slack, GitHub or Jira carries no credential to derive one
-// from, so the connector resolves mentions and stamps tags in the
+// from, so the connector resolves mentions and stamps events in the
 // deployment's tenant (WithTenant); with none, no mention would name an agent
-// and no tag would be accepted, and the connector would be configured and
+// and no event would be dispatched, and the connector would be configured and
 // silently dead. A schedule carries its own tenant and does not need one.
 func needTenant(cfg options, name string) error {
 	if cfg.Tenant == "" {
-		return configf("%s raises tags in the deployment's tenant, and none is set: pass WithTenant", name)
+		return configf("%s publishes events in the deployment's tenant, and none is set: pass WithTenant", name)
 	}
 	return nil
 }
 
-// newWebhook builds the outbound webhook sink. It raises no tags, so it has
-// no files to bring in.
+// newWebhook builds the outbound webhook sink. It publishes nothing, so it
+// has no files to bring in.
 func newWebhook(cfg options, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
 	if len(cfg.Webhooks) == 0 {
 		return nil, nil
@@ -215,7 +216,9 @@ func newWebhook(cfg options, _ mention.Set, _ connectors.Files) (connector.Conne
 	return c, nil
 }
 
-func newCron(cfg options, _ mention.Set, _ connectors.Files) (connector.Connector, error) {
+// newCron builds the schedule trigger. Each schedule's agent is made a member
+// of the schedule's channel in members.
+func newCron(cfg options, members membership.Store) (connector.Connector, error) {
 	if len(cfg.Schedules) == 0 {
 		return nil, nil
 	}
@@ -223,7 +226,7 @@ func newCron(cfg options, _ mention.Set, _ connectors.Files) (connector.Connecto
 	if err != nil {
 		return nil, fmt.Errorf("fiber: cron: %w", err)
 	}
-	c, err := cron.New(cron.Config{Store: store, Log: cfg.Log})
+	c, err := cron.New(cron.Config{Store: store, Log: cfg.Log, Members: members})
 	if err != nil {
 		return nil, fmt.Errorf("fiber: cron: %w", err)
 	}
@@ -239,7 +242,7 @@ const HeaderJiraSecret = "X-Fiber-Secret"
 //
 // That is strictly weaker than a MAC: it does not bind the secret to the body,
 // so anyone who captures one request can replay a different one, and it is all
-// Jira offers. The mitigation is the same as everywhere else here: Tag.ID
+// Jira offers. The mitigation is the same as everywhere else here: event id
 // idempotency downstream, plus TLS. The comparison is constant time because
 // this endpoint is public and can be probed as often as an attacker likes.
 type jiraSecret string

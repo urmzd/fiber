@@ -20,6 +20,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
@@ -145,11 +146,14 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	people3 := []envelope.Actor{{ID: "U-ana", User: "u-ana"}, {ID: "U-bob", User: "u-bob"}, {ID: "U-carol", User: "u-carol"}}
 	for _, a := range people3 {
 		target, _ := address.Parse("inbox://" + tenant + "/" + a.User)
-		if _, err := c.Invoke(ctx, envelope.Tag{ID: "Ev-" + a.User, Tenant: tenant, Agent: "triage", Origin: "test",
-			Text: "how many for " + a.User + "?", Actor: a, Deliver: []envelope.Route{{Target: target}}, At: time.Now(),
-			// The tag's own metadata claims to be ana; it is not who
-			// the run acts for.
-			Meta: map[string]string{"actor": "U-ana", "user": "u-ana"}}); err != nil {
+		e := posted("Ev-"+a.User, tenant, "triage", target.String(), "how many for "+a.User+"?")
+		// The request's own context claims to be ana; it is not who the
+		// run acts for.
+		e.Data = event.MessagePosted{Request: event.Request{
+			Text: "how many for " + a.User + "?", Actor: a, Mentions: []string{"triage"},
+			Context: map[string]string{"actor": "U-ana", "user": "u-ana"},
+		}}
+		if _, err := ask(ctx, c, e); err != nil {
 			t.Fatal(err)
 		}
 	}

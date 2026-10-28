@@ -16,7 +16,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
@@ -107,8 +106,7 @@ func coreExpandsAnMCPGrant(t *testing.T, pool *pgxpool.Pool) {
 		t.Fatal(err)
 	}
 	target, _ := address.Parse("inbox://" + tenant + "/out")
-	if _, err := c.Invoke(ctx, envelope.Tag{ID: "Ev-1", Tenant: tenant, Agent: "triage", Origin: "test",
-		Text: "how many?", Deliver: []envelope.Route{{Target: target}}, At: time.Now()}); err != nil {
+	if _, err := ask(ctx, c, posted("Ev-1", tenant, "triage", target.String(), "how many?")); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(15 * time.Second)

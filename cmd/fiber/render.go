@@ -13,7 +13,6 @@ import (
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -194,10 +193,10 @@ type listing struct {
 	Unavailable []agentrt.UnavailableTool `json:"unavailable,omitempty"`
 }
 
-// listTools prints what a run of tag would be granted, as this composition
-// resolves it, and runs nothing.
-func listTools(ctx context.Context, app *fiber.App, tag envelope.Tag, rec definition.Record, asJSON bool, stdout, stderr io.Writer) int {
-	granted, err := app.ToolsFor(ctx, tag)
+// listTools prints what a run answering trigger would be granted, as this
+// composition resolves it, and runs nothing.
+func listTools(ctx context.Context, app *fiber.App, trigger event.Envelope, rec definition.Record, asJSON bool, stdout, stderr io.Writer) int {
+	granted, err := app.ToolsFor(ctx, trigger, rec.Name)
 	if err != nil {
 		fmt.Fprintf(stderr, "fiber run: %v\n", err)
 		return exitFailed

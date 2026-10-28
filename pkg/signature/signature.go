@@ -47,7 +47,7 @@
 // GitHub signs the body alone. A GitHub webhook carries no timestamp in the
 // signing base string, so a captured request stays valid for as long as the
 // secret does and no amount of code in this package can change that. The
-// honest statement of where that defense lives: downstream, in Tag.ID
+// honest statement of where that defense lives: downstream, in event id
 // idempotency. A replayed or redelivered GitHub event carries the same
 // delivery identity, which becomes the run's idempotency key, so it joins the
 // run that already exists instead of starting a second one. Verification
@@ -281,7 +281,7 @@ func (s *Slack) checkSkew(signed time.Time) error {
 //
 // There is no timestamp in the base string, so there is no replay window to
 // configure and none is offered. See the package doc: GitHub redelivery, and a
-// replay of a captured request, are defended downstream by the Tag.ID
+// replay of a captured request, are defended downstream by the event id
 // idempotency key, not here.
 type GitHub struct {
 	// Secret is the webhook secret configured on the GitHub side. A verifier

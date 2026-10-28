@@ -22,8 +22,7 @@ const issueOpened = `{
   "installation": {"id": 4242}
 }`
 
-// Each GitHub trigger renders through the event catalog as its tag renders
-// today.
+// Each GitHub trigger renders through the event catalog as its request text.
 func TestRenderMatchesRequestText(t *testing.T) {
 	c, tags := start(t, github.Config{
 		Agents: mention.NewNames("docs-bot"),

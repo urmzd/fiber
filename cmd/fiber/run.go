@@ -18,7 +18,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/topic"
@@ -34,7 +33,7 @@ const (
 )
 
 // actor is who a local run acts for and who asked.
-var actor = envelope.Actor{ID: "local", Display: "fiber run"}
+var actor = event.Actor{ID: "local", Display: "fiber run"}
 
 // defaultTimeout bounds a run when -timeout is not given. It is generous: an
 // agent's tool loop on a real model takes a while, and a retried attempt
@@ -148,22 +147,14 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	if _, err := definition.NewResolver(app.Definitions(), checks).Resolve(ctx, tenant, rec.Name); err != nil {
 		return bad("%s: %v", path, err)
 	}
-	tag := envelope.Tag{
-		ID:     "cli-" + strconv.FormatInt(time.Now().UnixNano(), 36),
-		Tenant: tenant,
-		Agent:  rec.Name,
-		Origin: origin,
-		Text:   message,
-		Actor:  actor,
-		At:     time.Now().UTC(),
-	}
+	trigger := cliMessage(message, rec.Name)
 	if f.tools {
-		return listTools(ctx, app, tag, rec, f.json, stdout, stderr)
+		return listTools(ctx, app, trigger, rec, f.json, stdout, stderr)
 	}
 
 	// Delivery and execution, in this process, for as long as the command
-	// runs. The router has nothing to deliver: the tag names no route and no
-	// surface, and the events are read off the bus instead.
+	// runs. Nothing is delivered: the message has no surface, and the events
+	// are read off the bus instead.
 	runCtx, stopApp := context.WithCancel(ctx)
 	appDone := make(chan error, 1)
 	go func() { appDone <- app.Run(runCtx) }()
@@ -178,7 +169,21 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	if f.json {
 		out = &jsonRenderer{enc: json.NewEncoder(stdout)}
 	}
-	return follow(ctx, app, tag, f.timeout, out, stderr)
+	return follow(ctx, app, trigger, rec.Name, f.timeout, out, stderr)
+}
+
+// cliMessage is the message.posted.v1 a local run answers. Its source is not an
+// address, so the run has no surface, and it publishes on cli://local/cli.
+func cliMessage(text, agent string) event.Envelope {
+	return event.Envelope{
+		ID:      "cli-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		Source:  origin + ":" + tenant,
+		Type:    event.TypeMessagePosted,
+		Channel: origin + "://" + tenant + "/" + origin,
+		Time:    time.Now().UTC(),
+		Tenant:  tenant,
+		Data:    event.MessagePosted{Request: event.Request{Text: text, Actor: actor, Mentions: []string{agent}}},
+	}
 }
 
 // override applies the provider and model flags to a definition file. It
@@ -315,23 +320,24 @@ func loadPolicy(path string) (definition.Policy, error) {
 	return p, nil
 }
 
-// follow raises tag, prints its run's events as they stream, and returns the
-// exit status for how the run ended. It waits for the run for timeout, or
-// for as long as ctx lasts when timeout is zero; ctx ends on an interrupt.
+// follow accepts the run of agent answering trigger, prints its events as
+// they stream, and returns the exit status for how the run ended. It waits
+// for the run for timeout, or for as long as ctx lasts when timeout is zero;
+// ctx ends on an interrupt.
 //
-// The events are read off the run's topic, subscribed before the tag is
-// raised, and the ledger decides how the run ended: a failed event on the
+// The events are read off the run's channel, subscribed before the run is
+// accepted, and the ledger decides how the run ended: a failed event on the
 // bus says what an attempt did, and only the ledger knows whether the run
 // will be attempted again.
-func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.Duration, out renderer, stderr io.Writer) int {
+func follow(ctx context.Context, app *fiber.App, trigger event.Envelope, agent string, timeout time.Duration, out renderer, stderr io.Writer) int {
 	wait := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		wait, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	runID := runtime.RunID(tag.Tenant, tag.ID)
-	if _, err := topic.Run(tag.Agent, runID); err != nil {
+	runID := runtime.RunKey(trigger.Tenant, trigger.ID, agent)
+	if _, err := topic.Run(agent, runID); err != nil {
 		fmt.Fprintf(stderr, "fiber run: %v\n", err)
 		return exitBadInput
 	}
@@ -345,16 +351,16 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 		return exitFailed
 	}
 	events := stream(wait, app.Bus(), bus.Subscription{
-		Tenant:   runtime.TenantOf(tag),
-		Channels: []string{runtime.ChannelOf(tag)},
+		Tenant:   trigger.Tenant,
+		Channels: []string{trigger.Channel},
 		Types:    []string{"run", "run.usage", "run.context"},
 		Run:      runID,
 	}, stderr)
-	if _, err := app.Invoke(wait, tag); err != nil {
+	if _, err := app.Runtime().Accept(wait, trigger, agent); err != nil {
 		if wait.Err() != nil {
 			return gaveUp()
 		}
-		fmt.Fprintf(stderr, "fiber run: raise the tag: %v\n", err)
+		fmt.Fprintf(stderr, "fiber run: accept the run: %v\n", err)
 		return exitFailed
 	}
 	type ending struct {

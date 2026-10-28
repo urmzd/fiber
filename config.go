@@ -6,8 +6,8 @@ import (
 )
 
 // ErrConfig reports a composition that cannot be what its author meant: a
-// half-configured connector, a trigger connector with no tenant to raise tags
-// in, a tool provider declared twice, a tool pinned with no schema hash. New
+// half-configured connector, a trigger connector with no tenant to publish
+// events in, a tool provider declared twice, a tool pinned with no schema hash. New
 // fails with it before anything runs.
 var ErrConfig = errors.New("fiber: invalid configuration")
 
@@ -29,9 +29,9 @@ type Slack struct {
 	// AppID marks messages this deployment posted when a thread is
 	// reconciled.
 	AppID string
-	// DefaultAgent answers a mention of the app that names no agent.
-	DefaultAgent string
-	// Bots maps a Slack user id to the agent it stands for.
+	// Bots maps a Slack user id to the agent it stands for. A mention of one
+	// names that agent on the event; the members of the channel decide who
+	// answers.
 	Bots map[string]string
 }
 
@@ -44,8 +44,9 @@ type GitHub struct {
 	Bots                 map[string]string
 	Checks               bool
 	// Login is the app's own login. A comment that mentions it and names no
-	// agent is answered by DefaultAgent, and with none it raises nothing.
-	Login, DefaultAgent string
+	// agent is published with no mentions, and the members of the issue's
+	// channel decide whether anyone answers.
+	Login string
 }
 
 // Jira configures the built-in Jira connector (WithJira). Sites (short key

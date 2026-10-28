@@ -402,7 +402,7 @@ func TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting(t *testing.T) {
 
 	var rt *runtime.Runtime
 	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
-		acc, err := rt.AcceptTag(ctx, tag(target, parent.RunID+"-"+target, text))
+		acc, err := accept(ctx, rt, tag(target, parent.RunID+"-"+target, text))
 		if err != nil {
 			return "", err
 		}
@@ -424,9 +424,9 @@ func TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting(t *testing.T) {
 
 	lead := w.accept(t, rt, tag("lead", "evt-1", "How are the tests?"))
 	leadOut := w.result(t, rt, lead)
-	helper := runtime.RunID("acme", lead+"-helper")
+	helper := runtime.RunKey("acme", lead+"-helper", "helper")
 	helperOut := w.result(t, rt, helper)
-	assistant := runtime.RunID("acme", helper+"-assistant")
+	assistant := runtime.RunKey("acme", helper+"-assistant", "assistant")
 	assistantOut := w.result(t, rt, assistant)
 
 	tests := []struct {
@@ -606,7 +606,7 @@ func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
 	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
 		foreign := tag(target, "evt-foreign", "theirs")
 		foreign.Tenant = "globex"
-		facc, err := rt.AcceptTag(ctx, foreign)
+		facc, err := accept(ctx, rt, foreign)
 		if err != nil {
 			return "", err
 		}
@@ -614,14 +614,14 @@ func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
 			return "", err
 		}
 		pending := tag(target, "evt-pending", "later")
-		pacc, err := rt.AcceptTag(context.WithoutCancel(ctx), pending)
+		pacc, err := accept(context.WithoutCancel(ctx), rt, pending)
 		if err != nil {
 			return "", err
 		}
 		mu.Lock()
 		defer mu.Unlock()
 		for name, id := range map[string]string{
-			"unknown":        runtime.RunID("acme", "no-such-tag"),
+			"unknown":        runtime.RunKey("acme", "no-such-tag", "helper"),
 			"another tenant": facc.RunID,
 			"the parent":     parent.RunID,
 		} {

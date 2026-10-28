@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -476,7 +476,7 @@ func (r *Runtime) Answer(ctx context.Context, req AnswerRequest) (payload.Answer
 		if err != nil {
 			return payload.Answer{}, false, err
 		}
-		if err := mayEdit(in.Tag(), q, req, a); err != nil {
+		if err := mayEdit(in, q, req, a); err != nil {
 			return payload.Answer{}, false, err
 		}
 		a.QuestionID, a.By, a.At, a.Expired = q.ID, clip(req.By), now, false
@@ -754,13 +754,13 @@ func (r *Runtime) childQuestion(tenant, parentRunID string) func(context.Context
 // starts a run of its own for a delegation and waits on it calls it with the
 // context it was given:
 //
-//	acc, err := rt.AcceptTag(ctx, childTag)
+//	acc, err := rt.Accept(ctx, trigger, target)
 //	...
 //	err = runtime.WatchChildQuestions(ctx, acc.RunID)
 //	out, err := rt.Result(ctx, acc.RunID)
 //
 // Each question the child parks on is published once on the parent's stream
-// as lifecycle.child.parked, with the child's run id, so a host showing the
+// as run.child.parked, with the child's run id, so a host showing the
 // parent shows it waiting on that question, and answers it by answering the
 // child run. The watch reads the ledger, and ends when the child ends or the
 // delegation returns.
@@ -838,7 +838,7 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 			self, admitted = q.SelfApproval, q.Approvers
 		}
 		if !self {
-			requester := requesterOf(in.Tag())
+			requester := requesterOf(in)
 			if requester[by] || requester[strings.TrimSpace(req.Via)] {
 				return fmt.Errorf("%w: the request that raised this call cannot approve it; another person must", ErrNotAllowed)
 			}
@@ -882,7 +882,7 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 	return fmt.Errorf("%w: %q is not among the people this question is answered by", ErrNotAllowed, by)
 }
 
-// requesterOf is every name the person whose tag raised a run goes by: the
+// requesterOf is every name the person whose event raised a run goes by: the
 // actor's id, and the id qualified by the trigger it came through, which is
 // how a surface trusted to act for others names people ("slack:U1").
 // mayEdit refuses edited arguments on an approval of a call that runs with
@@ -890,8 +890,8 @@ func (r *Runtime) mayAnswer(ctx context.Context, in Input, q payload.Question, r
 // one answering. Anyone else's edit would act as them on something they did
 // not ask for, at whatever their credential reaches; they may still approve
 // or deny the call as it was asked.
-func mayEdit(tag envelope.Tag, q payload.Question, req AnswerRequest, a payload.Answer) error {
-	if len(a.Arguments) == 0 || q.Tool == nil || !q.Tool.ActsForPerson || isActor(tag, clip(req.By)) {
+func mayEdit(in Input, q payload.Question, req AnswerRequest, a payload.Answer) error {
+	if len(a.Arguments) == 0 || q.Tool == nil || !q.Tool.ActsForPerson || isActor(in, clip(req.By)) {
 		return nil
 	}
 	return fmt.Errorf("%w: %s runs with the credential of the person this run acts for, so only they may change its arguments; approve or deny it as asked",
@@ -899,24 +899,25 @@ func mayEdit(tag envelope.Tag, q payload.Question, req AnswerRequest, a payload.
 }
 
 // isActor reports whether by is the person a run acts for: the host's
-// account for its actor (Actor.User) when the tag names one, and otherwise
-// the actor under the names the requester goes by. A bot is nobody.
-func isActor(tag envelope.Tag, by string) bool {
-	if by == "" || tag.Actor.Bot {
+// account for its actor (Actor.User) when the trigger names one, and
+// otherwise the actor under the names the requester goes by. A bot is nobody.
+func isActor(in Input, by string) bool {
+	actor := in.Actor()
+	if by == "" || actor.Bot {
 		return false
 	}
-	if user := strings.TrimSpace(tag.Actor.User); user != "" {
+	if user := strings.TrimSpace(actor.User); user != "" {
 		return by == user
 	}
-	return requesterOf(tag)[by]
+	return requesterOf(in)[by]
 }
 
-func requesterOf(tag envelope.Tag) map[string]bool {
+func requesterOf(in Input) map[string]bool {
 	out := map[string]bool{}
-	if id := strings.TrimSpace(tag.Actor.ID); id != "" {
+	if id := strings.TrimSpace(in.Actor().ID); id != "" {
 		out[id] = true
-		if tag.Origin != "" {
-			out[tag.Origin+":"+id] = true
+		if origin := in.Origin(); origin != "" {
+			out[origin+":"+id] = true
 		}
 	}
 	return out
@@ -988,26 +989,14 @@ func (r *Runtime) startChild(ctx context.Context, parent Input, q payload.Questi
 		Text string `json:"text"`
 	}
 	_ = json.Unmarshal(q.Tool.Arguments, &args)
-	parentID := parent.runID()
-	from := parent.Tag()
-	tag := envelope.Tag{
-		// Derived from the parent and the wait, so a retried start joins
-		// the run the first one started.
-		ID:     "child-" + parentID + "-" + q.ID,
-		Tenant: parent.Trigger.Tenant,
-		Agent:  target,
-		Origin: "delegation",
-		// The requester of the parent is the requester of the child: who
-		// may approve its calls is decided against them.
-		Actor:       from.Actor,
-		Text:        args.Text,
-		At:          from.At,
-		Attachments: attachment.Inherit(from.Attachments, nil),
+	in, err := childInput(parent, target, args.Text, q.ID)
+	if err != nil {
+		return "", anchor.NonRetryable(err)
 	}
 	// The child runs the version its parent pinned for it, when it pinned
 	// one; a target outside the pin resolves its latest.
 	version, _ := parent.Pin.SubagentVersion(definition.NormalizeName(target))
-	acc, err := r.accept(context.WithoutCancel(ctx), tag, &ParentRef{RunID: parentID, QuestionID: q.ID}, version)
+	acc, err := r.start(context.WithoutCancel(ctx), in, version)
 	if err != nil {
 		if acc.RunID != "" {
 			// Durable, and the janitor will drive it.
@@ -1016,6 +1005,40 @@ func (r *Runtime) startChild(ctx context.Context, parent Input, q payload.Questi
 		return "", fmt.Errorf("runtime: start the child run for %s: %w", q.Tool.Name, err)
 	}
 	return acc.RunID, nil
+}
+
+// childInput is the input of the child run a delegation starts: a
+// message.posted.v1 naming the target, with the parent's requester and files.
+// Its id is derived from the parent and the wait, so a retried start joins
+// the run the first one started, and its source is not an address, so the
+// child has no surface and a thread of its own. It publishes on
+// delegation://<tenant>/delegation, where no surface renders it.
+func childInput(parent Input, target, text, questionID string) (Input, error) {
+	if target == "" {
+		return Input{}, fmt.Errorf("%w: delegation names no agent", ErrInvalid)
+	}
+	parentID := parent.runID()
+	from := parent.request()
+	tenant := parent.Trigger.Tenant
+	body := event.MessagePosted{Request: event.Request{
+		Text: text,
+		// The requester of the parent is the requester of the child: who
+		// may approve its calls is decided against them.
+		Actor:       from.Actor,
+		Mentions:    []string{target},
+		Attachments: attachment.Inherit(from.Attachments, nil),
+	}}
+	trigger := event.Envelope{
+		ID:      "child-" + parentID + "-" + questionID,
+		Source:  "delegation:" + parentID,
+		Type:    body.Type(),
+		Channel: "delegation://" + url.PathEscape(busTenant(tenant)) + "/delegation",
+		Time:    parent.Trigger.Time,
+		Hops:    parent.Trigger.Hops + 1,
+		Tenant:  tenant,
+		Data:    body,
+	}
+	return Input{Trigger: trigger, Subscriber: target, Parent: &ParentRef{RunID: parentID, QuestionID: questionID}}, nil
 }
 
 // childEnded answers a delegation from its child run's record, once the

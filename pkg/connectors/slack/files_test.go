@@ -20,7 +20,7 @@ import (
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/connectors"
 	"github.com/urmzd/fiber/pkg/connectors/slack"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 )
 
@@ -60,7 +60,7 @@ func loopbackOnly(a netip.Addr) error {
 }
 
 // startWithFiles is start with file intake on, fetching from loopback.
-func startWithFiles(t *testing.T, store blob.Store, api *slack.Fake) (*slack.Connector, <-chan envelope.Tag) {
+func startWithFiles(t *testing.T, store blob.Store, api *slack.Fake) (*slack.Connector, <-chan event.Envelope) {
 	t.Helper()
 	c, tags := start(t, slack.Config{
 		API:       api,
@@ -107,10 +107,10 @@ func mentionWithFiles(base string) string {
 }`, base)
 }
 
-// Files on the message that raised a tag become its attachments: stored
-// under the tag's tenant, in the order Slack listed them, with the thread as
+// Files on the message become its attachments: stored
+// under the event's tenant, in the order Slack listed them, with the thread as
 // their origin, and a voice clip as audio. A file that could not be had (a
-// sign-in page served in its place, over the size cap) does not stop the tag:
+// sign-in page served in its place, over the size cap) does not stop the event:
 // it is carried as unread, with the reason the agent will be told.
 func TestFilesOnAMentionBecomeTheTagsAttachmentsInOrder(t *testing.T) {
 	store := blob.NewMemory()
@@ -132,10 +132,11 @@ func TestFilesOnAMentionBecomeTheTagsAttachmentsInOrder(t *testing.T) {
 	}
 	tag := <-tags
 	if tag.Tenant != "acme" {
-		t.Errorf("tag tenant = %q, want the connector's", tag.Tenant)
+		t.Errorf("event tenant = %q, want the connector's", tag.Tenant)
 	}
-	if len(tag.Attachments) != 5 {
-		t.Fatalf("attachments = %+v, want one per file", tag.Attachments)
+	files := posted(t, tag).Attachments
+	if len(files) != 5 {
+		t.Fatalf("attachments = %+v, want one per file", files)
 	}
 	want := []struct{ name, mediaType, unread string }{
 		{"dashboard.png", "image/png", ""},
@@ -144,12 +145,12 @@ func TestFilesOnAMentionBecomeTheTagsAttachmentsInOrder(t *testing.T) {
 		{"trace.txt", "text/plain", ""},
 		{"recording.mov", "", "it is 858.3 MB, over the 1.0 KB limit for one file"},
 	}
-	for i, a := range tag.Attachments {
+	for i, a := range files {
 		if a.Name != want[i].name || a.MediaType != want[i].mediaType || a.Unread != want[i].unread {
 			t.Errorf("attachment %d = %+v, want %+v", i, a, want[i])
 		}
-		if a.Origin.String() != tag.Source.String() {
-			t.Errorf("attachment %d origin %s, want the tag's source %s", i, a.Origin, tag.Source)
+		if a.Origin.String() != tag.Channel {
+			t.Errorf("attachment %d origin %s, want the event's channel %s", i, a.Origin, tag.Channel)
 		}
 		if a.Unread == "" {
 			if _, err := store.Stat(context.Background(), "acme", blob.Digest(a.Digest)); err != nil {
@@ -157,10 +158,10 @@ func TestFilesOnAMentionBecomeTheTagsAttachmentsInOrder(t *testing.T) {
 			}
 		}
 	}
-	if tag.Attachments[0].Alt != "the failing dashboard" {
-		t.Errorf("the file title was not kept as alt text: %+v", tag.Attachments[0])
+	if files[0].Alt != "the failing dashboard" {
+		t.Errorf("the file title was not kept as alt text: %+v", files[0])
 	}
-	if got := tag.Attachments[1].Kind(); got != attachment.KindAudio {
+	if got := files[1].Kind(); got != attachment.KindAudio {
 		t.Errorf("a voice clip routed as %s, want audio", got)
 	}
 	if n := srv.hits.Load(); n != 4 {
@@ -168,14 +169,14 @@ func TestFilesOnAMentionBecomeTheTagsAttachmentsInOrder(t *testing.T) {
 	}
 }
 
-// Without file intake the tag is what it always was.
+// Without file intake the event is what it always was.
 func TestWithoutFileIntakeAMentionCarriesNoAttachments(t *testing.T) {
 	srv := serveFiles(t, map[string]string{})
 	c, tags := start(t, slack.Config{Bots: map[string]string{"U08BOTID": "docs-bot"}})
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, post(t, mentionWithFiles(srv.URL)))
-	if tag := <-tags; tag.Attachments != nil || tag.Tenant != "" {
-		t.Fatalf("tag = %+v, want no attachments and no tenant", tag)
+	if tag := <-tags; posted(t, tag).Attachments != nil || tag.Tenant != "" {
+		t.Fatalf("event = %+v, want no attachments and no tenant", tag)
 	}
 	if n := srv.hits.Load(); n != 0 {
 		t.Errorf("files were fetched %d times with intake off", n)
@@ -183,10 +184,10 @@ func TestWithoutFileIntakeAMentionCarriesNoAttachments(t *testing.T) {
 }
 
 // A file shared in a direct message is a request too.
-func TestAFileSharedInADirectMessageRaisesATagWithIt(t *testing.T) {
+func TestAFileSharedInADirectMessageIsPublishedWithIt(t *testing.T) {
 	store := blob.NewMemory()
 	srv := serveFiles(t, map[string]string{"/f/shot.png": pngBytes})
-	c, tags := start(t, slack.Config{DefaultAgent: "docs-bot", Tenant: "acme", FileToken: "xoxb-test",
+	c, tags := start(t, slack.Config{Tenant: "acme", FileToken: "xoxb-test",
 		Files: connectors.Files{Store: store}})
 	slack.UseFetcher(c, intake.NewFetcher(store, intake.Hosts("127.0.0.1"), intake.WithPlainHTTP(), intake.WithNetworkPolicy(loopbackOnly)))
 	body := fmt.Sprintf(`{"team_id":"T01ABCDEF","type":"event_callback","event_id":"Ev09DM","event":{
@@ -195,9 +196,9 @@ func TestAFileSharedInADirectMessageRaisesATagWithIt(t *testing.T) {
 	  "files":[{"id":"F1","name":"shot.png","mimetype":"image/png","url_private_download":"%s/f/shot.png"}]}}`, srv.URL)
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, post(t, body))
-	tag := <-tags
-	if len(tag.Attachments) != 1 || tag.Attachments[0].MediaType != "image/png" {
-		t.Fatalf("attachments = %+v", tag.Attachments)
+	files := posted(t, <-tags).Attachments
+	if len(files) != 1 || files[0].MediaType != "image/png" {
+		t.Fatalf("attachments = %+v", files)
 	}
 }
 

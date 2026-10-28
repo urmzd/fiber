@@ -29,9 +29,9 @@ sandboxing and access control.
 |---------|------|
 | `pkg/topic` | Topic addressing: `agent`, `agent:<name>`, `agent:<name>:<run>`. Prefix containment, no wildcards. The reserved control namespace `agent:_control:<verb>-<key>`. Leaf. |
 | `pkg/address` | Mesh endpoint URIs: `github://urmzd/fiber/issues/42`, `slack://T01/C02?thread=...`. Leaf. |
-| `pkg/envelope` | Wire contract: `Tag`, `Event`, `Kind`, `Route`, `Filter`, `Subscription`, and the actor a context acts for (`WithActor`, `ActorFrom`). Leaf. |
+| `pkg/envelope` | The old run event shapes (`Event`, `Kind`, `Filter`, `Subscription`) still read by legacy decoders, and the actor a context acts for (`WithActor`, `ActorFrom`). The wire contract is `pkg/event`. Leaf. |
 | `pkg/signature` | HMAC verification for inbound webhooks (Slack v0, GitHub sha256). Leaf. Security boundary. |
-| `pkg/connector` | `Trigger` / `Sink` / `Actor` faces, derived by `RolesOf`, plus the registry. |
+| `pkg/connector` | `Trigger` (`Ingest(ctx, publish)`) / `Sink` / `Actor` faces, derived by `RolesOf`, `Subscriber` for a sink that names its channels, plus the registry. |
 | `pkg/definition` | Agents as saige `.agent.md` definitions plus a fiber `Policy` sidecar. The insert-only `Source` (`Memory` and `Postgres`, `definitiontest` conformance suite), the `Resolver` that pins a version tree and `Verify`s it on replay (fail closed), fiber's validation, MCP grants, and `FromAgentSpec` for the old spec shape. |
 | `pkg/durable` | The Postgres schema for anchor's ledger and queue adapters, and `Open`, which builds both on it. |
 | `pkg/internal/pgrename` | The one migration step every Postgres store runs first: renames objects a database created before fiber's rename still carries, and refuses (naming both) when an old table was created again beside its new one. It also names the pre-rename turn, which `pkg/runtime` registers only to fail such a run with a reason. The only code that knows the old names. |
@@ -43,12 +43,12 @@ sandboxing and access control.
 | `pkg/knowledge` | Hybrid retrieval over indexed documents: dense plus lexical, fused, with citations. `Memory` and `Postgres`, `knowledgetest`. |
 | `pkg/connectors/author` | The registry as agent tools (read, propose, apply), prompt review, system scaffolding, and the seeded `author` agent. |
 | `pkg/bus` | `Bus` interface; `Memory`, Redis Streams and Postgres backends; `bustest` conformance suite. The Postgres bus stores every event body in `fiber_bus_events` until it is trimmed or `WithIndexTTL` expires. |
-| `pkg/router` | Delivery fan-out to sinks, ordered per `(run, target)`. |
+| `pkg/egress` | Delivery to sinks. Each sink subscribes to its own scheme's channels (or the channels it names, `connector.Subscriber`) with run types; opt-in types only when named. Ordered per `(run, channel, target)`, skipping events older than its max age. |
 | `pkg/agentrt` | Builds a saige agent from a pinned revision; delta translation; citation extraction. A granted tool it cannot resolve is dropped and announced to the model by name (`WithStrictTools` refuses instead), with the error's `ModelNote` when it has one. `ResolveTools` resolves a revision's grants exactly as `New` does and builds nothing else (no model client). `payload/` holds typed event bodies. |
 | `pkg/runtime` | The durable anchor turn: revision pinning, playscape sandbox, dual publish, stopping a run mid-turn, compacting it on request, per-run usage, and parking a run on a person. Every turn's context carries the actor on the run's record (`envelope.ActorFrom`). `Sandbox.ToolsFor` assembles a turn's tools as `Execute` does and runs nothing. |
 | `pkg/connectors` | `slack`, `github`, `jira`, `cron`, `webhook`, plus shared helpers under `internal/`. |
-| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers and each person's credentials for them (`WithPersonCredentials`) (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. `App.ToolsFor` reports what a run of a tag would be granted without running it. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
-| `cmd/fiber` | `fiber run [flags] SPEC MESSAGE`: registers one JSON spec on a `fiber.New` with memory backends and a temporary workspace, raises one tag, prints the run's events (text, or `-json` one per line) and exits 0 completed, 1 not, 2 bad input. `-offline`, `-provider`, `-model`, `-tools` (prints `App.ToolsFor`, runs nothing), `-timeout`. Nothing imports it. |
+| `fiber` (module root) | The composition root. `New(ctx, ...Option)` builds an `App` (`app.go`). Every backend is a constructed value passed by an option (`WithPostgres(pool)` for every store family, `WithBus`, `WithRegistry`, `WithDurable`, `WithThreads`, `WithKnowledge`, `WithBlobs`, `WithToolProviders`, `WithExecutor`); anything not given is memory. Extensions are options too: model providers, tool sources, connectors, MCP tool providers and each person's credentials for them (`WithPersonCredentials`) (`fiber.go`, `extensions.go`). `App` runs delivery and execution in process and exposes webhook connectors as `http.Handler`s; it listens on nothing and reads no file or `FIBER_*` variable. `App.ToolsFor` reports what an agent's run of an event would be granted without running it. It is the module root because it composes `pkg/` and nothing under `pkg/` may depend on it. |
+| `cmd/fiber` | `fiber run [flags] SPEC MESSAGE`: registers one JSON spec on a `fiber.New` with memory backends and a temporary workspace, accepts one `message.posted.v1` for it, prints the run's events (text, or `-json` one per line) and exits 0 completed, 1 not, 2 bad input. `-offline`, `-provider`, `-model`, `-tools` (prints `App.ToolsFor`, runs nothing), `-timeout`. Nothing imports it. |
 
 Discover layout with `tree` or ripgrep; do not trust stale listings.
 
@@ -125,7 +125,7 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
   activity. Every attempt records its calls on the run before it returns,
   success or failure; the workflow body never reads usage. Cost comes only
   from saige's price catalog, as integer micro-units, never converted or
-  estimated. Usage is opt-in for routes and chat sinks do not render it.
+  estimated. Usage is opt-in for sinks and chat sinks do not render it.
 - **A parked run decides from its records.** A question is a anchor step the
   body records once; its resolution is the write-once event record
   `event:fiber.answer.<id>#0`, written by `Runtime.Answer`, by a stop, or by
@@ -152,9 +152,13 @@ Discover layout with `tree` or ripgrep; do not trust stale listings.
 - **Sinks must be idempotent.** Delivery is at-least-once. Render one message
   per run and edit it; never post per delta.
 - **Tenant is never read from a request body.** fiber has no transport; a
-  program that accepts tags from callers (Humagen) sets the tenant from the
+  program that accepts events from callers (Humagen) sets the tenant from the
   caller's credential and overwrites whatever the client sent.
-  `App.Invoke` and `App.ToolsFor` trust the tag they are handed.
+  `App.Publish`, `Runtime.Accept` and `App.ToolsFor` trust the event they are
+  handed.
+- **An ingress adapter chooses no agent.** It publishes a typed event on the
+  surface's channel, with the agents the text mentions. The channel's members
+  decide who answers, and a run's events go back out on the same channel.
 - **Neither is the actor.** A tag's actor is the credential's subject unless
   the credential is marked `ActAs`, which is what a surface that authenticated
   the person itself holds. Authorship and approvals are decided on it. The

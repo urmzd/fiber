@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -82,7 +84,7 @@ func TestASignatureIsOnlyGoodForTheSecretItWasMadeWith(t *testing.T) {
 
 // ── What lands on the wire ──────────────────────────────────────────
 
-func TestTheBodyCarriesTheEventWithAJsonPayloadInline(t *testing.T) {
+func TestTheBodyIsTheEventEnvelopeWithItsDataInline(t *testing.T) {
 	rec := newReceiver(t, http.StatusOK)
 	c := connectorAt(t, rec.URL, nil)
 
@@ -104,8 +106,9 @@ func TestTheBodyCarriesTheEventWithAJsonPayloadInline(t *testing.T) {
 	}
 	for header, want := range map[string]string{
 		webhook.HeaderDelivery: "run_1/7",
-		webhook.HeaderEvent:    "delta.text",
-		webhook.HeaderTopic:    "agent:docs-bot:run_1",
+		webhook.HeaderEvent:    event.TypeText,
+		webhook.HeaderChannel:  "cron://acme/nightly",
+		webhook.HeaderVersion:  "2",
 		"X-Receiver-Key":       "configured",
 	} {
 		if have := got.header.Get(header); have != want {
@@ -117,25 +120,115 @@ func TestTheBodyCarriesTheEventWithAJsonPayloadInline(t *testing.T) {
 	if err := json.Unmarshal(got.body, &body); err != nil {
 		t.Fatalf("body is not JSON: %v", err)
 	}
-	if body.Seq != 7 || body.RunID != "run_1" || body.Agent != "docs-bot" || body.Rev != 3 || body.Tenant != "acme" {
-		t.Errorf("body = %+v", body)
+	want := webhook.Body{
+		SpecVersion: "1.0", ID: "run_1:7", Source: "fiber://run/run_1", Type: event.TypeText,
+		Channel: "cron://acme/nightly", Time: time.Unix(1784600000, 0).UTC(), Tenant: "acme",
+		Run: "run_1", Seq: 7, Agent: "docs-bot", Version: "3",
 	}
-	if body.Kind != "delta.text" || body.Origin != "cron" {
-		t.Errorf("kind/origin = %q/%q", body.Kind, body.Origin)
+	data := body.Data
+	body.Data = nil
+	if !reflect.DeepEqual(body, want) {
+		t.Errorf("body = %+v, want %+v", body, want)
 	}
-	// The payload arrives as an object, not as a base64 string a receiver would
-	// have to decode before it could read one field of it.
+	// The data arrives as an object, not as a string a receiver would have to
+	// decode before it could read one field of it.
 	var payload struct {
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(body.Payload, &payload); err != nil {
-		t.Fatalf("payload is not inline JSON: %v", err)
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("data is not inline JSON: %v", err)
 	}
 	if payload.Text != "the retry path posts twice" {
-		t.Errorf("payload.text = %q", payload.Text)
+		t.Errorf("data.text = %q", payload.Text)
 	}
-	if len(body.PayloadB64) != 0 {
-		t.Error("a JSON payload was also base64 encoded, so a receiver has two places to look")
+	// It decodes as the event it was.
+	var back event.Envelope
+	if err := json.Unmarshal(got.body, &back); err != nil || back.Data != e.Data {
+		t.Errorf("the body does not decode as the event: %+v, %v", back.Data, err)
+	}
+}
+
+// A body that carries what a person wrote is left out unless the endpoint
+// opts in to sensitive bodies.
+func TestASensitiveBodyIsLeftOutUnlessTheEndpointOptsIn(t *testing.T) {
+	posted := event.Envelope{
+		ID: "Ev1", Source: "slack://T01/C02", Type: event.TypeMessagePosted, Channel: "slack://T01/C02",
+		Time: time.Unix(1784600000, 0).UTC(), Tenant: "acme",
+		Data: event.MessagePosted{Request: event.Request{Text: "the secret plan"}},
+	}
+	for _, sensitive := range []bool{false, true} {
+		rec := newReceiver(t, http.StatusOK)
+		c := connectorAt(t, rec.URL, func(cfg *webhook.Config) {
+			ep := cfg.Endpoints["acme"]
+			ep.Sensitive = sensitive
+			cfg.Endpoints["acme"] = ep
+		})
+		if err := c.Deliver(context.Background(), target, posted); err != nil {
+			t.Fatal(err)
+		}
+		got := rec.only(t)
+		var body webhook.Body
+		if err := json.Unmarshal(got.body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if leaked := strings.Contains(string(got.body), "secret plan"); leaked != sensitive || body.Redacted == sensitive {
+			t.Errorf("sensitive=%v: redacted=%v, text sent=%v", sensitive, body.Redacted, leaked)
+		}
+		if got.header.Get(webhook.HeaderDelivery) != "Ev1" {
+			t.Errorf("delivery id = %q, want the event id for an event with no run", got.header.Get(webhook.HeaderDelivery))
+		}
+	}
+}
+
+// ── Subscriptions ───────────────────────────────────────────────────
+
+// An endpoint subscribes to the channels it names and to its types, or to
+// every run type that is not opt-in, at its own address.
+func TestAnEndpointSubscribesToItsChannelsAndTypes(t *testing.T) {
+	c := connectorAt(t, "https://example.com", func(cfg *webhook.Config) {
+		ep := cfg.Endpoints["acme"]
+		ep.Types = []string{"run.completed", "run.usage"}
+		cfg.Endpoints["acme"] = ep
+	})
+	want := []connector.Subscription{{
+		Channels: []string{"cron://acme/"},
+		Types:    []string{"run.completed", "run.usage"},
+		Target:   address.MustParse("webhook://acme"),
+	}}
+	if got := c.Subscriptions(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Subscriptions = %+v, want %+v", got, want)
+	}
+	if got := connectorAt(t, "https://example.com", nil).Subscriptions()[0].Types; !reflect.DeepEqual(got, []string{"run"}) {
+		t.Errorf("default types = %v, want [run]", got)
+	}
+}
+
+// An old kind selector is read as the type prefixes it chose.
+func TestWebhookLegacySelector(t *testing.T) {
+	c := connectorAt(t, "https://example.com", func(cfg *webhook.Config) {
+		ep := cfg.Endpoints["acme"]
+		ep.Kinds = []string{"lifecycle.completed", "usage"}
+		cfg.Endpoints["acme"] = ep
+	})
+	got := c.Subscriptions()[0].Types
+	for _, typ := range []string{event.TypeCompleted, event.TypeUsageCall} {
+		if !slices.ContainsFunc(got, func(p string) bool { return event.Selects(p, typ) }) {
+			t.Errorf("types %v do not select %s", got, typ)
+		}
+	}
+	if slices.ContainsFunc(got, func(p string) bool { return event.Selects(p, event.TypeText) }) {
+		t.Errorf("types %v select %s, which neither selector chose", got, event.TypeText)
+	}
+}
+
+// A kind selector nobody knows is a configuration error, not an endpoint
+// that silently receives nothing.
+func TestWebhookUnknownSelectorFails(t *testing.T) {
+	_, err := webhook.New(webhook.Config{Endpoints: map[string]webhook.Endpoint{
+		"acme": {BaseURL: "https://example.com", Secret: secret, Channels: []string{"cron://acme/"}, Kinds: []string{"lifecycle.done"}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "lifecycle.done") {
+		t.Fatalf("New = %v, want an error naming the selector", err)
 	}
 }
 
@@ -369,7 +462,15 @@ func TestAnEndpointThatCannotBeUsedIsRefusedAtStartup(t *testing.T) {
 		},
 		{
 			name: "a workspace that could not be an address",
-			cfg:  webhook.Config{Endpoints: map[string]webhook.Endpoint{"acme.co": {BaseURL: "https://example.com", Secret: secret}}},
+			cfg:  webhook.Config{Endpoints: map[string]webhook.Endpoint{"acme.co": {BaseURL: "https://example.com", Secret: secret, Channels: []string{"cron://"}}}},
+		},
+		{
+			name: "an endpoint that names no channel",
+			cfg:  webhook.Config{Endpoints: map[string]webhook.Endpoint{"acme": {BaseURL: "https://example.com", Secret: secret}}},
+		},
+		{
+			name: "an endpoint on the control channel",
+			cfg:  webhook.Config{Endpoints: map[string]webhook.Endpoint{"acme": {BaseURL: "https://example.com", Secret: secret, Channels: []string{"control://acme"}}}},
 		},
 	}
 	for _, tc := range tests {
@@ -498,7 +599,7 @@ func connectorAt(t *testing.T, base string, tweak func(*webhook.Config)) *webhoo
 	header.Set("X-Receiver-Key", "configured")
 	cfg := webhook.Config{
 		Endpoints: map[string]webhook.Endpoint{
-			"acme": {BaseURL: base + "/hooks", Secret: secret, Header: header},
+			"acme": {BaseURL: base + "/hooks", Secret: secret, Header: header, Channels: []string{"cron://acme/"}},
 		},
 		Backoff:    time.Millisecond,
 		MaxBackoff: 2 * time.Millisecond,

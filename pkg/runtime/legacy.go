@@ -8,8 +8,8 @@ import (
 
 	"github.com/urmzd/anchor"
 
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/event/legacy"
 )
 
 // errBeforeUnion is why a run recorded before the event union ends failed.
@@ -17,10 +17,10 @@ import (
 var errBeforeUnion = errors.New("started before the event union; send the message again")
 
 // v1Input is a run's input before the event union: the tag, its revision
-// and, for a child run, its parent.
+// and, for a child run, its parent. The tag is read through legacy.DecodeTag.
 type v1Input struct {
-	Tag    envelope.Tag `json:"tag"`
-	Parent *ParentRef   `json:"parent,omitempty"`
+	Tag    json.RawMessage `json:"tag"`
+	Parent *ParentRef      `json:"parent,omitempty"`
 }
 
 // failRunFromBeforeUnion is the workflow registered under the turn's names
@@ -38,7 +38,10 @@ type v1Input struct {
 // every pending run.
 func (r *Runtime) failRunFromBeforeUnion(ctx context.Context, old v1Input) (Output, error) {
 	attempt := attemptOf(ctx)
-	in := Input{Trigger: TriggerOf(old.Tag), Subscriber: old.Tag.Agent, Parent: old.Parent}
+	in := Input{Parent: old.Parent}
+	if tr, err := legacy.DecodeTag(old.Tag); err == nil {
+		in.Trigger, in.Subscriber = tr.Event, tr.Agent
+	}
 	runID := in.runID()
 	err := anchor.NonRetryable(fmt.Errorf("runtime: run %s: %w", runID, errBeforeUnion))
 	r.logger.Error("fiber/runtime: failing a run recorded before the event union",

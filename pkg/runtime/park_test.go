@@ -22,7 +22,6 @@ import (
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/thread"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -293,7 +292,7 @@ func TestTheResumedTurnSeesTheThreadTheRequestAndWhatItSaidBeforeAsking(t *testi
 			t.Errorf("the resumed call is missing %q: %s", want, sent)
 		}
 	}
-	key := thread.KeyOf(tag("ops", "evt-2", "ship it"))
+	key := tag("ops", "evt-2", "ship it").key()
 	got := said(journal(t, w.threads, key))
 	if last := got[len(got)-1]; last != "assistant: Checking with you first.Deploying to staging." {
 		t.Errorf("the thread remembers %q, want the whole answer", last)
@@ -565,7 +564,7 @@ func TestStoppingAParkedRunEndsItWithoutResumingItsTurn(t *testing.T) {
 		t.Errorf("answering a stopped run's question: %v, want ErrQuestionClosed", err)
 	}
 	want := "assistant: Deploying.\n\n" + runtime.StopMarker
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); got[len(got)-1] != want {
+	if got := said(journal(t, w.threads, tg.key())); got[len(got)-1] != want {
 		t.Errorf("the thread remembers %q, want %q", got[len(got)-1], want)
 	}
 }
@@ -690,7 +689,7 @@ func TestAChildRunParksAndItsParentShowsItsQuestion(t *testing.T) {
 	var rt *runtime.Runtime
 	child := make(chan string, 1)
 	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
-		acc, err := rt.AcceptTag(ctx, envelope.Tag{ID: parent.RunID + "/child", Tenant: parent.Tenant, Agent: target, Origin: "delegation", Text: text})
+		acc, err := accept(ctx, rt, fixture{ID: parent.RunID + "/child", Tenant: parent.Tenant, Agent: target, Origin: "delegation", Text: text, At: time.Now()})
 		if err != nil {
 			return "", err
 		}
@@ -749,7 +748,7 @@ func renderMessages(msgs []saigetypes.Message) string {
 }
 
 // requested is a tag raised by ana through GitHub.
-func requested(id string) envelope.Tag {
+func requested(id string) fixture {
 	tg := tag("ops", id, "ship")
 	tg.Actor = envelope.Actor{ID: "ana"}
 	return tg

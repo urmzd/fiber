@@ -23,19 +23,16 @@ that answers it. Auto labels, guides and mutation grants are Humagen's.
 ## Who a comment asks
 
 A comment, a review, a review comment, or a new issue or pull request that
-names an agent raises a tag for the first agent it names. One that names no
-agent but mentions the app's own login (`Config.Login`, such as `humagen[bot]`,
-mentioned as `@humagen`) is addressed to the app, the way Slack delivers only
-messages that mention the app. `Config.DefaultAgent` answers it, and with none
-it raises nothing. The app's mention is taken out of the text in both cases.
-Anything else raises nothing, so a busy repository wakes no agent on every
-comment, and a bot's comment raises nothing whatever it mentions.
+names an agent is published as a `github.*.v1` event on the issue or pull
+request's channel, with every agent it names in `Mentions`. One that names no
+agent but mentions the app's own login (`Config.Login`, such as
+`humagen[bot]`, mentioned as `@humagen`) is addressed to the app, the way
+Slack delivers only messages that mention the app, and is published naming
+no agent. The app's mention is taken out of the text in both cases. Anything
+else publishes nothing, so a busy repository wakes no agent on every comment,
+and a bot's comment publishes nothing whatever it mentions.
 
-A login in `Bots` names its agent wherever it is mentioned, the app's own
-too. So when `Bots` maps the app's login, its mention is a tag for that agent,
-and `DefaultAgent` is not asked: `@humagen what changed?` and `@humagen @docs-bot
-summarize` both ask the agent `Bots` maps the app to, since the first agent
-the text names answers.
-
-A host that decides who answers once a tag reaches it, such as Humagen, gives a
-name of its own as `DefaultAgent` and resolves it before the run is accepted.
+The connector chooses no agent. The channel's members decide who answers
+(`pkg/membership`, `pkg/dispatch`). A login in `Bots` names its agent wherever
+it is mentioned, the app's own too, so when `Bots` maps the app's login,
+`@humagen what changed?` mentions that agent.

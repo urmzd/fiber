@@ -20,10 +20,12 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
+	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -399,8 +401,63 @@ func (h *harness) work(t *testing.T) {
 	})
 }
 
-func tag(agent, id, text string) envelope.Tag {
-	return envelope.Tag{
+// fixture is a request a test raises: the fields of the event it posts and
+// the agent that answers it.
+type fixture struct {
+	ID          string
+	Tenant      string
+	Agent       string
+	Origin      string
+	Source      address.Address
+	Text        string
+	Actor       event.Actor
+	Meta        map[string]string
+	Attachments []attachment.Attachment
+	At          time.Time
+}
+
+// event is the message.posted.v1 the fixture posts. With a source it
+// publishes on that surface; without one it has no surface to answer into.
+func (f fixture) event() event.Envelope {
+	e := event.Envelope{
+		ID:     f.ID,
+		Type:   event.TypeMessagePosted,
+		Time:   f.At,
+		Tenant: f.Tenant,
+		Data: event.MessagePosted{Request: event.Request{
+			Text: f.Text, Actor: f.Actor, Mentions: []string{f.Agent},
+			Attachments: f.Attachments, Context: f.Meta,
+		}},
+	}
+	if f.Source.IsZero() {
+		e.Source = f.Origin + ":" + f.Tenant
+		e.Channel = f.Origin + "://" + f.Tenant + "/" + f.Origin
+	} else {
+		e.Source = f.Source.String()
+		e.Channel = e.Source
+	}
+	return e
+}
+
+// runID is the run Accept starts for the fixture.
+func (f fixture) runID() string { return runtime.RunKey(f.Tenant, f.ID, f.Agent) }
+
+// key is the thread the fixture's run journals into.
+func (f fixture) key() thread.Key { return thread.KeyOf(f.event(), f.Agent) }
+
+// accept accepts the fixture's run.
+func accept(ctx context.Context, rt *runtime.Runtime, f fixture) (runtime.Acceptance, error) {
+	return rt.Accept(ctx, f.event(), f.Agent)
+}
+
+// contextOf reads a request's host context, for a message id function.
+func contextOf(e event.Envelope, key string) string {
+	r, _ := event.RequestOf(e.Data)
+	return r.Context[key]
+}
+
+func tag(agent, id, text string) fixture {
+	return fixture{
 		ID:     id,
 		Tenant: "acme",
 		Agent:  agent,
@@ -471,11 +528,11 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 	second := tag("docs-bot", "Ev-shared", "globex's question")
 	second.Tenant = "globex"
 
-	a, err := h.rt.AcceptTag(context.Background(), first)
+	a, err := accept(context.Background(), h.rt, first)
 	if err != nil {
 		t.Fatalf("accept for acme: %v", err)
 	}
-	b, err := h.rt.AcceptTag(context.Background(), second)
+	b, err := accept(context.Background(), h.rt, second)
 	if err != nil {
 		t.Fatalf("accept for globex: %v", err)
 	}
@@ -499,8 +556,9 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 		if err := json.Unmarshal(rec.Input, &in); err != nil {
 			t.Fatalf("decode run %s: %v", want.runID, err)
 		}
-		if got := in.Tag(); got.Tenant != want.tenant || got.Text != want.text {
-			t.Errorf("run %s holds tenant %q text %q, want %q %q", want.runID, got.Tenant, got.Text, want.tenant, want.text)
+		req, _ := event.RequestOf(in.Trigger.Data)
+		if in.Trigger.Tenant != want.tenant || req.Text != want.text {
+			t.Errorf("run %s holds tenant %q text %q, want %q %q", want.runID, in.Trigger.Tenant, req.Text, want.tenant, want.text)
 		}
 	}
 	for _, e := range h.bus.all() {
@@ -519,7 +577,7 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 	}
 
 	// A redelivery within a tenant still joins that tenant's run.
-	again, err := h.rt.AcceptTag(context.Background(), first)
+	again, err := accept(context.Background(), h.rt, first)
 	if err != nil || again.RunID != a.RunID {
 		t.Errorf("acme's redelivery got run %q, %v; want %q", again.RunID, err, a.RunID)
 	}
@@ -537,7 +595,7 @@ func TestLifecycleOrderOnSuccess(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev1", "update the docs"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev1", "update the docs"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -597,7 +655,7 @@ func TestEveryEventCarriesRunIdentity(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev2", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev2", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -648,7 +706,7 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev6", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev6", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -701,13 +759,13 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 	h.specs.revise("docs-bot", "revision 1 instructions")
 
 	ctx := context.Background()
-	first, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-dup", "hello"))
+	first, err := accept(ctx, h.rt, tag("docs-bot", "Ev-dup", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
 	h.specs.revise("docs-bot", "revision 2 instructions")
 
-	second, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-dup", "hello"))
+	second, err := accept(ctx, h.rt, tag("docs-bot", "Ev-dup", "hello"))
 	if err != nil {
 		t.Fatalf("Accept (redelivery): %v", err)
 	}
@@ -770,7 +828,7 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-fail", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-fail", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -823,7 +881,7 @@ func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) 
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-retry", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-retry", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -880,7 +938,7 @@ func TestReplayingAnAttemptRepublishesTheIdenticalSequence(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-replay", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-replay", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -977,7 +1035,7 @@ func TestAParkedRunPublishesParked(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-park", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-park", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -1014,7 +1072,7 @@ func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-hash", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-hash", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -1049,35 +1107,35 @@ func TestAnUnknownAgentIsRefusedAtAcceptTime(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor(""))
-	if _, err := h.rt.AcceptTag(context.Background(), tag("nobody", "Ev-x", "hello")); err == nil {
+	if _, err := accept(context.Background(), h.rt, tag("nobody", "Ev-x", "hello")); err == nil {
 		t.Fatal("Accept succeeded for an unknown agent")
 	}
 	if got := len(h.bus.all()); got != 0 {
 		t.Errorf("%d events were published for a refused tag, want none", got)
 	}
-	if got, err := h.ledger.GetRun(context.Background(), runtime.RunID("acme", "Ev-x")); err == nil {
+	if got, err := h.ledger.GetRun(context.Background(), runtime.RunKey("acme", "Ev-x", "nobody")); err == nil {
 		t.Errorf("a run %+v was accepted for an unknown agent", got)
 	}
 }
 
-// A malformed tag never becomes a run.
-func TestAMalformedTagIsRefused(t *testing.T) {
+// A malformed trigger never becomes a run.
+func TestAMalformedTriggerIsRefused(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor(""))
 	h.specs.revise("docs-bot", "v1")
 	tests := []struct {
 		name string
-		tag  envelope.Tag
+		tag  fixture
 	}{
-		{"no id", envelope.Tag{Agent: "docs-bot", Origin: "github"}},
-		{"no agent", envelope.Tag{ID: "Ev1", Origin: "github"}},
-		{"no origin", envelope.Tag{ID: "Ev1", Agent: "docs-bot"}},
+		{"no id", fixture{Tenant: "acme", Agent: "docs-bot", Origin: "github", At: time.Now()}},
+		{"no agent", fixture{ID: "Ev1", Tenant: "acme", Origin: "github", At: time.Now()}},
+		{"no time", fixture{ID: "Ev1", Tenant: "acme", Agent: "docs-bot", Origin: "github"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := h.rt.AcceptTag(context.Background(), tc.tag); !errors.Is(err, envelope.ErrInvalid) {
-				t.Fatalf("Accept returned %v, want an envelope.ErrInvalid", err)
+			if _, err := accept(context.Background(), h.rt, tc.tag); !errors.Is(err, runtime.ErrInvalid) {
+				t.Fatalf("Accept returned %v, want a runtime.ErrInvalid", err)
 			}
 		})
 	}
@@ -1137,7 +1195,7 @@ func TestAPublishFailureFailsTheAttempt(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-pub", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-pub", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}

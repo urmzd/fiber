@@ -4,27 +4,39 @@
 //
 // An outbound POST raises nothing. This connector takes events off the bus and
 // puts them on somebody else's HTTP endpoint; nothing ever comes back that could
-// become a Tag. Inbound webhooks are the other direction entirely and belong to
-// whichever connector owns the payload shape (see pkg/connectors/slack and
+// become an event. Inbound webhooks are the other direction entirely and belong
+// to whichever connector owns the payload shape (see pkg/connectors/slack and
 // pkg/connectors/github, each an http.Handler a host mounts).
-// pkg/connector.RolesOf derives the single face from the type, so a tag claiming
-// origin "webhook" has nowhere to have come from.
+//
+// # What an endpoint receives
+//
+// Each endpoint subscribes to channels and type prefixes (Endpoint.Channels,
+// Endpoint.Types), and receives every matching event of a run as its own POST
+// (see connector.Subscriber). Kinds from before the event union
+// ("lifecycle.completed", "delta", "usage") are read through
+// legacy.KindSelector when the connector is built, and a selector it does not
+// know is a configuration error, never an empty match.
+//
+// The body is version 2 (HeaderVersion): the event envelope, with the
+// CloudEvents specversion, and its typed data as inline JSON. A body the
+// catalog marks sensitive (human-authored text, private host data) is left out
+// unless the endpoint sets Sensitive.
 //
 // # The exception to the one-message rule
 //
 // Every human-facing sink in this package family keeps one message per run and
 // edits it, because a Slack channel that got one message per token would be
 // unusable (see pkg/connectors/internal/sink). This sink does the opposite: it
-// POSTs every event it is routed, as its own request.
+// POSTs every event it receives, as its own request.
 //
 // That is not an inconsistency, it is the same rule applied to a different
 // reader. Editing exists so a human is not flooded; a receiver here is a
 // program, and a program wants the stream, not a document that keeps changing
 // underneath it. Idempotency moves with it: instead of re-rendering a document
 // so that redelivery is a no-op by construction, this sink stamps every request
-// with a delivery id — "<run>/<seq>" — that is identical across every retry of
-// the same event, and the receiver dedupes on it. A route that only wants the
-// outcome asks for Kinds: ["lifecycle.completed"] and receives exactly one POST
+// with a delivery id, "<run>/<seq>", that is identical across every retry of
+// the same event, and the receiver dedupes on it. An endpoint that only wants
+// the outcome asks for Types: ["run.completed"] and receives exactly one POST
 // per run.
 //
 // # Signing, and doing better than we are done by
@@ -41,14 +53,14 @@
 // while the failure could plausibly clear, and abandoned immediately when it
 // cannot. "Cannot" is a 4xx other than 408 and 429: a 400 or a 404 is our
 // payload or our URL, and repeating it only spends the receiver's quota and the
-// router's lane. Those come back wrapped in connector.ErrUndeliverable, which
-// pkg/router classifies as permanent and does not retry either.
+// egress lane. Those come back wrapped in connector.ErrUndeliverable, which
+// pkg/egress classifies as permanent and does not retry either.
 //
-// The retry here is the inner one and it is deliberately short. The router
+// The retry here is the inner one and it is deliberately short. Egress
 // retries too, on a longer cycle, and the division is that this loop absorbs a
-// receiver's momentary hiccup within one delivery attempt while the router's
-// handles an outage. Both are bounded; neither blocks another run, because a
-// router lane is per (run, target).
+// receiver's momentary hiccup within one delivery attempt while egress
+// handles an outage. Both are bounded; neither blocks another run, because an
+// egress lane is per (run, target).
 package webhook
 
 import (
@@ -60,12 +72,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/event/legacy"
 )
 
 // Name is the address scheme this connector owns.
@@ -79,7 +93,7 @@ const (
 	DefaultTimeout = 10 * time.Second
 
 	// DefaultAttempts is how many times one event is POSTed before the delivery
-	// is handed back to the router as failed. Three is enough to ride out a
+	// is handed back to egress as failed. Three is enough to ride out a
 	// restart behind a load balancer and few enough that a receiver that is
 	// genuinely down is not hammered.
 	DefaultAttempts = 3
@@ -115,14 +129,33 @@ type Endpoint struct {
 	// wants an API key or a routing header of its own. It cannot override the
 	// signature headers.
 	Header http.Header
+
+	// Channels are the channel prefixes this endpoint receives, such as
+	// "slack://T01/" or "cron://acme/nightly". Required: an endpoint receives
+	// nothing it did not name.
+	Channels []string
+
+	// Types are the type prefixes it receives, such as "run.completed". An
+	// opt-in family ("run.usage", "run.context") is received only when named.
+	Types []string
+
+	// Kinds are selectors from before the event union ("lifecycle.completed",
+	// "delta", "usage"), read as the type prefixes they chose. With neither
+	// Types nor Kinds, the endpoint receives every run type that is not
+	// opt-in.
+	Kinds []string
+
+	// Sensitive opts in to bodies that carry human-authored text or private
+	// host data. Without it such a body is sent with its data left out.
+	Sensitive bool
 }
 
 // Config is everything the webhook connector needs.
 type Config struct {
 	// Endpoints maps an address workspace to the receiver it names. A target
 	// whose workspace is not here is refused with ErrUndeliverable rather than
-	// guessed at: the workspace is an indirection precisely so that a route
-	// written in an agent spec cannot name an arbitrary URL on the internet.
+	// guessed at: the workspace is an indirection precisely so that nothing an
+	// agent can write can name an arbitrary URL on the internet.
 	Endpoints map[string]Endpoint
 
 	// HTTP performs the requests. Nil means a client with no timeout of its own,
@@ -133,7 +166,7 @@ type Config struct {
 	Timeout time.Duration
 
 	// Attempts is the maximum number of POSTs for one event. Zero means
-	// DefaultAttempts; one disables retrying here and leaves it to the router.
+	// DefaultAttempts; one disables retrying here and leaves it to egress.
 	Attempts int
 
 	// Backoff is the wait before the second attempt, doubling to MaxBackoff.
@@ -151,6 +184,7 @@ type Config struct {
 // face and no other.
 type Connector struct {
 	endpoints  map[string]Endpoint
+	subs       []connector.Subscription
 	http       *http.Client
 	timeout    time.Duration
 	attempts   int
@@ -162,8 +196,9 @@ type Connector struct {
 // Compile-time proof of the faces. The absence of Trigger and Actor is the
 // declaration that matters: this connector raises nothing and acts on nothing.
 var (
-	_ connector.Sink      = (*Connector)(nil)
-	_ connector.Connector = (*Connector)(nil)
+	_ connector.Subscriber = (*Connector)(nil)
+	_ connector.Sink       = (*Connector)(nil)
+	_ connector.Connector  = (*Connector)(nil)
 )
 
 // New returns a webhook connector.
@@ -196,7 +231,12 @@ func New(cfg Config) (*Connector, error) {
 			return nil, fmt.Errorf("webhook: endpoint %q base url %q is not an absolute url", workspace, endpoint.BaseURL)
 		}
 		endpoint.BaseURL = strings.TrimRight(endpoint.BaseURL, "/")
+		sub, err := subscriptionOf(workspace, endpoint)
+		if err != nil {
+			return nil, err
+		}
 		c.endpoints[workspace] = endpoint
+		c.subs = append(c.subs, sub)
 	}
 
 	if c.http == nil {
@@ -223,6 +263,59 @@ func New(cfg Config) (*Connector, error) {
 // Name implements connector.Connector.
 func (c *Connector) Name() string { return Name }
 
+// Subscriptions implements connector.Subscriber: one per endpoint, rendered at
+// webhook://<endpoint>, in endpoint order.
+func (c *Connector) Subscriptions() []connector.Subscription {
+	out := make([]connector.Subscription, len(c.subs))
+	for i, s := range c.subs {
+		out[i] = connector.Subscription{
+			Channels: slices.Clone(s.Channels),
+			Types:    slices.Clone(s.Types),
+			Target:   s.Target,
+		}
+	}
+	return out
+}
+
+// subscriptionOf reads an endpoint's channels and selectors. An old kind
+// selector is read through legacy.KindSelector, and one it does not know is
+// an error.
+func subscriptionOf(name string, ep Endpoint) (connector.Subscription, error) {
+	if len(ep.Channels) == 0 {
+		return connector.Subscription{}, fmt.Errorf("webhook: endpoint %q names no channel, so it would receive nothing", name)
+	}
+	for _, ch := range ep.Channels {
+		if strings.TrimSpace(ch) == "" || event.IsControl(ch) {
+			return connector.Subscription{}, fmt.Errorf("webhook: endpoint %q: %q is not a channel it can receive", name, ch)
+		}
+	}
+	types := slices.Clone(ep.Types)
+	for _, t := range types {
+		if strings.TrimSpace(t) == "" {
+			return connector.Subscription{}, fmt.Errorf("webhook: endpoint %q: empty type prefix", name)
+		}
+	}
+	for _, k := range ep.Kinds {
+		prefixes, err := legacy.KindSelector(k)
+		if err != nil {
+			return connector.Subscription{}, fmt.Errorf("webhook: endpoint %q: %w", name, err)
+		}
+		for _, p := range prefixes {
+			if !slices.Contains(types, p) {
+				types = append(types, p)
+			}
+		}
+	}
+	if len(types) == 0 {
+		types = []string{"run"}
+	}
+	return connector.Subscription{
+		Channels: slices.Clone(ep.Channels),
+		Types:    types,
+		Target:   address.Address{Connector: Name, Workspace: name},
+	}, nil
+}
+
 // Deliver implements connector.Sink: it POSTs one event to target's receiver.
 //
 // The body is marshalled once and every attempt sends exactly those bytes, since
@@ -234,7 +327,11 @@ func (c *Connector) Deliver(ctx context.Context, target address.Address, e event
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(BodyOf(e))
+	wire, err := BodyOf(e, endpoint.Sensitive)
+	if err != nil {
+		return fmt.Errorf("%w: webhook: encode event %d of run %s: %w", connector.ErrUndeliverable, e.Seq, e.Run, err)
+	}
+	body, err := json.Marshal(wire)
 	if err != nil {
 		return fmt.Errorf("webhook: encode event %d of run %s: %w", e.Seq, e.Run, err)
 	}
@@ -282,9 +379,9 @@ func (c *Connector) post(ctx context.Context, endpoint Endpoint, uri string, e e
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set(HeaderDelivery, DeliveryID(e))
-	wire := BodyOf(e)
-	req.Header.Set(HeaderEvent, wire.Kind)
-	req.Header.Set(HeaderTopic, wire.Topic)
+	req.Header.Set(HeaderEvent, e.Type)
+	req.Header.Set(HeaderChannel, e.Channel)
+	req.Header.Set(HeaderVersion, BodyVersion)
 	sign(req.Header, endpoint.Secret, c.now(), body)
 
 	resp, err := c.http.Do(req)
@@ -311,7 +408,7 @@ func (c *Connector) post(ctx context.Context, endpoint Endpoint, uri string, e e
 	if retryable(resp.StatusCode) {
 		return fmt.Errorf("webhook: %s", detail)
 	}
-	// Permanent. Saying so is what stops the router from spending its own retry
+	// Permanent. Saying so is what stops egress from spending its own retry
 	// budget on a request the receiver has already judged.
 	return fmt.Errorf("%w: webhook: %s", connector.ErrUndeliverable, detail)
 }

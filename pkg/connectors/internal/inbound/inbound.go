@@ -17,15 +17,15 @@
 //
 // # The Ingest/ServeHTTP seam
 //
-// pkg/connector's Trigger face is a blocking Ingest that emits into a channel,
-// while an HTTP webhook is a handler that is called by a server the trigger does
-// not own. Pipe joins the two: Ingest parks on Pipe.Serve, holding the channel,
-// and each request hands its tag to Pipe.Send. Before Ingest is called, or after
+// pkg/connector's Trigger face is a blocking Ingest that is handed a publish
+// function, while an HTTP webhook is a handler that is called by a server the
+// trigger does not own. Pipe joins the two: Ingest parks on Pipe.Serve, holding
+// the publish function, and each request hands its event to Pipe.Send. Before Ingest is called, or after
 // it returns, Send reports ErrNotIngesting and the handler answers 503 — which
 // for all three providers means "retry", and their retry carries the same event
-// identifier, so the tag is not lost and does not duplicate.
+// identifier, so the event is not lost and does not duplicate.
 //
-// This package is stdlib plus pkg/envelope. It deliberately does not import
+// This package is stdlib plus pkg/event. It deliberately does not import
 // pkg/signature: it declares the one-method interface that package's verifiers
 // satisfy, so a connector can be given any authenticator, and a change to the
 // signature package cannot break the mesh.
@@ -40,7 +40,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // DefaultMaxBody bounds a request body. It is well above the largest realistic
@@ -77,7 +77,7 @@ type Verifier interface {
 // secret is whatever the URL's configurer put in a header. That is strictly
 // weaker than a MAC — it does not bind the secret to the body, so anyone who
 // captures one request can replay a different one — and the honest mitigation is
-// the same as everywhere else here: Tag.ID idempotency downstream, plus TLS.
+// the same as everywhere else here: event id idempotency downstream, plus TLS.
 type Secret struct {
 	// Header is the header carrying the secret.
 	Header string
@@ -163,38 +163,37 @@ func (g Gate) status(err error) int {
 	return http.StatusUnauthorized
 }
 
-// Pipe carries tags from a webhook handler to the Ingest that is running.
+// Pipe carries events from a webhook handler to the Ingest that is running.
 //
-// The zero Pipe is ready to use. It is safe for concurrent use, and it never
-// closes the channel it was given: the channel belongs to whoever called Ingest.
+// The zero Pipe is ready to use. It is safe for concurrent use.
 type Pipe struct {
-	mu   sync.Mutex
-	out  chan<- envelope.Tag
-	done chan struct{}
+	mu      sync.Mutex
+	publish func(context.Context, event.Envelope) error
+	done    chan struct{}
 }
 
-// Serve claims out and blocks until ctx is cancelled. It is the whole body of a
-// webhook trigger's Ingest.
+// Serve claims publish and blocks until ctx is cancelled. It is the whole
+// body of a webhook trigger's Ingest.
 //
-// A second concurrent Serve is refused rather than allowed to steal the channel,
+// A second concurrent Serve is refused rather than allowed to take over,
 // because two Ingests on one trigger means two configurations disagreeing about
-// where tags go, and silently honouring the newer one would strand the older.
-func (p *Pipe) Serve(ctx context.Context, out chan<- envelope.Tag) error {
-	if out == nil {
-		return fmt.Errorf("inbound: Ingest requires a channel to emit on")
+// where events go, and silently honouring the newer one would strand the older.
+func (p *Pipe) Serve(ctx context.Context, publish func(context.Context, event.Envelope) error) error {
+	if publish == nil {
+		return fmt.Errorf("inbound: Ingest requires a publish function")
 	}
 	p.mu.Lock()
-	if p.out != nil {
+	if p.publish != nil {
 		p.mu.Unlock()
 		return fmt.Errorf("inbound: already ingesting")
 	}
 	done := make(chan struct{})
-	p.out, p.done = out, done
+	p.publish, p.done = publish, done
 	p.mu.Unlock()
 
 	defer func() {
 		p.mu.Lock()
-		p.out, p.done = nil, nil
+		p.publish, p.done = nil, nil
 		p.mu.Unlock()
 		close(done)
 	}()
@@ -203,29 +202,27 @@ func (p *Pipe) Serve(ctx context.Context, out chan<- envelope.Tag) error {
 	return ctx.Err()
 }
 
-// Send hands t to the running Ingest, blocking until it is taken, the request's
-// context ends, or Ingest returns.
-//
-// Blocking is correct here: back pressure from a full channel is the router
-// telling the trigger to slow down, and answering the provider late is better
-// than dropping an event a human is waiting on. The provider's own timeout is
-// the bound, which is why the caller must pass the request's context.
-func (p *Pipe) Send(ctx context.Context, t envelope.Tag) error {
+// Send publishes e through the running Ingest, under the request's context.
+// It reports ErrNotIngesting when no Ingest is running. A publish that fails
+// is answered 503 by the handler, and the provider's retry carries the same
+// event id.
+func (p *Pipe) Send(ctx context.Context, e event.Envelope) error {
 	p.mu.Lock()
-	out, done := p.out, p.done
+	publish, done := p.publish, p.done
 	p.mu.Unlock()
 
-	if out == nil {
+	if publish == nil {
 		return ErrNotIngesting
 	}
 	select {
-	case out <- t:
-		return nil
 	case <-done:
 		return ErrNotIngesting
-	case <-ctx.Done():
-		return fmt.Errorf("inbound: emitting tag %s: %w", t.ID, ctx.Err())
+	default:
 	}
+	if err := publish(ctx, e); err != nil {
+		return fmt.Errorf("inbound: publish %s: %w", e.ID, err)
+	}
+	return nil
 }
 
 // Ingesting reports whether an Ingest is currently running. A handler uses it to
@@ -233,11 +230,11 @@ func (p *Pipe) Send(ctx context.Context, t envelope.Tag) error {
 func (p *Pipe) Ingesting() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.out != nil
+	return p.publish != nil
 }
 
 // SendStatus is the status a handler should answer when Send fails: 503 while
 // the trigger is not ingesting (retry us), 499-equivalent otherwise. There is no
 // standard code for "the caller went away", so a cancelled request answers 503
-// as well; the provider retries either way and Tag.ID makes that safe.
+// as well; the provider retries either way and the event id makes that safe.
 func SendStatus(error) int { return http.StatusServiceUnavailable }

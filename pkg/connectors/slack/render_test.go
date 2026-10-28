@@ -10,12 +10,11 @@ import (
 )
 
 // A mention and a slash command render through the event catalog as their
-// tags render today.
+// request text.
 func TestRenderMatchesRequestText(t *testing.T) {
 	c, tags := start(t, slack.Config{
-		Team:         "T01ABCDEF",
-		Bots:         map[string]string{"U08BOTID": "docs-bot"},
-		DefaultAgent: "docs-bot",
+		Team: "T01ABCDEF",
+		Bots: map[string]string{"U08BOTID": "docs-bot"},
 	})
 	for _, tc := range []struct {
 		name  string

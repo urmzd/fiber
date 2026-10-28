@@ -10,13 +10,13 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Headers on an inbound Jira webhook.
 const (
 	// HeaderIdentifier is Atlassian's own identifier for one webhook delivery,
-	// and becomes Tag.ID.
+	// and becomes the event's id.
 	//
 	// It is the header rather than the payload's "id" field for a specific
 	// reason: the payload's id is a small ordinal that Jira reuses, so two
@@ -169,100 +169,110 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
-// tagFrom translates one webhook delivery into a Tag, or reports that it raises
-// none.
+// eventFrom translates one webhook delivery into a jira.*.v1 event, or
+// reports that it publishes nothing.
 //
-// Three deliveries raise tags, and the third is the interesting one:
+// Three deliveries publish, and the third is the interesting one:
 //
-//   - A comment naming an agent. This is the ordinary case, and it arrives under
-//     two different webhookEvent values depending on how the webhook was
-//     registered, so both are read.
-//   - An issue created with a mention in its summary or description.
-//   - An issue ASSIGNED to an agent. Nobody wrote a message; the assignment is
-//     the request, and the issue itself is what the agent reads. It is the
-//     structural gesture Jira has, the same shape as requesting a review from a
-//     bot on GitHub, and it is the natural way a human hands work to an agent
-//     without typing anything.
+//   - A comment naming an agent (jira.comment.created.v1). This is the ordinary
+//     case, and it arrives under two different webhookEvent values depending on
+//     how the webhook was registered, so both are read.
+//   - An issue created with a mention in its summary or description
+//     (jira.issue.created.v1).
+//   - An issue ASSIGNED to an agent (jira.issue.assigned.v1). Nobody wrote a
+//     message; the assignment is the request, and the issue itself is what the
+//     agent reads. It is the structural gesture Jira has, the same shape as
+//     requesting a review from a bot on GitHub, and it is the natural way a
+//     human hands work to an agent without typing anything.
 //
-// Everything else is acknowledged and dropped, because an agent run per issue
-// update would be a denial of service with a bill attached. An event whose actor
-// is an app is always dropped: this connector's own comment arrives back as a
-// comment_created, and acting on it would have the mesh answer itself forever.
-func (c *Connector) tagFrom(header http.Header, h hook) (envelope.Tag, bool) {
+// The event names the agents and chooses none of them: the members of the
+// issue's channel decide who answers. Everything else is acknowledged and
+// dropped, because an agent run per issue update would be a denial of service
+// with a bill attached. An event whose actor is an app is always dropped: this
+// connector's own comment arrives back as a comment_created, and acting on it
+// would have the mesh answer itself forever.
+func (c *Connector) eventFrom(header http.Header, h hook) (event.Envelope, bool) {
 	// Loop prevention first and unconditionally.
 	actor := h.User
 	if h.Comment != nil && h.Comment.Author != nil {
 		actor = h.Comment.Author
 	}
 	if actor.bot() {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	if h.Issue == nil || h.Issue.Key == "" || !ValidKey(h.Issue.Key) {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	if _, isBot := c.bots[strings.ToLower(actor.id())]; isBot && actor.id() != "" {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 
 	site, ok := c.siteOf(h.Issue.Self)
 	if !ok {
 		// A delivery from an instance this connector is not configured for. It is
-		// authenticated — the shared secret passed — but there is no site key to
-		// address it by, so there is no tag to raise.
-		return envelope.Tag{}, false
+		// authenticated (the shared secret passed) but there is no site key to
+		// address it by, so there is nothing to publish.
+		return event.Envelope{}, false
 	}
 
-	var (
-		agent     string
-		text      string
-		commentID string
-		assigned  bool
-	)
+	req := event.Request{Actor: event.Actor{ID: actor.id(), Display: actor.display(), Bot: actor.bot()}}
+	ref := c.refOf(site, h)
+	var body event.Body
 	switch {
 	case h.Comment != nil && (h.WebhookEvent == EventCommentCreated || h.IssueEventType == "issue_commented"):
-		commentID = h.Comment.ID
-		body := c.text(h.Comment.Body)
-		if agent, text, ok = mention.Find(body, c.agents()); !ok {
-			return envelope.Tag{}, false
+		var text string
+		req.Mentions, text = mention.FindAll(c.text(h.Comment.Body), c.agents())
+		if len(req.Mentions) == 0 {
+			return event.Envelope{}, false
 		}
+		req.Text = strings.TrimSpace(text)
+		body = event.JiraCommentCreated{Request: req, JiraRef: ref, CommentID: h.Comment.ID}
 
 	case h.WebhookEvent == EventIssueCreated:
-		if agent, text, ok = mention.Find(c.issueText(h.Issue), c.agents()); !ok {
-			return envelope.Tag{}, false
+		var text string
+		req.Mentions, text = mention.FindAll(c.issueText(h.Issue), c.agents())
+		if len(req.Mentions) == 0 {
+			return event.Envelope{}, false
 		}
+		req.Text = strings.TrimSpace(text)
+		body = event.JiraIssueCreated{Request: req, JiraRef: ref}
 
 	case h.WebhookEvent == EventIssueUpdated:
 		// The one path with no message at all: the ticket was handed to the
 		// agent, so the ticket is the request.
 		assignee, changed := assigneeChange(h.Changelog)
 		if !changed {
-			return envelope.Tag{}, false
+			return event.Envelope{}, false
 		}
-		if agent, ok = c.agents().Lookup(assignee); !ok {
-			return envelope.Tag{}, false
+		agent, ok := c.agents().Lookup(assignee)
+		if !ok {
+			return event.Envelope{}, false
 		}
-		assigned = true
-		text = mention.Strip(c.issueText(h.Issue), agent)
+		req.Text = strings.TrimSpace(mention.Strip(c.issueText(h.Issue), agent))
+		body = event.JiraIssueAssigned{Request: req, JiraRef: ref, Agent: agent}
 
 	default:
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 
-	tag := envelope.Tag{
-		ID:      c.deliveryID(header, h, commentID),
-		Agent:   agent,
-		Origin:  Name,
-		Source:  address.Address{Connector: Name, Workspace: site, Path: []string{h.Issue.Key}},
-		Text:    strings.TrimSpace(text),
-		Actor:   envelope.Actor{ID: actor.id(), Display: actor.display(), Bot: actor.bot()},
-		Deliver: c.cfg.Deliver,
-		Meta:    c.metaOf(site, h, commentID, assigned),
-		At:      c.observedAt(h),
+	commentID := ""
+	if b, ok := body.(event.JiraCommentCreated); ok {
+		commentID = b.CommentID
 	}
-	return tag, true
+	at := address.Address{Connector: Name, Workspace: site, Path: []string{h.Issue.Key}}.String()
+	return event.Envelope{
+		ID:      c.deliveryID(header, h, commentID),
+		Source:  at,
+		Type:    body.Type(),
+		Subject: h.Issue.Key,
+		Channel: at,
+		Time:    c.observedAt(h),
+		Tenant:  c.cfg.Tenant,
+		Data:    body,
+	}, true
 }
 
-// deliveryID is the tag's idempotency key.
+// deliveryID is the event's id, and so part of its run key.
 //
 // Atlassian's own delivery identifier when it sent one, which is the case that
 // makes a redelivery join the run it already started. Without it, a key composed
@@ -343,7 +353,7 @@ func assigneeChange(log *changelog) (string, bool) {
 // Jira's — so the host is the only evidence available. A deployment serving one
 // site does not need the match to succeed, since there is only one answer; a
 // deployment serving several does, and a delivery from an unconfigured host
-// raises no tag rather than being attributed to whichever site happened to be
+// publishes nothing rather than being attributed to whichever site happened to be
 // first.
 func (c *Connector) siteOf(self string) (string, bool) {
 	if host := hostOf(self); host != "" {
@@ -367,43 +377,31 @@ func hostOf(raw string) string {
 	return strings.ToLower(u.Host)
 }
 
-// metaOf carries the ticket context an agent's tools need. Without it the agent
-// would have to ask Jira what it is looking at before it could do anything, on
-// every run.
-func (c *Connector) metaOf(site string, h hook, commentID string, assigned bool) map[string]string {
-	m := map[string]string{
-		"jira_event": h.WebhookEvent,
-		"jira_site":  site,
-		"jira_key":   h.Issue.Key,
+// refOf is the ticket an event is about, as its body carries it. Without it
+// the agent would have to ask Jira what it is looking at before it could do
+// anything, on every run.
+func (c *Connector) refOf(site string, h hook) event.JiraRef {
+	ref := event.JiraRef{
+		Site:         site,
+		Key:          h.Issue.Key,
+		WebhookEvent: h.WebhookEvent,
+		IssueEvent:   h.IssueEventType,
+		ID:           h.Issue.ID,
+		Summary:      h.Issue.Fields.Summary,
+		Status:       h.Issue.Fields.Status.name(),
+		IssueType:    h.Issue.Fields.IssueType.name(),
+		Priority:     h.Issue.Fields.Priority.name(),
+		Assignee:     h.Issue.Fields.Assignee.display(),
+		Reporter:     h.Issue.Fields.Reporter.display(),
+		Labels:       h.Issue.Fields.Labels,
 	}
-	set := func(key, value string) {
-		if value != "" {
-			m[key] = value
-		}
-	}
-	set("jira_issue_event", h.IssueEventType)
-	set("jira_id", h.Issue.ID)
-	set("jira_summary", h.Issue.Fields.Summary)
-	set("jira_status", h.Issue.Fields.Status.name())
-	set("jira_type", h.Issue.Fields.IssueType.name())
-	set("jira_priority", h.Issue.Fields.Priority.name())
 	if p := h.Issue.Fields.Project; p != nil {
-		set("jira_project", p.Key)
-		set("jira_project_name", p.Name)
+		ref.Project, ref.ProjectName = p.Key, p.Name
 	}
-	set("jira_assignee", h.Issue.Fields.Assignee.display())
-	set("jira_reporter", h.Issue.Fields.Reporter.display())
-	set("jira_labels", strings.Join(h.Issue.Fields.Labels, ","))
-	set("jira_comment_id", commentID)
 	if s, ok := c.cfg.Sites[site]; ok {
-		set("jira_url", s.BrowseURL(h.Issue.Key))
+		ref.URL = s.BrowseURL(h.Issue.Key)
 	}
-	if assigned {
-		// The agent needs to know nobody typed a message at it, so it does not
-		// answer as though it had been asked a question.
-		m["jira_assigned"] = "true"
-	}
-	return m
+	return ref
 }
 
 // ValidKey reports whether s is shaped like a Jira issue key: a project key of

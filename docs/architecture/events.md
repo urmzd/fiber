@@ -410,10 +410,30 @@ Surfaces are adapters. Delivery does not know which surface it serves.
 - **Egress adapters** (Slack, GitHub, Jira, webhook, console SSE) subscribe by
   channel plus type prefix and render what arrives onto their surface.
 
+Implemented in `pkg/connector` (`Trigger.Ingest(ctx, publish)`,
+`Subscriber`) and `pkg/egress`, which replaced the router.
+
+- **Ingress.** Slack publishes `message.posted.v1` (mentions from `Bots`),
+  `slack.command.invoked.v1` and `slack.session.stopped.v1`. GitHub publishes
+  `github.*.v1`, with `head_sha` pinned before publish when checks are on; a
+  bot sender is dropped except for `synchronize`, whose id is
+  `github:commit:<repo>:<number>:<sha>`. Jira publishes `jira.*.v1`. Cron
+  publishes `cron.tick.v1` with id `<name>@<unix>` on `cron://<tenant>/<name>`,
+  and joins the schedule's agent to that channel. A `Prepare` hook takes
+  `*event.Envelope`.
+- **Egress.** A sink subscribes to its own scheme's channels with the run
+  types, or names its channels and types (`connector.Subscriber`). A sink
+  renders only its own scheme: a target of another connector is a config
+  error. Opt-in types are delivered only when named. Rendering state is kept
+  per `(run, channel)`.
+
 **Webhook body v2.** The outbound webhook posts the envelope as JSON, with
-sensitive bodies redacted unless the route opts in. A route's old kind
-selectors (`lifecycle.completed`, `delta`, `usage`) are aliased to their new
-type prefixes. An unknown selector is a config error, not an empty match.
+`specversion` 1.0 and the header `Fiber-Event-Version: 2`. The delivery id is
+`<run>/<seq>`. An endpoint names its `Channels` (required) and `Types`.
+Sensitive bodies are redacted unless the endpoint sets `Sensitive`. Old kind
+selectors (`lifecycle.completed`, `delta`, `usage`) in `Kinds` are read
+through `legacy.KindSelector` at config load. An unknown selector is a config
+error, not an empty match.
 
 ## 10. Upgrade
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,12 +36,12 @@ import (
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/dispatch"
 	"github.com/urmzd/fiber/pkg/durable"
+	"github.com/urmzd/fiber/pkg/egress"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/membership"
-	"github.com/urmzd/fiber/pkg/router"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -49,9 +50,9 @@ import (
 // App is fiber assembled: every long-lived component a process owns, in the
 // order data flows through them.
 //
-//	definitions  →  runtime  →  bus  →  router  →  connector sinks
-//	                   ↑                              ↓
-//	               anchor worker              a surface somewhere
+//	triggers  →  bus  →  dispatch  →  runtime  →  bus  →  egress  →  sinks
+//	                                     ↑                             ↓
+//	                               anchor worker              a surface somewhere
 //
 // Nothing here is a stub standing in for a deployment. The in-memory
 // definitions, bus, ledger and queue are complete implementations of the same
@@ -73,7 +74,7 @@ type App struct {
 	blobs   blob.Store
 	broker  bus.Bus
 	sinks   *connector.Registry
-	deliver *router.Router
+	out     *egress.Engine
 	rt      *runtime.Runtime
 	disp    *dispatch.Dispatcher
 	exec    runtime.Executor
@@ -129,8 +130,8 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 	pool := o.Postgres
 	var err error
 
-	// The broker. Runs publish here; the router and every subscriber read
-	// from here. Nothing else connects them.
+	// The broker. Triggers and runs publish here; dispatch, egress and every
+	// other subscriber read from here. Nothing else connects them.
 	a.broker = o.Bus
 	if a.broker == nil {
 		a.broker = bus.NewMemory()
@@ -178,7 +179,7 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 
 	// The mesh. Roles are derived from the interfaces each connector
 	// implements, never declared, so registering is the whole wiring.
-	if a.sinks, err = buildConnectors(o, a.store, a.blobs); err != nil {
+	if a.sinks, err = buildConnectors(o, a.store, a.blobs, a.members); err != nil {
 		return fail(err)
 	}
 	// The author: the control plane offered to an agent as tools, and the
@@ -192,9 +193,9 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 		}
 	}
 
-	// The router is just another bus subscriber. That indirection is why
-	// origin and destination stay independent.
-	a.deliver = router.New(a.broker, a.sinks, router.WithLogger(a.log))
+	// Egress is just another bus subscriber: each sink renders the runs on
+	// its own scheme's channels, or the channels it subscribes to.
+	a.out = egress.New(a.broker, a.sinks, append([]egress.Option{egress.WithLogger(a.log)}, o.EgressOpts...)...)
 
 	// The agent side. A turn runs as a playscape task under the NGAC policy
 	// compiled from the pinned revision's Access grant.
@@ -221,9 +222,6 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 		runtime.WithStopLedger(a.ledger),
 		// An answered or stopped question wakes its run at once.
 		runtime.WithWaker(a.queue),
-		// A run accepted from an event answers in place, at the event's
-		// source, bound before its first event is published.
-		runtime.WithEgress(egress{a.deliver}),
 	}
 	if pool != nil && o.Ledger == nil {
 		rtOpts = append(rtOpts, runtime.WithRecordReader(durable.NewRecords(pool)))
@@ -239,18 +237,6 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 		return fail(fmt.Errorf("fiber: dispatch: %w", err))
 	}
 	return a, nil
-}
-
-// egress binds a run accepted from an event to the router: it answers at the
-// event's source when the source is an address a sink can render to.
-type egress struct{ r *router.Router }
-
-func (e egress) Bind(_ context.Context, runID, tenant, channel string, trigger event.Envelope) error {
-	target, err := address.Parse(trigger.Source)
-	if err != nil {
-		return nil
-	}
-	return e.r.Register(runID, tenant, channel, []envelope.Route{{Target: target}})
 }
 
 // Close releases what New made: MCP sessions and a workspace New created.
@@ -386,17 +372,30 @@ func newDurable(ctx context.Context, pool *pgxpool.Pool, o options) (Ledger, dqu
 	return lgr, q, nil
 }
 
-// surfaceMessageID names the surface message that raised a tag, from the
-// metadata the triggers already set, so a later reconcile recognises it
-// instead of journaling it a second time.
-func surfaceMessageID(tag envelope.Tag) string {
-	switch tag.Origin {
-	case "slack":
-		return tag.Meta["slack_ts"]
-	case "github":
-		return tag.Meta["github_comment_id"]
+// surfaceMessageID names the surface message that raised a run, from the
+// fields the triggers already set, so a later reconcile recognises it instead
+// of journaling it a second time.
+func surfaceMessageID(e event.Envelope) string {
+	switch b := e.Data.(type) {
+	case event.MessagePosted:
+		if b.Slack != nil {
+			return b.Slack.TS
+		}
+	case event.GitHubIssueCommentCreated:
+		return commentID(b.CommentID)
+	case event.GitHubReviewCommentCreated:
+		return commentID(b.CommentID)
+	case event.GitHubReviewSubmitted:
+		return commentID(b.CommentID)
 	}
 	return ""
+}
+
+func commentID(id int64) string {
+	if id == 0 {
+		return ""
+	}
+	return strconv.FormatInt(id, 10)
 }
 
 // newExecutor builds the sandbox a turn runs in.
@@ -479,10 +478,10 @@ func (a *App) addAuthor(ctx context.Context) error {
 	return nil
 }
 
-// principal resolves a run to the tenant and actor on its accepted tag. It is
-// the only way an action learns who it acts as, and it reads the ledger: the
-// tag there was stamped by whoever accepted it, which is the one account of
-// identity a model cannot rewrite.
+// principal resolves a run to the tenant and actor on its trigger. It is the
+// only way an action learns who it acts as, and it reads the ledger: the
+// trigger there was stamped by whoever accepted it, which is the one account
+// of identity a model cannot rewrite.
 func (a *App) principal(ctx context.Context, runID string) (author.Principal, error) {
 	if a.ledger == nil {
 		return author.Principal{}, errors.New("fiber: run ledger not ready")
@@ -495,31 +494,11 @@ func (a *App) principal(ctx context.Context, runID string) (author.Principal, er
 	if err := json.Unmarshal(rec.Input, &in); err != nil {
 		return author.Principal{}, fmt.Errorf("fiber: decode run %q input: %w", runID, err)
 	}
-	tag := in.Tag()
-	p := author.Principal{Tenant: tag.Tenant}
-	if tag.Actor.ID != "" {
-		p.Actor = tag.Origin + ":" + tag.Actor.ID
+	p := author.Principal{Tenant: in.Trigger.Tenant}
+	if actor := in.Actor(); actor.ID != "" {
+		p.Actor = in.Origin() + ":" + actor.ID
 	}
 	return p, nil
-}
-
-// Invoke accepts a tag: it registers the tag's routes with the router and
-// then accepts the run durably. It returns before any inference. It is the
-// bridge for callers that still raise tags; Publish is the event path.
-//
-// The order matters: routes are registered before the run is accepted,
-// because accept publishes the run's first event and an event for a run the
-// router has no routes for has nowhere to go. RunID is a pure function of the
-// tenant and tag id, so the routes can be registered before the run exists.
-//
-// The tag's Tenant and Actor are trusted as given. An embedding program that
-// accepts tags from callers must set both from the caller's credential,
-// never from a request body.
-func (a *App) Invoke(ctx context.Context, tag envelope.Tag) (runtime.Acceptance, error) {
-	if err := a.deliver.Register(runtime.RunID(tag.Tenant, tag.ID), runtime.TenantOf(tag), runtime.ChannelOf(tag), tag.Routes()); err != nil {
-		return runtime.Acceptance{}, fmt.Errorf("fiber: register routes: %w", err)
-	}
-	return a.rt.AcceptTag(ctx, tag)
 }
 
 // Publish puts an ingress event on the bus. The dispatcher started by Run
@@ -527,9 +506,9 @@ func (a *App) Invoke(ctx context.Context, tag envelope.Tag) (runtime.Acceptance,
 // matches it, each in a run of its own. An event with no tenant is the
 // deployment's (WithTenant).
 //
-// The event's Tenant and actor are trusted as given, as Invoke trusts a
-// tag's. An embedding program that publishes events from callers sets the
-// tenant from the caller's credential, never from a request body.
+// The event's Tenant and actor are trusted as given. An embedding program
+// that publishes events from callers sets the tenant from the caller's
+// credential, never from a request body.
 func (a *App) Publish(ctx context.Context, e event.Envelope) error {
 	if e.Tenant == "" {
 		e.Tenant = a.opt.Tenant
@@ -543,51 +522,60 @@ func (a *App) Publish(ctx context.Context, e event.Envelope) error {
 	return nil
 }
 
-// ToolsFor reports what a run of tag would be granted, without accepting
-// it: the tools the current revision of tag's agent in tag's tenant would
-// show its model, and the grants it would drop, each with its reason. The
-// tools are resolved as a turn of that run would resolve them, for its
-// tenant, its surface and its actor, so a person-scoped MCP grant expands
-// for tag's actor, and an MCP server may be reached to expand a group. No
-// tool is called and no model client is built, so it needs no model
-// credential. The tag is trusted as given, as Invoke trusts it, and needs
-// only Tenant and Agent.
+// ToolsFor reports what a run of agent answering trigger would be granted,
+// without accepting it: the tools the current version of agent in the
+// trigger's tenant would show its model, and the grants it would drop, each
+// with its reason. The tools are resolved as a turn of that run would resolve
+// them, for its tenant, its surface and its actor, so a person-scoped MCP
+// grant expands for the trigger's actor, and an MCP server may be reached to
+// expand a group. No tool is called and no model client is built, so it needs
+// no model credential. The trigger is trusted as given, as Publish trusts it,
+// and needs only a tenant (or the App's, WithTenant).
 //
 // It asks the App's sandbox. An executor passed by WithExecutor is asked
 // too if it has a method ToolsFor(context.Context, runtime.Request)
 // (agentrt.Granted, error); otherwise the error is errors.ErrUnsupported.
-func (a *App) ToolsFor(ctx context.Context, tag envelope.Tag) (agentrt.Granted, error) {
+func (a *App) ToolsFor(ctx context.Context, trigger event.Envelope, agent string) (agentrt.Granted, error) {
 	lister, ok := a.exec.(interface {
 		ToolsFor(context.Context, runtime.Request) (agentrt.Granted, error)
 	})
 	if !ok {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: the executor cannot report them: %w", tag.Agent, errors.ErrUnsupported)
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: the executor cannot report them: %w", agent, errors.ErrUnsupported)
 	}
-	pin, err := a.defs.Resolve(ctx, tag.Tenant, tag.Agent)
-	if err != nil {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", tag.Agent, err)
+	if trigger.Tenant == "" {
+		trigger.Tenant = a.opt.Tenant
 	}
-	loaded, err := a.defs.Verify(ctx, tag.Tenant, pin)
+	pin, err := a.defs.Resolve(ctx, trigger.Tenant, agent)
 	if err != nil {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", tag.Agent, err)
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
+	}
+	loaded, err := a.defs.Verify(ctx, trigger.Tenant, pin)
+	if err != nil {
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
+	}
+	in := runtime.Input{Trigger: trigger, Subscriber: agent, Run: runtime.RunKey(trigger.Tenant, trigger.ID, agent)}
+	text, meta, _ := event.Prompt(trigger.Data)
+	source := ""
+	if at, err := address.Parse(trigger.Source); err == nil {
+		source = at.String()
 	}
 	req := runtime.Request{
-		RunID:   runtime.RunID(tag.Tenant, tag.ID),
-		Tenant:  tag.Tenant,
+		RunID:   in.Run,
+		Tenant:  trigger.Tenant,
 		Attempt: 1,
-		Origin:  tag.Origin,
-		Source:  tag.Source.String(),
-		Text:    tag.Text,
-		Meta:    tag.Meta,
+		Origin:  in.Origin(),
+		Source:  source,
+		Text:    text,
+		Meta:    meta,
 		Definition: agentrt.Revision{
 			Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec,
 		},
 		Pin:    pin,
 		Policy: loaded.Agent.Policy,
 	}
-	granted, err := lister.ToolsFor(envelope.WithActor(ctx, tag.Actor), req)
+	granted, err := lister.ToolsFor(envelope.WithActor(ctx, in.Actor()), req)
 	if err != nil {
-		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", tag.Agent, err)
+		return agentrt.Granted{}, fmt.Errorf("fiber: tools for %q: %w", agent, err)
 	}
 	return granted, nil
 }
@@ -613,20 +601,22 @@ func (a *App) Answer(ctx context.Context, req runtime.AnswerRequest) (answer pay
 }
 
 // Run starts delivery and execution and blocks until ctx is done or one of
-// them fails, then stops both. A cancelled ctx is not a failure.
+// them fails, then stops both. A cancelled ctx is not a failure. Dispatch and
+// egress run for the deployment's tenant (WithTenant); a program serving more
+// tenants runs Dispatcher and Egress once per tenant.
 func (a *App) Run(ctx context.Context) error {
 	return a.run(ctx, true, true)
 }
 
-// RunDelivery runs only the router: it reads the bus and renders events onto
+// RunDelivery runs only egress: it reads the bus and renders events onto
 // connector sinks, accepting and executing nothing, so delivery can scale
 // apart from execution. It needs a shared bus to be useful.
 func (a *App) RunDelivery(ctx context.Context) error {
 	return a.run(ctx, true, false)
 }
 
-// RunExecution runs only the durable worker and the triggers: it executes
-// runs and accepts what connectors raise, and delivers nothing.
+// RunExecution runs only the durable worker, dispatch and the triggers: it
+// executes runs and accepts what connectors publish, and delivers nothing.
 func (a *App) RunExecution(ctx context.Context) error {
 	return a.run(ctx, false, true)
 }
@@ -639,8 +629,8 @@ func (a *App) run(ctx context.Context, delivery, execution bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	g := &group{cancel: cancel}
-	if delivery {
-		g.run("router", func() error { return a.deliver.Run(ctx) })
+	if delivery && a.opt.Tenant != "" {
+		g.run("egress", func() error { return a.out.Run(ctx, a.opt.Tenant) })
 	}
 	if execution {
 		a.startExecution(ctx, g)
@@ -649,9 +639,9 @@ func (a *App) run(ctx context.Context, delivery, execution bool) error {
 	return g.wait(runGrace)
 }
 
-// startExecution runs the durable worker and every trigger. The triggers feed
-// one channel this process drains into Invoke, so a connector never learns
-// what a runtime is.
+// startExecution runs the durable worker, dispatch and every trigger. Each
+// trigger publishes straight to the bus, so a connector never learns what a
+// runtime is.
 func (a *App) startExecution(ctx context.Context, g *group) {
 	wopts := []worker.Option{
 		worker.WithRegistry(a.rt.Registry()),
@@ -663,39 +653,14 @@ func (a *App) startExecution(ctx context.Context, g *group) {
 	if a.opt.Tenant != "" {
 		g.run("dispatch", func() error { return a.disp.Run(ctx, a.opt.Tenant) })
 	}
-
-	triggers := a.sinks.Triggers()
-	if len(triggers) == 0 {
-		return
-	}
-	tags := make(chan envelope.Tag)
-	for _, t := range triggers {
+	for _, t := range a.sinks.Triggers() {
 		g.run("trigger "+t.Name(), func() error {
-			if err := t.Ingest(ctx, tags); err != nil && !errors.Is(err, context.Canceled) {
+			if err := t.Ingest(ctx, a.Publish); err != nil && !errors.Is(err, context.Canceled) {
 				return fmt.Errorf("fiber: trigger %s: %w", t.Name(), err)
 			}
 			return nil
 		})
 	}
-	g.run("tags", func() error {
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case tag := <-tags:
-				// The deployment's scope: a trigger has no credential.
-				if tag.Tenant == "" {
-					tag.Tenant = a.opt.Tenant
-				}
-				acc, err := a.Invoke(ctx, tag)
-				if err != nil {
-					a.log.Error("fiber: accept tag", "tag", tag.ID, "agent", tag.Agent, "error", err)
-					continue
-				}
-				a.log.Info("fiber: accepted", "run", acc.RunID, "agent", tag.Agent, "origin", tag.Origin, "version", acc.Version)
-			}
-		}
-	})
 }
 
 // Webhooks returns the connectors that receive their own webhooks, by
@@ -727,8 +692,10 @@ func (a *App) Bus() bus.Bus { return a.broker }
 // Runtime is the durable runtime.
 func (a *App) Runtime() *runtime.Runtime { return a.rt }
 
-// Router is the delivery router.
-func (a *App) Router() *router.Router { return a.deliver }
+// Egress delivers run events to connector sinks. Run starts it for the
+// deployment's tenant; a program serving more tenants runs it once per
+// tenant.
+func (a *App) Egress() *egress.Engine { return a.out }
 
 // Connectors is the connector registry.
 func (a *App) Connectors() *connector.Registry { return a.sinks }

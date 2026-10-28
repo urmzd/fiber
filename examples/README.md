@@ -26,19 +26,19 @@ and a demonstration of it:
 2. **A revision is immutable.** Editing the prompt creates revision 2 and leaves
    revision 1 byte for byte what it was. Both numbers still resolve. This is why
    a run can pin its revision at accept time and replay under it forever.
-3. **Origin and destination are independent.** A tag arrives from
+3. **Origin and destination are independent.** An event arrives on
    `github://acme/handbook/issues/42` and is answered into
-   `slack://T01/C02?thread=1699.001` and `webhook://acme/deploys`. The trigger is
-   GitHub; neither destination is. Nothing on the path from trigger to sink
-   holds both ends at once, which is the difference between a mesh and a pile of
-   integrations.
-4. **One run, two sinks, two granularities.** The Slack route takes every kind
-   and edits one message as the answer streams in; the webhook route takes
-   `lifecycle.completed` only and posts exactly once. Same run, same bus, same
-   events. Selectivity is a field on the route, not a second topic and not a
-   second run.
+   `slack://T01/C02?thread=1699.001` and `webhook://acme/deploys`, because those
+   sinks subscribe to the issue's channel. The trigger is GitHub; neither
+   destination is. Nothing on the path from trigger to sink holds both ends at
+   once, which is the difference between a mesh and a pile of integrations.
+4. **One run, two sinks, two granularities.** The Slack sink takes every run
+   type and edits one message as the answer streams in; the webhook takes
+   `run.completed` only and posts exactly once. Same run, same bus, same
+   events. Selectivity is a field on the subscription, not a second topic and
+   not a second run.
 5. **A third party can listen to an agent.** A subscriber holds one
-   subscription to `agent:docs-bot`. It raised nothing, no route names it, and
+   subscription to the GitHub and cron channels. It raised nothing, no sink names it, and
    neither run can tell it is there. It sees both runs in full, with `Seq` as a
    resume cursor.
 6. **Citations are first-class events.** `delta.citation` arrives on the same
@@ -80,7 +80,7 @@ its output after an interrupted attempt's partial output instead of vanishing
 behind the bus's high-water mark. The example shrinks the band from its default
 of 2^20 to 100 (`runtime.WithStride`) purely so the numbers stay readable.
 
-**The surface output is printed settled, not live.** The router carries events
+**The surface output is printed settled, not live.** Egress carries events
 for one `(run, target)` pair on a single goroutine and deliberately imposes no
 order across targets, so two sinks printing directly would interleave
 differently on every run. The fake sinks therefore record what they wrote to

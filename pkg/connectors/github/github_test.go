@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +22,6 @@ import (
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/github"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/signature"
 )
 
@@ -42,7 +43,7 @@ func deliver(t *testing.T, event, delivery, body string) *http.Request {
 	return r
 }
 
-func start(t *testing.T, cfg github.Config) (*github.Connector, <-chan envelope.Tag) {
+func start(t *testing.T, cfg github.Config) (*github.Connector, <-chan event.Envelope) {
 	t.Helper()
 	if cfg.API == nil {
 		cfg.API = github.NewFake()
@@ -55,12 +56,15 @@ func start(t *testing.T, cfg github.Config) (*github.Connector, <-chan envelope.
 		t.Fatalf("New: %v", err)
 	}
 
-	tags := make(chan envelope.Tag, 8)
+	tags := make(chan event.Envelope, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = c.Ingest(ctx, tags)
+		_ = c.Ingest(ctx, func(_ context.Context, e event.Envelope) error {
+			tags <- e
+			return nil
+		})
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -110,8 +114,8 @@ const issueComment = `{
   "installation": {"id": 55555}
 }`
 
-func TestIssueCommentBecomesATagAddressedAtTheIssue(t *testing.T) {
-	c, tags := start(t, github.Config{Agents: mention.NewNames("docs-bot")})
+func TestIssueCommentPublishesAnEventOnTheIssue(t *testing.T) {
+	c, tags := start(t, github.Config{Agents: mention.NewNames("docs-bot"), Tenant: "acme"})
 
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, deliver(t, "issue_comment", "d1f2e3c4-0000-1111-2222-333344445555", issueComment))
@@ -119,46 +123,40 @@ func TestIssueCommentBecomesATagAddressedAtTheIssue(t *testing.T) {
 		t.Fatalf("status = %d, body = %q", w.Code, w.Body.String())
 	}
 
-	tag := receive(t, tags)
-	if tag.ID != "d1f2e3c4-0000-1111-2222-333344445555" {
-		t.Errorf("Tag.ID = %q, want the X-GitHub-Delivery guid", tag.ID)
+	e := receive(t, tags)
+	if e.ID != "d1f2e3c4-0000-1111-2222-333344445555" {
+		t.Errorf("ID = %q, want the X-GitHub-Delivery guid", e.ID)
 	}
-	if tag.Agent != "docs-bot" || tag.Origin != "github" {
-		t.Errorf("Tag agent/origin = %q/%q", tag.Agent, tag.Origin)
+	if e.Type != event.TypeGitHubIssueCommentCreated || e.Tenant != "acme" || e.Subject != "issues/42" {
+		t.Errorf("type, tenant, subject = %q, %q, %q", e.Type, e.Tenant, e.Subject)
+	}
+	r := request(t, e)
+	if !slices.Equal(r.Mentions, []string{"docs-bot"}) {
+		t.Errorf("Mentions = %v, want docs-bot once", r.Mentions)
 	}
 	want := "can summarize what changed here, and check the retry path too?"
-	if tag.Text != want {
-		t.Errorf("Tag.Text = %q, want %q with both mentions stripped", tag.Text, want)
+	if r.Text != want {
+		t.Errorf("Text = %q, want %q with both mentions stripped", r.Text, want)
 	}
-	if got, want := tag.Source.String(), "github://urmzd/fiber/issues/42"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	if want := "github://urmzd/fiber/issues/42"; e.Channel != want || e.Source != want {
+		t.Errorf("Channel, Source = %q, %q, want %q", e.Channel, e.Source, want)
 	}
-	if tag.Actor.ID != "urmzd" || tag.Actor.Bot {
-		t.Errorf("Tag.Actor = %+v", tag.Actor)
+	if r.Actor.ID != "urmzd" || r.Actor.Bot {
+		t.Errorf("Actor = %+v", r.Actor)
 	}
-	if !tag.At.Equal(time.Date(2026, 7, 20, 12, 30, 0, 0, time.UTC)) {
-		t.Errorf("Tag.At = %s, want the comment's own timestamp", tag.At)
+	if !e.Time.Equal(time.Date(2026, 7, 20, 12, 30, 0, 0, time.UTC)) {
+		t.Errorf("Time = %s, want the comment's own timestamp", e.Time)
 	}
-	for key, want := range map[string]string{
-		"github_event":           "issue_comment",
-		"github_action":          "created",
-		"github_owner":           "urmzd",
-		"github_repo":            "fiber",
-		"github_number":          "42",
-		"github_kind":            "issue",
-		"github_title":           "Retries double-post to Slack",
-		"github_state":           "open",
-		"github_author":          "urmzd",
-		"github_labels":          "bug,connectors",
-		"github_comment_id":      "2201234567",
-		"github_installation_id": "55555",
-	} {
-		if got := tag.Meta[key]; got != want {
-			t.Errorf("Meta[%q] = %q, want %q", key, got, want)
-		}
+	wantRef := event.GitHubRef{
+		Owner: "urmzd", Repo: "fiber", Number: 42, Title: "Retries double-post to Slack", Sender: "urmzd",
+		State: "open", Author: "urmzd", URL: "https://github.com/urmzd/fiber/issues/42",
+		Labels: []string{"bug", "connectors"}, InstallationID: 55555,
 	}
-	if err := tag.Validate(); err != nil {
-		t.Errorf("invalid tag: %v", err)
+	if got := ref(t, e); !reflect.DeepEqual(got, wantRef) {
+		t.Errorf("ref = %+v, want %+v", got, wantRef)
+	}
+	if b := e.Data.(event.GitHubIssueCommentCreated); b.CommentID != 2201234567 {
+		t.Errorf("CommentID = %d", b.CommentID)
 	}
 }
 
@@ -172,13 +170,13 @@ func TestACommentOnAPullRequestAddressesPullNotIssues(t *testing.T) {
 	c, tags := start(t, github.Config{Agents: mention.NewNames("docs-bot")})
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, deliver(t, "issue_comment", "d2", body))
-	tag := receive(t, tags)
+	e := receive(t, tags)
 
-	if got, want := tag.Source.String(), "github://urmzd/fiber/pull/42"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	if got, want := e.Channel, "github://urmzd/fiber/pull/42"; got != want {
+		t.Errorf("Channel = %q, want %q", got, want)
 	}
-	if tag.Meta["github_kind"] != "pull" {
-		t.Errorf("Meta[github_kind] = %q, want pull", tag.Meta["github_kind"])
+	if !ref(t, e).Pull {
+		t.Error("ref.Pull = false, want a pull request")
 	}
 }
 
@@ -222,36 +220,31 @@ func TestAReviewRequestNamesTheAgentWithoutAnyMention(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
-	tag := receive(t, tags)
-
-	if tag.Agent != "docs-bot" {
-		t.Errorf("Tag.Agent = %q, want the requested reviewer's agent", tag.Agent)
+	e := receive(t, tags)
+	b, ok := e.Data.(event.GitHubReviewRequested)
+	if !ok {
+		t.Fatalf("published %s, want %s", e.Type, event.TypeGitHubReviewRequested)
 	}
-	if got, want := tag.Source.String(), "github://urmzd/fiber/pull/77?head_sha=deadbeef"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	if b.Reviewer != "docs-bot" || len(b.Mentions) != 0 {
+		t.Errorf("Reviewer = %q, Mentions = %v, want the requested reviewer's agent and no mention", b.Reviewer, b.Mentions)
+	}
+	if got, want := e.Channel, "github://urmzd/fiber/pull/77?head_sha=deadbeef"; got != want {
+		t.Errorf("Channel = %q, want %q", got, want)
 	}
 	// With no message, the pull request is the request.
-	if !strings.HasPrefix(tag.Text, "Coalesce sink edits") || !strings.Contains(tag.Text, "flushes on an interval") {
-		t.Errorf("Tag.Text = %q, want the pull request title and body", tag.Text)
+	if !strings.HasPrefix(b.Text, "Coalesce sink edits") || !strings.Contains(b.Text, "flushes on an interval") {
+		t.Errorf("Text = %q, want the pull request title and body", b.Text)
 	}
 	// A mention of a human in the description is left alone.
-	if !strings.Contains(tag.Text, "@urmzd") {
-		t.Errorf("Tag.Text = %q, want the human mention preserved", tag.Text)
+	if !strings.Contains(b.Text, "@urmzd") {
+		t.Errorf("Text = %q, want the human mention preserved", b.Text)
 	}
-	for key, want := range map[string]string{
-		"github_kind":     "pull",
-		"github_number":   "77",
-		"github_base_ref": "main",
-		"github_head_ref": "coalesce-edits",
-		"github_action":   "review_requested",
-	} {
-		if got := tag.Meta[key]; got != want {
-			t.Errorf("Meta[%q] = %q, want %q", key, got, want)
-		}
+	if !b.Pull || b.Number != 77 || b.BaseRef != "main" || b.HeadRef != "coalesce-edits" || b.HeadSHA != "deadbeef" {
+		t.Errorf("ref = %+v", b.GitHubRef)
 	}
 }
 
-func TestAReviewRequestedFromAHumanRaisesNoTag(t *testing.T) {
+func TestAReviewRequestedFromAHumanPublishesNothing(t *testing.T) {
 	body := strings.Replace(reviewRequested,
 		`"requested_reviewer": {"login": "docs-bot[bot]", "type": "Bot"}`,
 		`"requested_reviewer": {"login": "urmzd", "type": "User"}`, 1)
@@ -263,13 +256,13 @@ func TestAReviewRequestedFromAHumanRaisesNoTag(t *testing.T) {
 		t.Fatalf("status = %d", w.Code)
 	}
 	select {
-	case tag := <-tags:
-		t.Errorf("a review request from a human raised a tag for %q", tag.Agent)
+	case e := <-tags:
+		t.Errorf("a review request from a human published %+v", e)
 	default:
 	}
 }
 
-func TestDeliveriesThatMustNotRaiseTags(t *testing.T) {
+func TestDeliveriesThatPublishNothing(t *testing.T) {
 	tests := []struct {
 		name  string
 		event string
@@ -319,15 +312,15 @@ func TestDeliveriesThatMustNotRaiseTags(t *testing.T) {
 				t.Errorf("status = %d, want 200 so GitHub stops retrying", w.Code)
 			}
 			select {
-			case tag := <-tags:
-				t.Errorf("raised a tag: %+v", tag)
+			case e := <-tags:
+				t.Errorf("published %+v", e)
 			default:
 			}
 		})
 	}
 }
 
-func TestAnIssueOpenedWithAMentionRaisesATag(t *testing.T) {
+func TestAnIssueOpenedWithAMentionIsPublished(t *testing.T) {
 	body := `{
 	  "action": "opened",
 	  "issue": {
@@ -342,16 +335,17 @@ func TestAnIssueOpenedWithAMentionRaisesATag(t *testing.T) {
 	c, tags := start(t, github.Config{Agents: mention.NewNames("docs-bot")})
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, deliver(t, "issues", "d5", body))
-	tag := receive(t, tags)
+	e := receive(t, tags)
+	r := request(t, e)
 
-	if tag.Agent != "docs-bot" {
-		t.Errorf("Tag.Agent = %q", tag.Agent)
+	if e.Type != event.TypeGitHubIssueOpened || !slices.Equal(r.Mentions, []string{"docs-bot"}) {
+		t.Errorf("type = %s, Mentions = %v", e.Type, r.Mentions)
 	}
-	if tag.Text != "please triage this\n\nThe sink posts twice on retry." {
-		t.Errorf("Tag.Text = %q", tag.Text)
+	if r.Text != "please triage this\n\nThe sink posts twice on retry." {
+		t.Errorf("Text = %q", r.Text)
 	}
-	if got, want := tag.Source.String(), "github://urmzd/fiber/issues/9"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	if got, want := e.Channel, "github://urmzd/fiber/issues/9"; got != want {
+		t.Errorf("Channel = %q, want %q", got, want)
 	}
 }
 
@@ -614,16 +608,43 @@ func TestGitHubImplementsAllThreeFaces(t *testing.T) {
 	}
 }
 
-// receive waits for a tag and checks it renders through the event catalog
-// as it renders today.
-func receive(t *testing.T, tags <-chan envelope.Tag) envelope.Tag {
+// receive waits for an event and checks it is valid and renders through the
+// event catalog as its request text.
+func receive(t *testing.T, tags <-chan event.Envelope) event.Envelope {
 	t.Helper()
 	select {
-	case tag := <-tags:
-		rendertest.Check(t, tag)
-		return tag
+	case e := <-tags:
+		if err := e.Validate(); err != nil {
+			t.Fatalf("published an invalid event: %v", err)
+		}
+		rendertest.Check(t, e)
+		return e
 	case <-time.After(2 * time.Second):
-		t.Fatal("no tag was raised")
-		return envelope.Tag{}
+		t.Fatal("no event was published")
+		return event.Envelope{}
 	}
+}
+
+// request is the request e carries.
+func request(t *testing.T, e event.Envelope) event.Request {
+	t.Helper()
+	r, ok := event.RequestOf(e.Data)
+	if !ok {
+		t.Fatalf("%s carries no request", e.Type)
+	}
+	return r
+}
+
+// ref is the GitHub reference e's body embeds.
+func ref(t *testing.T, e event.Envelope) event.GitHubRef {
+	t.Helper()
+	raw, err := json.Marshal(e.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r event.GitHubRef
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
 }

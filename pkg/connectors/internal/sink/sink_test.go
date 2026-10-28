@@ -98,6 +98,9 @@ func layout(v render.View) string { return sink.Layout(plain{}, v) }
 
 var target = address.MustParse("slack://T01/C02?thread=1699.1")
 
+// channel is the channel ev publishes on.
+const channel = "slack://T01/C02"
+
 func ev(seq uint64, typ, data string) event.Envelope {
 	if data == "" {
 		data = "{}"
@@ -110,7 +113,7 @@ func ev(seq uint64, typ, data string) event.Envelope {
 		ID:      fmt.Sprintf("run_1:%d", seq),
 		Source:  "fiber://run/run_1",
 		Type:    typ,
-		Channel: "slack://T01/C02",
+		Channel: channel,
 		Tenant:  "acme",
 		Run:     "run_1",
 		Seq:     seq,
@@ -146,7 +149,7 @@ func TestDeliveringTheSameEventTwiceLeavesOneMessageEdited(t *testing.T) {
 	if got := surface.count(); got != 1 {
 		t.Fatalf("surface holds %d messages, want exactly 1", got)
 	}
-	handle, ok := eng.Handle("run_1", target)
+	handle, ok := eng.Handle("run_1", channel)
 	if !ok {
 		t.Fatal("engine forgot the message handle")
 	}
@@ -191,7 +194,7 @@ func TestOutOfOrderDeliveryNeverRendersStaleTextOverFreshText(t *testing.T) {
 		}
 	}
 
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	body := surface.body(handle)
 	if !strings.Contains(body, "hello world") {
 		t.Errorf("body = %q, want %q assembled in sequence order", body, "hello world")
@@ -236,7 +239,7 @@ func TestFirstAndTerminalEventsJumpTheCoalescingInterval(t *testing.T) {
 	if got := len(surface.calls()); got != 2 {
 		t.Errorf("after the interval: %d calls, want 2", got)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if body := surface.body(handle); !strings.Contains(body, strings.Repeat("x", 18)+"y") {
 		t.Errorf("body = %q, want every buffered delta", body)
 	}
@@ -268,7 +271,7 @@ func TestFlushWritesWhatCoalescingIsStillHolding(t *testing.T) {
 	if err := eng.Deliver(ctx, target, text(2, "buffered")); err != nil {
 		t.Fatal(err)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if strings.Contains(surface.body(handle), "buffered") {
 		t.Fatal("the delta was written despite the interval")
 	}
@@ -307,7 +310,7 @@ func TestAFailedWriteIsRetriedRatherThanLosingTheAnswer(t *testing.T) {
 	if err := eng.Deliver(ctx, target, text(2, " second")); err != nil {
 		t.Fatalf("Deliver after failure: %v", err)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if body := surface.body(handle); !strings.Contains(body, "first second") {
 		t.Errorf("body = %q, want both fragments", body)
 	}
@@ -328,7 +331,7 @@ func TestAFailedWriteIsRetriedRatherThanLosingTheAnswer(t *testing.T) {
 	}
 }
 
-func TestOneRunDeliveringToTwoTargetsOwnsOneMessageOnEach(t *testing.T) {
+func TestOneRunOnTwoChannelsOwnsOneMessageOnEach(t *testing.T) {
 	surface := newFakeSurface()
 	eng := sink.New(surface, layout, sink.WithInterval(0))
 	ctx := context.Background()
@@ -336,18 +339,19 @@ func TestOneRunDeliveringToTwoTargetsOwnsOneMessageOnEach(t *testing.T) {
 	other := address.MustParse("slack://T01/C99")
 	for _, tgt := range []address.Address{target, other} {
 		for _, e := range []event.Envelope{text(1, "hi"), ev(2, event.TypeCompleted, "")} {
+			e.Channel = tgt.String()
 			if err := eng.Deliver(ctx, tgt, e); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 	if got := surface.count(); got != 2 {
-		t.Fatalf("surface holds %d messages, want one per target", got)
+		t.Fatalf("surface holds %d messages, want one per channel", got)
 	}
-	h1, _ := eng.Handle("run_1", target)
-	h2, _ := eng.Handle("run_1", other)
+	h1, _ := eng.Handle("run_1", target.String())
+	h2, _ := eng.Handle("run_1", other.String())
 	if h1 == h2 {
-		t.Errorf("both targets share handle %q", h1)
+		t.Errorf("both channels share handle %q", h1)
 	}
 }
 
@@ -362,7 +366,7 @@ func TestAnUnrenderableEventCostsNoRoundTrip(t *testing.T) {
 	if got := len(surface.calls()); got != 0 {
 		t.Errorf("%d calls for an unrenderable event, want 0", got)
 	}
-	if _, ok := eng.Handle("run_1", target); ok {
+	if _, ok := eng.Handle("run_1", channel); ok {
 		t.Error("a message was created for an event with nothing to show")
 	}
 }
@@ -387,7 +391,7 @@ func TestConcurrentDeliveriesForOneRunStillCreateOneMessage(t *testing.T) {
 	if got := surface.count(); got != 1 {
 		t.Fatalf("surface holds %d messages, want 1", got)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if got := strings.Count(surface.body(handle), "x"); got != 32 {
 		t.Errorf("body holds %d fragments, want 32", got)
 	}
@@ -405,11 +409,11 @@ func TestEvictionIsBoundedAndKeepsTheNewestRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, ok := eng.Handle("a", target); ok {
+	if _, ok := eng.Handle("a", channel); ok {
 		t.Error("the oldest run was not evicted")
 	}
 	for _, run := range []string{"b", "c"} {
-		if _, ok := eng.Handle(run, target); !ok {
+		if _, ok := eng.Handle(run, channel); !ok {
 			t.Errorf("run %q was evicted before the oldest", run)
 		}
 	}
@@ -505,7 +509,7 @@ func TestAStoppedRunIsFlushedAndRenderedAsStopped(t *testing.T) {
 	if got := len(surface.calls()); got != 2 {
 		t.Fatalf("%d writes, want the first event and the stop: %v", got, surface.calls())
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	want := "docs-bot (stopped)\n\nHalf an answer\n\nstopped: Stopped by a user"
 	if body := surface.body(handle); body != want {
 		t.Fatalf("body = %q\nwant   %q", body, want)

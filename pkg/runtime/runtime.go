@@ -1,4 +1,4 @@
-// Package runtime is the durable turn: where a tag becomes a run.
+// Package runtime is the durable turn: where an event becomes a run.
 //
 // It is the composition root of the three libraries fiber is built on, and it
 // exists because each of them owns exactly one thing and none of them owns this:
@@ -11,7 +11,7 @@
 // # Idempotency
 //
 // A run accepted from an event is keyed by the event and its subscriber (see
-// RunKey); a tag's run, by the tag's id (see RunID). Slack retries its event,
+// RunKey); a child run, by its trigger's id (see RunID). Slack retries its event,
 // GitHub redelivers its webhook, a cron fires twice on a leader flap, and
 // anchor treats starting a run that already exists as a no-op returning the existing
 // run. A redelivery therefore JOINS the run it duplicated instead of starting a
@@ -40,7 +40,7 @@
 // # History is pinned the same way, for the same reason
 //
 // With a thread store (WithThreads) a run continues the conversation of the
-// thread its tag belongs to (see thread.KeyOf). The journal of that thread
+// thread its trigger belongs to (see thread.KeyOf). The journal of that thread
 // keeps growing while a run waits in the queue and between its attempts, so
 // "the history" is exactly as unstable as "the latest version", and it gets
 // exactly the same treatment: Accept reads the journal's head ONCE and writes
@@ -171,7 +171,7 @@ const (
 	ActivityResumeV1 = "fiber.turn.resume"
 )
 
-// ErrInvalid reports a tag or configuration this package cannot run.
+// ErrInvalid reports an event or configuration this package cannot run.
 var ErrInvalid = errors.New("runtime: invalid")
 
 // Bus is the live fan-out this package publishes to. It is the publishing half
@@ -227,12 +227,12 @@ type Input struct {
 	// Subscriber is the agent the run is for.
 	Subscriber string `json:"subscriber"`
 	// Run is the run id, RunKey of the trigger and subscriber, for a run
-	// accepted from an event. Empty for a tag or child run, whose id is
+	// accepted from an event. Empty for a child run, whose id is
 	// RunID(tenant, trigger id).
 	Run string `json:"run,omitempty"`
 	// Pin is the definition pinned at accept time. It never changes.
 	Pin definition.Pin `json:"pin"`
-	// HistorySeq is the head of the tag's thread journal, pinned at accept
+	// HistorySeq is the head of the trigger's thread journal, pinned at accept
 	// time: the run is shown the entries with a sequence at or below it and
 	// nothing newer, on every attempt. Zero means no history, which is also
 	// what a runtime with no thread store always pins, so the field is
@@ -297,13 +297,13 @@ type Request struct {
 	// RunID is the durable run. It is also the stream key: chunks a Sandbox
 	// tool produces find their way back to this run by it.
 	RunID string `json:"run_id"`
-	// Tenant is the authorization scope carried from the tag.
+	// Tenant is the authorization scope carried from the trigger.
 	Tenant string `json:"tenant,omitempty"`
 	// Attempt is the execution attempt, from 1.
 	Attempt int `json:"attempt"`
-	// Origin is the trigger that raised the tag.
+	// Origin is the surface the trigger came through ("slack", "cron").
 	Origin string `json:"origin,omitempty"`
-	// Source is the address URI of the surface the tag came from, and the
+	// Source is the address URI of the surface the trigger came from, and the
 	// target connector actions are bound to. Empty for a trigger with no
 	// surface, such as a schedule.
 	Source string `json:"source,omitempty"`
@@ -316,7 +316,7 @@ type Request struct {
 	// it and must not go looking for a newer one.
 	History []agentrt.Message `json:"history,omitempty"`
 
-	// Attachments are the files that arrived with the tag, as references. A
+	// Attachments are the files that arrived with the trigger, as references. A
 	// delegated sub-task inherits its parent's, under the same tenant.
 	Attachments []attachment.Attachment `json:"attachments,omitempty"`
 	// Definition is the pinned definition to execute, compiled for a turn.
@@ -362,11 +362,12 @@ type Outcome struct {
 	// Text is the agent's final answer.
 	Text string `json:"text"`
 	// Prompt is the request message exactly as the model was sent it:
-	// trigger metadata, retrieved passages, and the tag's text. It is what
+	// trigger metadata, retrieved passages, and the request's text. It is what
 	// the thread journal records as the user's message, so that the next run
 	// in the thread replays the same bytes this one sent. An executor that
-	// leaves it empty has the tag's text recorded instead, which keeps the
-	// conversation and gives up the shared request prefix.
+	// leaves it empty has the trigger as the catalog renders it recorded
+	// instead, which keeps the conversation and gives up the shared request
+	// prefix.
 	Prompt string `json:"prompt,omitempty"`
 	// Chunks counts the event bodies produced.
 	Chunks int `json:"chunks"`
@@ -402,7 +403,7 @@ type Outcome struct {
 	Parked *agentrt.Parked `json:"parked,omitempty"`
 }
 
-// Acceptance is what a caller learns when a tag is accepted. It carries the
+// Acceptance is what a caller learns when a run is accepted. It carries the
 // tenant and channel the run publishes on, so the caller never derives them.
 type Acceptance struct {
 	RunID string
@@ -440,7 +441,7 @@ func DecodeEntry(raw []byte) (event.Envelope, error) {
 	return e, nil
 }
 
-// Runtime accepts tags and runs them durably.
+// Runtime accepts events and runs them durably.
 type Runtime struct {
 	client *anchor.Client
 	defs   Definitions
@@ -450,11 +451,11 @@ type Runtime struct {
 	logger *slog.Logger
 	now    func() time.Time
 
-	// threads is the conversation journal; nil runs every tag as a fresh
+	// threads is the conversation journal; nil runs every run as a fresh
 	// conversation. lister and messageID only matter when it is set.
 	threads   thread.Store
 	lister    thread.Lister
-	messageID func(envelope.Tag) string
+	messageID func(event.Envelope) string
 
 	// control is the bus as something to subscribe to, which is how a turn
 	// hears a stop request. Nil when the bus can only be published to.
@@ -472,7 +473,6 @@ type Runtime struct {
 	roles       Roles
 	reader      RecordReader
 	childRuns   bool
-	egress      Egress
 
 	registry *run.Registry
 	turn     *anchor.ActivityFn[Input, Output]
@@ -514,10 +514,10 @@ func WithClock(now func() time.Time) Option {
 }
 
 // WithThreads gives runs a memory: each run is shown the conversation so far
-// in its tag's thread and appends its own exchange when it completes. See
+// in its trigger's thread and appends its own exchange when it completes. See
 // "History is pinned the same way" in the package documentation.
 //
-// Without it, or with a nil store, every tag starts a fresh conversation and
+// Without it, or with a nil store, every run starts a fresh conversation and
 // nothing about a run changes.
 func WithThreads(store thread.Store) Option {
 	return func(r *Runtime) { r.threads = store }
@@ -529,23 +529,23 @@ func WithThreads(store thread.Store) Option {
 //
 // Reconciliation is best-effort at accept time. A surface that cannot be
 // listed is logged and the run pins what the journal already holds: refusing
-// a tag because a history API was slow would trade a complete answer for no
-// answer. The messages it missed are appended by the next accept.
+// an event because a history API was slow would trade a complete answer for
+// no answer. The messages it missed are appended by the next accept.
 //
-// Pair it with WithMessageID, or the message that raised each tag is
+// Pair it with WithMessageID, or the message that raised each run is
 // journaled twice: once as a message someone posted, once by its run.
 func WithReconciler(l thread.Lister) Option {
 	return func(r *Runtime) { r.lister = l }
 }
 
-// WithMessageID tells the runtime which surface message raised a tag: a Slack
-// timestamp, a GitHub comment id. The trigger knows it and usually carries it
-// in Tag.Meta, so this is a function rather than a field the runtime guesses
-// at. It returns "" when the tag has no such message.
+// WithMessageID tells the runtime which surface message raised a run: a Slack
+// timestamp, a GitHub comment id. The trigger's body carries it, and only the
+// host knows which field it is, so this is a function rather than a field the
+// runtime guesses at. It returns "" when the event has no such message.
 //
-// The id is recorded on the journal entry for the tag's request, which is how
+// The id is recorded on the journal entry for the run's request, which is how
 // a reconciliation recognizes that message as one the journal already holds.
-func WithMessageID(fn func(envelope.Tag) string) Option {
+func WithMessageID(fn func(event.Envelope) string) Option {
 	return func(r *Runtime) { r.messageID = fn }
 }
 
@@ -615,20 +615,6 @@ func New(client *anchor.Client, defs Definitions, b Bus, exec Executor, opts ...
 //	w := worker.New(ledger, queue, worker.WithRegistry(rt.Registry()))
 func (r *Runtime) Registry() *run.Registry { return r.registry }
 
-// Egress binds a run to where its events are delivered. Accept calls it
-// before it publishes anything, so the first event of the run has somewhere
-// to go. tenant and channel are where the run publishes.
-type Egress interface {
-	Bind(ctx context.Context, runID, tenant, channel string, trigger event.Envelope) error
-}
-
-// WithEgress sets what Accept binds a run's delivery with. Without it a run
-// accepted from an event publishes to the bus and is delivered nowhere.
-// AcceptTag never calls it: a tag's caller registers the tag's own routes.
-func WithEgress(e Egress) Option {
-	return func(r *Runtime) { r.egress = e }
-}
-
 // Accept starts the run of subscriber answering trigger, and is what the
 // dispatcher calls for each member an event wakes. The run id is
 // RunKey(tenant, trigger id, subscriber), so a redelivered event joins the
@@ -636,8 +622,9 @@ func WithEgress(e Egress) Option {
 //
 // Order matters, and it is not the obvious one. The definition is resolved
 // first, so an event for an unknown agent is refused rather than accepted and
-// then failed. Then the run is bound to its egress, then the accepted event
-// (sequence 1) is published, and only then is the run submitted: submitting
+// then failed. Then the accepted event (sequence 1) is published on the
+// trigger's channel, where egress adapters render it, and only then is the run
+// submitted: submitting
 // makes the run claimable, and a fast worker would otherwise publish started
 // first, and the bus treats a sequence at or below a run's high-water mark as
 // already seen, so an accepted event that lost that race would be dropped
@@ -663,33 +650,13 @@ func (r *Runtime) Accept(ctx context.Context, trigger event.Envelope, subscriber
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: no subscriber", trigger.ID, ErrInvalid)
 	}
 	runID := RunKey(trigger.Tenant, trigger.ID, subscriber)
-	in := Input{Trigger: trigger, Subscriber: subscriber, Run: runID}
-	return r.start(ctx, in, in.Tag(), "", true)
+	return r.start(ctx, Input{Trigger: trigger, Subscriber: subscriber, Run: runID}, "")
 }
 
-// AcceptTag pins a definition to the tag and durably submits the run. It is
-// the bridge for callers that still raise tags; its run id is RunID(tenant,
-// tag id), and it never binds egress, because the tag's caller registers the
-// tag's own routes. The tag is read as its trigger event (TriggerOf) before
-// anything is pinned: the run's input holds the event, never the tag.
-func (r *Runtime) AcceptTag(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
-	return r.accept(ctx, tag, nil, "")
-}
-
-// accept is AcceptTag for a run that may be another run's child. A child
-// runs the version its parent pinned for it.
-func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRef, version string) (Acceptance, error) {
-	if err := tag.Validate(); err != nil {
-		return Acceptance{}, fmt.Errorf("runtime: accept: %w", err)
-	}
-	in := Input{Trigger: TriggerOf(tag), Subscriber: tag.Agent, Parent: parent}
-	return r.start(ctx, in, tag, version, false)
-}
-
-// start resolves and pins the definition and history of in, then binds,
-// announces and submits the run, in that order (see Accept). tag is what the
-// thread journal reads the run as.
-func (r *Runtime) start(ctx context.Context, in Input, tag envelope.Tag, version string, bind bool) (Acceptance, error) {
+// start resolves and pins the definition and history of in, then announces
+// and submits the run, in that order (see Accept). A version pins that exact
+// version, for a child run.
+func (r *Runtime) start(ctx context.Context, in Input, version string) (Acceptance, error) {
 	id := in.Trigger.ID
 	if in.Subscriber == topic.ControlName {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", id, ErrInvalid, in.Subscriber)
@@ -714,18 +681,13 @@ func (r *Runtime) start(ctx context.Context, in Input, tag envelope.Tag, version
 
 	// The second pin. It is taken here, next to the definition's, because it
 	// is the same kind of fact: something that keeps moving, read once.
-	if in.HistorySeq, err = r.pinHistory(ctx, tag, runID); err != nil {
+	if in.HistorySeq, err = r.pinHistory(ctx, in, runID); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", id, err)
 	}
 
 	tenant := busTenant(in.Trigger.Tenant)
 	acc := Acceptance{RunID: runID, Version: pin.Version, Tenant: tenant, Channel: in.Trigger.Channel, AcceptedAt: r.now().UTC()}
 
-	if bind && r.egress != nil {
-		if err := r.egress.Bind(ctx, runID, tenant, in.Trigger.Channel, in.Trigger); err != nil {
-			return Acceptance{}, fmt.Errorf("runtime: accept %s: bind egress: %w", id, err)
-		}
-	}
 	e := r.event(in, SeqAccepted, event.Accepted{})
 	if err := r.bus.Publish(ctx, e); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", id, err)
@@ -824,7 +786,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	out.Text = said.String()
 
 	// The exchange joins the thread before the run is announced complete, so
-	// that a tag raised in reply to the answer always finds the answer in the
+	// that an event raised in reply to the answer always finds the answer in the
 	// history it pins. A replay appends nothing: the journal recognizes the
 	// run. A stopped run is remembered the same way, for the same reason: the
 	// reply to a stopped answer is the whole point of stopping gently.
@@ -986,21 +948,25 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 		return Outcome{}, err
 	}
 
-	tag := in.Tag()
+	text, meta := in.prompt()
+	source := ""
+	if a, ok := in.surface(); ok {
+		source = a.String()
+	}
 	req := Request{
 		RunID:      in.runID(),
 		Tenant:     in.Trigger.Tenant,
 		Attempt:    attempt,
-		Origin:     tag.Origin,
-		Source:     tag.Source.String(),
-		Text:       tag.Text,
-		Meta:       tag.Meta,
+		Origin:     in.Origin(),
+		Source:     source,
+		Text:       text,
+		Meta:       meta,
 		History:    history,
 		Definition: rev,
 		Pin:        in.Pin,
 		Policy:     loaded.Agent.Policy,
 
-		Attachments: tag.Attachments,
+		Attachments: in.request().Attachments,
 
 		// A question can be parked on only where its answer can be
 		// recorded: in the ledger the run lives in.
@@ -1026,7 +992,7 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	// that acts for a person (a tool source opening a session with that
 	// person's own credential) reads envelope.ActorFrom, and the Request,
 	// which a sandbox serializes into its task, never carries it.
-	execCtx = envelope.WithActor(execCtx, tag.Actor)
+	execCtx = envelope.WithActor(execCtx, in.Actor())
 	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
 		body, err := agentrt.BodyOf(c)
 		if err != nil {
@@ -1100,26 +1066,27 @@ func pinnedOf(l definition.Loaded) agentrt.Revision {
 	return agentrt.Revision{Name: l.Pin.Name, Version: l.Pin.Version, Digest: l.Pin.Digest, Spec: l.Agent.Spec}
 }
 
-// pinHistory returns the sequence number a run of tag is pinned to: the head
-// of its thread's journal, after the thread has been reconciled with its
-// surface. It is called once, by Accept, and is the only place this package
-// asks a journal where it ends.
-func (r *Runtime) pinHistory(ctx context.Context, tag envelope.Tag, runID string) (uint64, error) {
+// pinHistory returns the sequence number a run is pinned to: the head of its
+// thread's journal, after the thread has been reconciled with its surface. It
+// is called once, by Accept, and is the only place this package asks a
+// journal where it ends.
+func (r *Runtime) pinHistory(ctx context.Context, in Input, runID string) (uint64, error) {
 	if r.threads == nil {
 		return 0, nil
 	}
-	key := thread.KeyOf(tag)
+	key := thread.KeyOf(in.Trigger, in.Subscriber)
 	if err := key.Validate(); err != nil {
 		return 0, err
 	}
 	if r.lister != nil && !key.OneShot() {
 		var skip []string
-		if id := r.surfaceID(tag); id != "" {
+		if id := r.surfaceID(in); id != "" {
 			// The message being answered is the run's request, not its
 			// history.
 			skip = append(skip, id)
 		}
-		if err := thread.Reconcile(ctx, r.threads, r.lister, key, tag.Source, skip...); err != nil {
+		surface, _ := in.surface()
+		if err := thread.Reconcile(ctx, r.threads, r.lister, key, surface, skip...); err != nil {
 			r.logger.Warn("fiber/runtime: could not reconcile the thread with its surface; pinning what the journal holds",
 				"run_id", runID, "thread", key.String(), "error", err)
 		}
@@ -1143,7 +1110,7 @@ func (r *Runtime) pinnedHistory(ctx context.Context, in Input) ([]agentrt.Messag
 	if in.HistorySeq == 0 {
 		return nil, nil
 	}
-	key := thread.KeyOf(in.Tag())
+	key := thread.KeyOf(in.Trigger, in.Subscriber)
 	if r.threads == nil {
 		return nil, anchor.NonRetryable(fmt.Errorf(
 			"%w: run pinned %d entries of thread %s but this runtime has no thread store",
@@ -1211,12 +1178,12 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	// The request's files are journaled with it, as the references the run
 	// was handed, so a later run in the thread is shown them where this run
 	// was: after the request's text.
-	tag := in.Tag()
-	if said := firstNonEmpty(out.Prompt, tag.Text); strings.TrimSpace(said) != "" || len(tag.Attachments) > 0 {
+	files := in.request().Attachments
+	if said := firstNonEmpty(out.Prompt, in.rendered()); strings.TrimSpace(said) != "" || len(files) > 0 {
 		entries = append(entries, thread.Entry{
-			Role: thread.RoleUser, Text: said, Actor: tag.Actor,
-			RunID: runID, SurfaceID: r.surfaceID(tag), At: tag.At,
-			Attachments: tag.Attachments,
+			Role: thread.RoleUser, Text: said, Actor: in.Actor(),
+			RunID: runID, SurfaceID: r.surfaceID(in), At: in.Trigger.Time,
+			Attachments: files,
 		})
 	}
 	answer := out.Text
@@ -1235,19 +1202,19 @@ func (r *Runtime) remember(ctx context.Context, in Input, out Outcome) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	key := thread.KeyOf(tag)
+	key := thread.KeyOf(in.Trigger, in.Subscriber)
 	if _, err := r.threads.Append(ctx, key, entries...); err != nil {
 		return fmt.Errorf("runtime: run %s: record the exchange in thread %s: %w", runID, key, err)
 	}
 	return nil
 }
 
-// surfaceID is the id of the surface message that raised tag, or "".
-func (r *Runtime) surfaceID(tag envelope.Tag) string {
+// surfaceID is the id of the surface message that raised the run, or "".
+func (r *Runtime) surfaceID(in Input) string {
 	if r.messageID == nil {
 		return ""
 	}
-	return r.messageID(tag)
+	return r.messageID(in.Trigger)
 }
 
 func firstNonEmpty(values ...string) string {
@@ -1334,22 +1301,16 @@ func RunKey(tenant, eventID, subscriber string) string {
 	return "r" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
-// RunID is the run identity a tag maps to within one tenant.
+// RunID is the run identity of a child run within one tenant: its trigger's
+// id, which is derived from its parent and the wait it answers, so a retried
+// start joins the run the first one started. A run accepted from an event is
+// keyed by RunKey instead.
 //
-// A tag's id is the trigger's own event identity (a Slack event_id, a GitHub
-// delivery GUID, a schedule occurrence) and deriving the run id from it is
-// what makes a redelivery join the existing run instead of starting a second
-// one.
-//
-// The tenant is part of the identity, not a property checked afterwards. A tag
-// id is chosen by whoever raises the tag, and two tenants are free to choose
-// the same one. Everything downstream is keyed by the run id alone: the
-// ledger's idempotent start, the router's delivery bindings, the run's topic,
-// the thread journal. If the id did not carry the tenant, a second tenant
-// reusing a first tenant's tag id would join that tenant's run and replace
-// where its events are delivered. Filtering on the way out cannot repair
-// that, because the collision has already happened by the time anything is
-// read. Scoping the id means there is nothing to collide on.
+// The tenant is part of the identity, not a property checked afterwards: two
+// tenants are free to choose the same event id, and everything downstream is
+// keyed by the run id alone (the ledger's idempotent start, the run's channel
+// events, the thread journal). Scoping the id means there is nothing to
+// collide on.
 //
 // The id is a hash rather than the two values joined. It is a topic segment,
 // restricted to letters, digits, "-" and "_", and no separator from that

@@ -10,6 +10,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/thread/threadtest"
 )
@@ -171,7 +172,7 @@ func TestReconcileFailsClosed(t *testing.T) {
 
 	// A thread with no surface has nothing to list, and the lister is not
 	// asked.
-	oneShot := thread.KeyOf(envelope.Tag{ID: "Ev1", Tenant: tenantA, Agent: "docs-bot"})
+	oneShot := thread.KeyOf(event.Envelope{ID: "Ev1", Tenant: tenantA, Source: "test"}, "docs-bot")
 	if err := thread.Reconcile(ctx, s, down, oneShot, address.Address{}); err != nil {
 		t.Errorf("Reconcile of a one-shot thread = %v, want nil", err)
 	}

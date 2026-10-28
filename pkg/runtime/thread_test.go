@@ -124,10 +124,10 @@ func replayed(history []agentrt.Message) []string {
 
 // finish accepts a tag, lets the worker run it, and returns what the executor
 // was handed for it.
-func finish(t *testing.T, h *harness, tg envelope.Tag) runtime.Request {
+func finish(t *testing.T, h *harness, tg fixture) runtime.Request {
 	t.Helper()
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tg)
+	acc, err := accept(ctx, h.rt, tg)
 	if err != nil {
 		t.Fatalf("Accept(%s): %v", tg.ID, err)
 	}
@@ -181,14 +181,14 @@ func TestARunIsShownTheConversationSoFarInItsThread(t *testing.T) {
 
 	// The journal is the record: what the model was asked, then what it
 	// answered, attributed to who said it and the run that produced it.
-	got := journal(t, store, thread.KeyOf(tag("docs-bot", "any", "")))
+	got := journal(t, store, tag("docs-bot", "any", "").key())
 	if !reflect.DeepEqual(said(got), want) {
 		t.Fatalf("journal = %q, want %q", said(got), want)
 	}
-	if e := got[2]; e.RunID != runtime.RunID("acme", "Ev-thread-2") || e.Seq != 3 || !e.At.Equal(tag("docs-bot", "x", "").At) {
+	if e := got[2]; e.RunID != runtime.RunKey("acme", "Ev-thread-2", "docs-bot") || e.Seq != 3 || !e.At.Equal(tag("docs-bot", "x", "").At) {
 		t.Errorf("the second question was journaled as %+v", e)
 	}
-	if e := got[3]; e.RunID != runtime.RunID("acme", "Ev-thread-2") || !e.Actor.Bot || e.Actor.ID != "docs-bot" {
+	if e := got[3]; e.RunID != runtime.RunKey("acme", "Ev-thread-2", "docs-bot") || !e.Actor.Bot || e.Actor.ID != "docs-bot" {
 		t.Errorf("the second answer was journaled as %+v", e)
 	}
 }
@@ -203,11 +203,11 @@ func TestARunPinnedToAHistoryIsShownExactlyThatAfterTheThreadGrows(t *testing.T)
 	h := newHarness(t, newExecutor("answered"), runtime.WithThreads(store))
 	h.specs.revise("docs-bot", "v1")
 	tg := tag("docs-bot", "Ev-pin", "what did we decide?")
-	key := thread.KeyOf(tg)
+	key := tg.key()
 	exchange(t, store, key, "run-a", "first question", "first answer")
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tg)
+	acc, err := accept(ctx, h.rt, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestEveryAttemptOfARunIsShownTheSameHistory(t *testing.T) {
 	h := newHarness(t, exec, runtime.WithThreads(store))
 	h.specs.revise("docs-bot", "v1")
 	tg := tag("docs-bot", "Ev-attempts", "hello")
-	key := thread.KeyOf(tg)
+	key := tg.key()
 	exchange(t, store, key, "run-a", "first question", "first answer")
 
 	// Every attempt finds the thread longer than the attempt before it did:
@@ -294,16 +294,16 @@ func TestARedeliveredTagCannotRepinItsHistory(t *testing.T) {
 	h := newHarness(t, newExecutor("answered"), runtime.WithThreads(store))
 	h.specs.revise("docs-bot", "v1")
 	tg := tag("docs-bot", "Ev-redeliver", "hello")
-	key := thread.KeyOf(tg)
+	key := tg.key()
 	exchange(t, store, key, "run-a", "first question", "first answer")
 
 	ctx := context.Background()
-	first, err := h.rt.AcceptTag(ctx, tg)
+	first, err := accept(ctx, h.rt, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
 	exchange(t, store, key, "run-b", "second question", "second answer")
-	second, err := h.rt.AcceptTag(ctx, tg)
+	second, err := accept(ctx, h.rt, tg)
 	if err != nil {
 		t.Fatalf("Accept (redelivery): %v", err)
 	}
@@ -335,16 +335,16 @@ func TestACompletedRunAppendsItsExchangeExactlyOnce(t *testing.T) {
 	exec.prompt = func(req runtime.Request) string { return "Context from the trigger:\n- pr: 7\n\n" + req.Text }
 	h := newHarness(t, exec,
 		runtime.WithThreads(store),
-		runtime.WithMessageID(func(tg envelope.Tag) string { return tg.Meta["slack_ts"] }),
+		runtime.WithMessageID(func(e event.Envelope) string { return contextOf(e, "slack_ts") }),
 	)
 	h.specs.revise("docs-bot", "v1")
 	tg := tag("docs-bot", "Ev-once", "hello")
 	tg.Meta = map[string]string{"slack_ts": "1699.042"}
 	tg.Actor = envelope.Actor{ID: "U1", Display: "ada"}
-	key := thread.KeyOf(tg)
+	key := tg.key()
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tg)
+	acc, err := accept(ctx, h.rt, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestHistoryIsNotSharedAcrossTenantAgentOrSurface(t *testing.T) {
 	noSurfaceAgain := tag("docs-bot", "Ev-cron-2", "nightly")
 	noSurfaceAgain.Source = address.Address{}
 
-	for name, tg := range map[string]envelope.Tag{
+	for name, tg := range map[string]fixture{
 		"another agent in the same surface thread": otherAgent,
 		"another tenant":               otherTenant,
 		"another surface":              otherThread,
@@ -433,7 +433,7 @@ func TestHistoryIsNotSharedAcrossTenantAgentOrSurface(t *testing.T) {
 		t.Errorf("a tag on the same surface with a new head_sha was shown %d messages, want the 4 already said", len(got))
 	}
 	// A one-shot thread is still recorded, under its own tag.
-	if got := said(journal(t, store, thread.KeyOf(noSurface))); !reflect.DeepEqual(got, []string{"user: nightly", "assistant: answered"}) {
+	if got := said(journal(t, store, noSurface.key())); !reflect.DeepEqual(got, []string{"user: nightly", "assistant: answered"}) {
 		t.Errorf("a one-shot thread's journal = %q", got)
 	}
 }
@@ -457,7 +457,7 @@ func TestTagsRaisedTogetherInOneThreadKeepTheirExchangesWhole(t *testing.T) {
 	ctx := context.Background()
 	ids := make([]string, tags)
 	for i := range ids {
-		acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", fmt.Sprintf("Ev-together-%02d", i), "hello"))
+		acc, err := accept(ctx, h.rt, tag("docs-bot", fmt.Sprintf("Ev-together-%02d", i), "hello"))
 		if err != nil {
 			t.Fatalf("Accept: %v", err)
 		}
@@ -490,7 +490,7 @@ func TestTagsRaisedTogetherInOneThreadKeepTheirExchangesWhole(t *testing.T) {
 			t.Errorf("run %s was accepted into an empty thread and was shown %q", req.RunID, replayed(req.History))
 		}
 	}
-	got := journal(t, store, thread.KeyOf(tag("docs-bot", "x", "")))
+	got := journal(t, store, tag("docs-bot", "x", "").key())
 	if len(got) != tags*2 {
 		t.Fatalf("journal holds %d entries, want %d: an entry was lost or written twice", len(got), tags*2)
 	}
@@ -523,7 +523,7 @@ func TestWithoutAThreadStoreARunIsWhatItAlwaysWas(t *testing.T) {
 		if req.History != nil {
 			t.Errorf("%s was shown a history with no thread store: %q", id, replayed(req.History))
 		}
-		body, _, err := h.ledger.Load(ctx, runtime.RunID("acme", id))
+		body, _, err := h.ledger.Load(ctx, runtime.RunKey("acme", id, "docs-bot"))
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -585,10 +585,10 @@ func TestAJournalThatLostWhatARunPinnedFailsTheRunTerminally(t *testing.T) {
 	h := newHarness(t, newExecutor("answered"), runtime.WithThreads(store))
 	h.specs.revise("docs-bot", "v1")
 	tg := tag("docs-bot", "Ev-lost", "hello")
-	exchange(t, store, thread.KeyOf(tg), "run-a", "first question", "first answer")
+	exchange(t, store, tg.key(), "run-a", "first question", "first answer")
 
 	ctx := context.Background()
-	acc, err := h.rt.AcceptTag(ctx, tg)
+	acc, err := accept(ctx, h.rt, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestAFailedJournalAppendIsRetriedWithoutPayingForTheModelAgain(t *testing.T
 	if n := h.exec.count(); n != 1 {
 		t.Errorf("the executor ran %d times, want 1: the retry must reuse the memoized answer", n)
 	}
-	if got := said(journal(t, store, thread.KeyOf(tg))); !reflect.DeepEqual(got, []string{"user: hello", "assistant: answered"}) {
+	if got := said(journal(t, store, tg.key())); !reflect.DeepEqual(got, []string{"user: hello", "assistant: answered"}) {
 		t.Fatalf("journal = %q, want the exchange recorded by the retry", got)
 	}
 	failed := h.bus.ofKind(event.TypeFailed)
@@ -660,22 +660,23 @@ func TestTheThreadIsReconciledWithItsSurfaceBeforeHistoryIsPinned(t *testing.T) 
 	h := newHarness(t, newExecutor("try make rollback"),
 		runtime.WithThreads(store),
 		runtime.WithReconciler(surface),
-		runtime.WithMessageID(func(tg envelope.Tag) string { return tg.Meta["message_id"] }),
+		// The surface's message id is the event's id, as Slack's ts is.
+		runtime.WithMessageID(func(e event.Envelope) string { return e.ID }),
 	)
 	h.specs.revise("docs-bot", "v1")
 	h.work(t)
 
-	raise := func(id, who, text string) envelope.Tag {
-		tg := tag("docs-bot", id, text)
+	raise := func(who, text string) fixture {
+		tg := tag("docs-bot", "", text)
 		tg.Actor = envelope.Actor{ID: who, Display: who}
-		tg.Meta = map[string]string{"message_id": surface.Post(tg.Tenant, tg.Source, who, "@docs-bot "+text)}
+		tg.ID = surface.Post(tg.Tenant, tg.Source, who, "@docs-bot "+text)
 		return tg
 	}
 	source := tag("docs-bot", "x", "").Source
 
 	surface.Post("acme", source, "ada", "the deploy failed")
 	surface.Post("acme", source, "grace", "at the migrate stage")
-	first := raise("Ev-rec-1", "ada", "what should we do?")
+	first := raise("ada", "what should we do?")
 	req := finish(t, h, first)
 	if got, want := replayed(req.History), []string{"user: ada: the deploy failed", "user: grace: at the migrate stage"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the first run was shown %q, want what was said before it, %q", got, want)
@@ -686,7 +687,7 @@ func TestTheThreadIsReconciledWithItsSurfaceBeforeHistoryIsPinned(t *testing.T) 
 	// then the agent is tagged again.
 	surface.PostOwn("acme", source, "try make rollback")
 	late := surface.Post("acme", source, "grace", "that worked")
-	second := raise("Ev-rec-2", "grace", "why did it fail?")
+	second := raise("grace", "why did it fail?")
 	req = finish(t, h, second)
 	want := []string{
 		"user: ada: the deploy failed",
@@ -701,22 +702,22 @@ func TestTheThreadIsReconciledWithItsSurfaceBeforeHistoryIsPinned(t *testing.T) 
 
 	// A message posted after the tag was accepted is not in that run's
 	// history, and an edit or a delete rewrites nothing.
-	before := journal(t, store, thread.KeyOf(first))
+	before := journal(t, store, first.key())
 	surface.Edit("acme", source, late, "that did not work after all")
 	surface.Delete("acme", source, first.Meta["message_id"])
-	third := raise("Ev-rec-3", "ada", "anything else?")
+	third := raise("ada", "anything else?")
 	req = finish(t, h, third)
 	if got := replayed(req.History); !reflect.DeepEqual(got[:len(want)], want) || len(got) != len(want)+2 {
 		t.Fatalf("after an edit and a delete the third run was shown %q, want the earlier history unchanged plus the second exchange", got)
 	}
-	if after := journal(t, store, thread.KeyOf(first)); !reflect.DeepEqual(after[:len(before)], before) {
+	if after := journal(t, store, first.key()); !reflect.DeepEqual(after[:len(before)], before) {
 		t.Fatalf("an edit or delete on the surface rewrote the journal:\n got %+v\nwant %+v", after[:len(before)], before)
 	}
 
 	// A surface that cannot be listed does not refuse the tag. The run pins
 	// what the journal already holds.
 	surface.Fail(errors.New("slack is down"))
-	held := len(journal(t, store, thread.KeyOf(first)))
+	held := len(journal(t, store, first.key()))
 	fourth := tag("docs-bot", "Ev-rec-4", "still there?")
 	if got := finish(t, h, fourth).History; len(got) != held {
 		t.Fatalf("with the surface down the run was shown %d messages, want the %d the journal holds", len(got), held)

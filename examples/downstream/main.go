@@ -30,9 +30,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
-	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -82,22 +80,27 @@ func run() error {
 		return err
 	}
 
-	// Watch the channel the tag is raised on, then raise it the way any
-	// trigger would.
-	tag := envelope.Tag{
-		ID: fmt.Sprintf("downstream-%d", time.Now().UnixNano()), Tenant: tenant,
-		Agent: "oncall", Origin: "downstream", Text: "api is down", At: time.Now(),
+	// Watch the channel the request is posted on, then accept the run the
+	// way the dispatcher would for a member of that channel.
+	trigger := event.Envelope{
+		ID:      fmt.Sprintf("downstream-%d", time.Now().UnixNano()),
+		Source:  "downstream:" + tenant,
+		Type:    event.TypeMessagePosted,
+		Channel: "downstream://" + tenant + "/oncall",
+		Time:    time.Now().UTC(),
+		Tenant:  tenant,
+		Data:    event.MessagePosted{Request: event.Request{Text: "api is down", Mentions: []string{"oncall"}}},
 	}
 	stream, err := app.Bus().Subscribe(ctx, bus.Subscription{
-		Tenant:   runtime.TenantOf(tag),
-		Channels: []string{runtime.ChannelOf(tag)},
+		Tenant:   trigger.Tenant,
+		Channels: []string{trigger.Channel},
 		Types:    []string{"run"},
 	})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stream.Close() }()
-	acc, err := app.Invoke(ctx, tag)
+	acc, err := app.Runtime().Accept(ctx, trigger, "oncall")
 	if err != nil {
 		return err
 	}

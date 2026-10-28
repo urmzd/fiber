@@ -1,37 +1,15 @@
-// Package envelope is the contract every fiber client speaks, independent
-// of transport. gRPC, SSE, and the in-process path all carry these types.
-//
-// Two directions:
-//
-//	Tag    a request to an agent, raised by a trigger
-//	Event  something an agent produced, delivered to sinks and observers
-//
-// The asymmetry between triggers and sinks is deliberate. A trigger is
-// something that can raise a tag (a Slack mention, a GitHub review request, a
-// cron schedule). A sink is something an event can be delivered to (a Slack
-// thread, a GitHub comment, an outbound webhook). Most connectors are both,
-// but not all: cron only triggers, and an outbound webhook is only a sink.
-// Because the two roles are independent, a tag raised in GitHub can deliver
-// into Jira, and a schedule with no origin surface at all can deliver into
-// both.
-//
-// Delivery is N:M and selective. One tag fans out to many sinks; one sink
-// serves many agents. Each route chooses its own event kinds, so the GitHub
-// connector can stream every delta into a comment it keeps editing while a
-// separate webhook receives only the terminal event and learns nothing about
-// the intermediate steps.
+// Package envelope holds what is left of fiber's wire contract from before
+// the event union: the old event kinds, the old Event, Filter and
+// Subscription, and the actor a context acts for. A run is started by an
+// event (pkg/event), never by a tag, and delivered by egress adapters that
+// subscribe to channels (pkg/egress), never by routes.
 package envelope
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/event"
-	"github.com/urmzd/fiber/pkg/event/legacy"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -138,156 +116,6 @@ func (k Kind) Matches(sel string) bool {
 // Actor is the human or system that raised a tag. It is event.Actor.
 type Actor = event.Actor
 
-// Route is one delivery instruction: where to send events, and which ones.
-//
-// Kinds is a set of selectors matched against Event.Kind. An empty Kinds
-// means every kind except the usage and context families (see OptIn). This is what makes a
-// single run serve both a connector rendering a live stream and a webhook
-// that only wants the outcome.
-type Route struct {
-	Target address.Address `json:"target"`
-	Kinds  []string        `json:"kinds,omitempty"`
-}
-
-// OptIn reports whether a route must name k's family or k itself to receive
-// it. The usage family is opt-in: it was added after routes with no kind
-// filter were already delivering to receivers that knew a fixed set of kinds,
-// and an event per model call that such a receiver refuses, or fails on and
-// has retried in the run's ordered delivery lane, would cost every route that
-// never asked for it. As the root topic does not cover the control namespace,
-// "everything" does not cover accounting. The context family is opt-in for the
-// same reason: it arrived later, and it reports on the run's context rather
-// than on the conversation a receiver renders.
-func (k Kind) OptIn() bool {
-	switch k.Family() {
-	case "usage", "context":
-		return true
-	}
-	return false
-}
-
-// Wants reports whether an event of type typ should be delivered on this
-// route. A selector is an old kind or kind family ("delta", "usage.call"),
-// read through the legacy table, or a type prefix ("run.delta"). An opt-in
-// type (event.Entry.OptIn) is delivered only to a route that names its family.
-// An empty Kinds selects every run type that is not opt-in.
-func (r Route) Wants(typ string) bool {
-	if len(r.Kinds) == 0 {
-		return event.Selects("run", typ)
-	}
-	for _, sel := range r.Kinds {
-		if sel == "" {
-			if event.Selects("run", typ) {
-				return true
-			}
-			continue
-		}
-		prefixes, err := legacy.KindSelector(sel)
-		if err != nil {
-			prefixes = []string{sel}
-		}
-		for _, p := range prefixes {
-			if event.Selects(p, typ) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// Validate checks that the route names a usable target.
-func (r Route) Validate() error {
-	if r.Target.IsZero() {
-		return fmt.Errorf("%w: route has no target", ErrInvalid)
-	}
-	return nil
-}
-
-// Tag is a request to an agent. It is the canonical form every trigger
-// translates into, and the only thing the core accepts as work.
-type Tag struct {
-	// ID is the trigger-native event identifier: a Slack event_id, a GitHub
-	// delivery GUID, a schedule occurrence. It becomes the run's idempotency
-	// key, so a webhook redelivery joins the existing run instead of starting
-	// a second one.
-	ID string `json:"id"`
-
-	// Tenant scopes the tag. fiber trusts it as given, so a program that
-	// accepts tags from callers sets it from the caller's credential and
-	// never from the wire.
-	Tenant string `json:"tenant"`
-
-	// Agent is the name that was tagged.
-	Agent string `json:"agent"`
-
-	// Origin is the trigger that raised this tag ("slack", "github", "cron").
-	Origin string `json:"origin"`
-
-	// Source is where the tag came from, and the natural place to answer if
-	// no route says otherwise. Zero for triggers with no addressable surface,
-	// such as a schedule.
-	Source address.Address `json:"source,omitempty"`
-
-	// Text is the request, with the agent mention already stripped.
-	Text string `json:"text"`
-
-	// Actor raised the tag.
-	Actor Actor `json:"actor,omitempty"`
-
-	// Deliver lists every destination for this run's events. Empty means
-	// answer in place, at Source.
-	Deliver []Route `json:"deliver,omitempty"`
-
-	// Meta carries trigger-specific context the agent's tools may need: a
-	// pull request number, an issue title, a Jira status. Each key is shown
-	// to the model as context from the trigger, except a private one
-	// (PrivateMeta), which only the host reads.
-	Meta map[string]string `json:"meta,omitempty"`
-
-	// Attachments are the files that arrived with the tag, as references
-	// into the blob store. They are omitted when empty so that the durable
-	// input of a run with no files is byte for byte what it always was.
-	Attachments []attachment.Attachment `json:"attachments,omitempty"`
-
-	// At is when the trigger observed the event.
-	At time.Time `json:"at"`
-}
-
-// Validate checks the fields the core requires to start a run.
-func (t Tag) Validate() error {
-	switch {
-	case t.ID == "":
-		return fmt.Errorf("%w: tag has no id, which is its idempotency key", ErrInvalid)
-	case t.Agent == "":
-		return fmt.Errorf("%w: tag names no agent", ErrInvalid)
-	case t.Origin == "":
-		return fmt.Errorf("%w: tag has no origin", ErrInvalid)
-	}
-	for i, r := range t.Deliver {
-		if err := r.Validate(); err != nil {
-			return fmt.Errorf("%w (route %d)", err, i)
-		}
-	}
-	if err := attachment.ValidateAll(t.Attachments); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalid, err)
-	}
-	return nil
-}
-
-// Routes returns the tag's delivery routes, falling back to answering in
-// place at Source when none were given. A tag with neither routes nor a
-// source produces no routes: the run still executes and still publishes to
-// the bus, it simply has nowhere to be rendered.
-func (t Tag) Routes() []Route {
-	if len(t.Deliver) > 0 {
-		return t.Deliver
-	}
-	if t.Source.IsZero() {
-		return nil
-	}
-	return []Route{{Target: t.Source}}
-}
-
 // Event is one thing an agent produced. Every event, of every kind, travels
 // the same path: published to its run's topic, seen by every prefix
 // subscriber, and delivered to whichever routes want its kind.
@@ -387,12 +215,3 @@ func (s Subscription) Accepts(e Event) bool {
 	}
 	return s.Filter.Allows(e)
 }
-
-// PrivateMetaPrefix starts a Meta key that belongs to the host, not to the
-// model: a decision the host pinned on the run, such as which sources ground
-// it. It is kept wherever the tag is (the ledger, events, the run's record)
-// and is never written into anything a model is sent.
-const PrivateMetaPrefix = "_"
-
-// PrivateMeta reports whether a Meta key is the host's own (PrivateMetaPrefix).
-func PrivateMeta(key string) bool { return strings.HasPrefix(key, PrivateMetaPrefix) }

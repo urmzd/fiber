@@ -1,15 +1,15 @@
 package slack_test
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
-	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/connectors/slack"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // invocation is a slash command request as Slack documents it.
@@ -46,8 +46,8 @@ func command(t *testing.T, body string) *http.Request {
 	return r
 }
 
-func TestASlashCommandBecomesATagForTheDefaultAgent(t *testing.T) {
-	c, tags := start(t, slack.Config{DefaultAgent: "docs-bot"})
+func TestASlashCommandPublishesAnInvocationOnItsChannel(t *testing.T) {
+	c, tags := start(t, slack.Config{Tenant: "acme"})
 
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, command(t, invocation(nil)))
@@ -55,32 +55,36 @@ func TestASlashCommandBecomesATagForTheDefaultAgent(t *testing.T) {
 		t.Fatalf("status = %d body = %q, want an empty 200", w.Code, w.Body)
 	}
 
-	tag := <-tags
-	if err := tag.Validate(); err != nil {
-		t.Fatalf("tag is not valid: %v", err)
+	e := receive(t, tags)
+	b, ok := e.Data.(event.SlackCommandInvoked)
+	if !ok {
+		t.Fatalf("published %s, want %s", e.Type, event.TypeSlackCommandInvoked)
 	}
-	if tag.Agent != "docs-bot" {
-		t.Errorf("agent = %q", tag.Agent)
+	if e.ID != "command:13345224609.738474920.8088930838d88f008e0" || e.Tenant != "acme" {
+		t.Errorf("id, tenant = %q, %q", e.ID, e.Tenant)
 	}
-	if tag.Text != "/create-pr Fix the flaky login test" {
-		t.Errorf("text = %q, want the invocation as a human would have typed it", tag.Text)
+	if b.Text != "/create-pr Fix the flaky login test" {
+		t.Errorf("text = %q, want the invocation as a human would have typed it", b.Text)
 	}
-	if got := tag.Source.String(); got != "slack://T01ABCDEF/C09CODE" {
-		t.Errorf("source = %q, want the code channel with no thread", got)
+	if e.Channel != "slack://T01ABCDEF/C09CODE" || e.Source != e.Channel {
+		t.Errorf("channel = %q source = %q, want the code channel with no thread", e.Channel, e.Source)
 	}
-	if tag.Actor.ID != "U02HUMAN" {
-		t.Errorf("actor = %q", tag.Actor.ID)
+	if b.Actor.ID != "U02HUMAN" || b.User != "U02HUMAN" {
+		t.Errorf("actor = %q user = %q", b.Actor.ID, b.User)
 	}
-	if tag.Meta["slack_command"] != "/create-pr" || tag.Meta["slack_event"] != "slash_command" {
-		t.Errorf("meta = %v", tag.Meta)
+	if b.Command != "/create-pr" || b.Team != "T01ABCDEF" || b.Channel != "C09CODE" || b.AppID != "A01APP" {
+		t.Errorf("body = %+v", b)
 	}
-	if !tag.At.Equal(signedAt) {
-		t.Errorf("at = %v, want the signed request time %v", tag.At, signedAt)
+	if len(b.Mentions) != 0 {
+		t.Errorf("mentions = %v, want none: the channel's members decide", b.Mentions)
+	}
+	if !e.Time.Equal(signedAt) {
+		t.Errorf("time = %v, want the signed request time %v", e.Time, signedAt)
 	}
 }
 
-func TestReplayingAnInvocationRaisesTheSameTag(t *testing.T) {
-	c, tags := start(t, slack.Config{DefaultAgent: "docs-bot"})
+func TestReplayingAnInvocationPublishesTheSameEvent(t *testing.T) {
+	c, tags := start(t, slack.Config{})
 
 	var ids []string
 	for range 2 {
@@ -92,42 +96,19 @@ func TestReplayingAnInvocationRaisesTheSameTag(t *testing.T) {
 	}
 }
 
-func TestASlashCommandCanNameItsAgentInTheText(t *testing.T) {
-	c, tags := start(t, slack.Config{
-		Agents:       mention.NewNames("docs-bot", "release-bot"),
-		DefaultAgent: "docs-bot",
-	})
+func TestASlashCommandCanMentionABot(t *testing.T) {
+	c, tags := start(t, slack.Config{Bots: map[string]string{"U08REL": "release-bot"}})
 
-	c.ServeHTTP(httptest.NewRecorder(), command(t, invocation(map[string]string{"text": "@release-bot cut 1.2"})))
+	c.ServeHTTP(httptest.NewRecorder(), command(t, invocation(map[string]string{"text": "<@U08REL> cut 1.2"})))
 
-	tag := <-tags
-	if tag.Agent != "release-bot" || tag.Text != "/create-pr cut 1.2" {
-		t.Errorf("agent = %q text = %q", tag.Agent, tag.Text)
-	}
-}
-
-func TestASlashCommandNobodyAnswersSaysSoToItsInvoker(t *testing.T) {
-	c, tags := start(t, slack.Config{})
-
-	w := httptest.NewRecorder()
-	c.ServeHTTP(w, command(t, invocation(nil)))
-
-	var reply map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
-		t.Fatalf("body %q is not JSON: %v", w.Body, err)
-	}
-	if w.Code != http.StatusOK || reply["response_type"] != "ephemeral" || !strings.Contains(reply["text"], "/create-pr") {
-		t.Errorf("status = %d reply = %v", w.Code, reply)
-	}
-	select {
-	case tag := <-tags:
-		t.Errorf("a command with no agent raised %+v", tag)
-	default:
+	b := receive(t, tags).Data.(event.SlackCommandInvoked)
+	if !slices.Equal(b.Mentions, []string{"release-bot"}) || b.Text != "/create-pr cut 1.2" {
+		t.Errorf("mentions = %v text = %q", b.Mentions, b.Text)
 	}
 }
 
 func TestAnUnsignedSlashCommandIsRefusedBeforeItIsParsed(t *testing.T) {
-	c, tags := start(t, slack.Config{DefaultAgent: "docs-bot"})
+	c, tags := start(t, slack.Config{})
 
 	cases := map[string]func(*http.Request){
 		"no signature":    func(r *http.Request) { r.Header.Del("X-Slack-Signature") },
@@ -149,14 +130,14 @@ func TestAnUnsignedSlashCommandIsRefusedBeforeItIsParsed(t *testing.T) {
 		})
 	}
 	select {
-	case tag := <-tags:
-		t.Errorf("an unauthenticated command raised %+v", tag)
+	case e := <-tags:
+		t.Errorf("an unauthenticated command published %+v", e)
 	default:
 	}
 }
 
-func TestMalformedInvocationsRaiseNoTag(t *testing.T) {
-	c, tags := start(t, slack.Config{DefaultAgent: "docs-bot"})
+func TestMalformedInvocationsPublishNothing(t *testing.T) {
+	c, tags := start(t, slack.Config{})
 
 	for _, missing := range []string{"team_id", "channel_id", "user_id", "trigger_id", "command"} {
 		t.Run(missing, func(t *testing.T) {
@@ -168,8 +149,8 @@ func TestMalformedInvocationsRaiseNoTag(t *testing.T) {
 		})
 	}
 	select {
-	case tag := <-tags:
-		t.Errorf("a malformed command raised %+v", tag)
+	case e := <-tags:
+		t.Errorf("a malformed command published %+v", e)
 	default:
 	}
 }

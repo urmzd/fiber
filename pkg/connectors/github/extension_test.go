@@ -14,7 +14,7 @@ var commitSHA = strings.Repeat("a", 40)
 
 func TestApplicationPolicyOnlySeesVerifiedAndAllowedEvents(t *testing.T) {
 	calls := 0
-	c, _ := start(t, github.Config{Owners: []string{"acme"}, Automation: func(github.Hook) (string, string, bool) { calls++; return "reviewer", "review", true }})
+	c, _ := start(t, github.Config{Owners: []string{"acme"}, Automation: func(github.Hook) (string, bool) { calls++; return "review", true }})
 	body := `{"action":"labeled","repository":{"name":"repo","owner":{"login":"acme"}},"sender":{"type":"User"},"issue":{"number":42},"label":{"name":"auto"}}`
 	unsigned := httptest.NewRequest("POST", "/github", strings.NewReader(body))
 	c.ServeHTTP(httptest.NewRecorder(), unsigned)

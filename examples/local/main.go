@@ -13,7 +13,7 @@
 //	model           saige's agenttest.ScriptedProvider, reached through the
 //	                agent's own "offline" provider — the agent loop, the typed
 //	                deltas and the translation to events are all the real ones
-//	connectors      two fakes in fakes.go, implementing connector.Sink exactly
+//	connectors      two fakes in fakes.go, implementing connector.Subscriber exactly
 //
 // fiber.New assembles them, in process; the options it is given say
 // which pieces this file replaces. None of those are stubs standing in for
@@ -46,10 +46,9 @@ import (
 	"github.com/urmzd/anchor/pkg/worker"
 
 	"github.com/urmzd/fiber"
-	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/definition"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/egress"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
@@ -59,6 +58,9 @@ import (
 // a real deployment and is never on the wire and never a topic segment: an
 // agent is addressed as agent:docs-bot, not agent:acme:docs-bot.
 const tenant = "acme"
+
+// issue is the GitHub issue the demo request arrives on.
+const issue = "github://acme/handbook/issues/42"
 
 // author is who the control plane attributes these definitions to.
 const author = "ada@acme.test"
@@ -83,7 +85,7 @@ const demoStride = 100
 // quiet sends every library log line to /dev/null. The story here is told by
 // fmt.Println, and interleaving it with operational logging would bury it.
 // Section 7 deliberately induces a failure, so this also suppresses the very
-// real error the router and worker log about it.
+// real error egress and the worker log about it.
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // fixedClock stamps events so two runs of this example print the same thing.
@@ -113,7 +115,7 @@ func run() error {
 	store := definition.NewMemory(definition.WithClock(fixedClock))
 
 	// The broker. Runs publish here; everything else subscribes. flakyBus
-	// wraps it for section 7 and forwards Subscribe untouched, so the router
+	// wraps it for section 7 and forwards Subscribe untouched, so egress
 	// and the observer below read the real broker.
 	broker := bus.NewMemory()
 	published := newFlakyBus(broker)
@@ -162,7 +164,7 @@ func run() error {
 		"To roll back, re-run the previous tag's workflow rather than reverting by hand [2].",
 	))
 
-	// fiber.New is the composition root: it wires the router (another bus
+	// fiber.New is the composition root: it wires egress (another bus
 	// subscriber, which is why origin and destination stay independent),
 	// the durable runtime on anchor's in-memory ledger and queue, and the
 	// worker that pulls runs off the queue. Every piece this example
@@ -180,6 +182,9 @@ func run() error {
 			runtime.WithClock(fixedClock),
 			runtime.WithLogger(quiet),
 		),
+		// Egress drops events older than its max age; this demo's clock is
+		// fixed, so egress reads the same clock.
+		fiber.WithEgressOptions(egress.WithClock(fixedClock)),
 		fiber.WithWorkerOptions(
 			worker.WithJanitorEvery(0),
 			worker.WithLeaseTTL(2*time.Second),
@@ -249,51 +254,38 @@ func run() error {
 	// ── 3 ───────────────────────────────────────────────────────────
 	section(3, "ORIGIN AND DESTINATION ARE INDEPENDENT   ← the mesh thesis")
 
-	// A tag is the canonical request every trigger translates into. This one
-	// is what the GitHub connector would produce from an issue comment that
+	// An event is the canonical request every trigger publishes. This one is
+	// what the GitHub connector would publish for an issue comment that
 	// mentions @docs-bot; ID is GitHub's delivery GUID, which becomes the
 	// run's idempotency key, so a webhook redelivery JOINS the run it
 	// duplicated instead of starting a second one.
-	tag := envelope.Tag{
-		ID:     "gh-72d3162e-cc78",
-		Tenant: tenant,
-		Agent:  "docs-bot",
-		Origin: "github",
-		Source: address.MustParse("github://acme/handbook/issues/42"),
-		Text:   "how does a release actually get out the door?",
-		Actor:  envelope.Actor{ID: "U_ada", Display: "Ada"},
-		At:     fixedClock(),
-
-		// Deliver is where this run's events go. Neither of these is where
-		// the tag came from, and neither knows about the other.
-		Deliver: []envelope.Route{
-			{
-				// Every kind: this sink renders the live stream.
-				Target: address.MustParse("slack://T01/C02?thread=1699.001"),
+	trigger := event.Envelope{
+		ID:      "gh-72d3162e-cc78",
+		Source:  issue,
+		Type:    event.TypeGitHubIssueCommentCreated,
+		Channel: issue,
+		Time:    fixedClock(),
+		Tenant:  tenant,
+		Data: event.GitHubIssueCommentCreated{
+			Request: event.Request{
+				Text:     "how does a release actually get out the door?",
+				Actor:    event.Actor{ID: "U_ada", Display: "Ada"},
+				Mentions: []string{"docs-bot"},
 			},
-			{
-				// One kind: this sink only learns that the work landed.
-				Target: address.MustParse("webhook://acme/deploys"),
-				Kinds:  []string{"lifecycle.completed"},
-			},
+			GitHubRef: event.GitHubRef{Owner: "acme", Repo: "handbook", Number: 42, Sender: "ada"},
 		},
-		Meta: map[string]string{"issue": "42", "repo": "acme/handbook"},
 	}
 
-	fmt.Printf("  raised in   %-42s  (origin %q)\n", tag.Source, tag.Origin)
+	fmt.Printf("  raised in   %s\n", trigger.Channel)
 	fmt.Println("  answered in")
-	for _, r := range tag.Routes() {
-		kinds := "every kind"
-		if len(r.Kinds) > 0 {
-			kinds = strings.Join(r.Kinds, ", ")
-		}
-		fmt.Printf("              %-42s  %s\n", r.Target, kinds)
+	for _, sub := range append(slack.Subscriptions(), hook.Subscriptions()...) {
+		fmt.Printf("              %-42s  %s\n", sub.Target, strings.Join(sub.Types, ", "))
 	}
 	fmt.Println()
 	fmt.Println("  the trigger is GitHub. neither destination is GitHub.")
-	fmt.Println("  no component on this path holds both ends: the trigger writes a Tag,")
-	fmt.Println("  the run publishes Events, and the router — just another subscriber —")
-	fmt.Println("  renders them onto whatever the routes named. that indirection is the")
+	fmt.Println("  no component on this path holds both ends: the trigger publishes an")
+	fmt.Println("  event, the run publishes events on the same channel, and each sink")
+	fmt.Println("  subscribes to the channels it renders. that indirection is the")
 	fmt.Println("  difference between a mesh and a pile of integrations.")
 
 	// The third party attaches BEFORE anything is accepted, on the agent
@@ -301,7 +293,7 @@ func run() error {
 	// one without ever being told either exists. Section 5 reads its log.
 	watcher := &observer{}
 	watching, err := watcher.watch(ctx, broker, bus.Subscription{
-		Tenant:   runtime.TenantOf(tag),
+		Tenant:   tenant,
 		Channels: []string{"github://", "cron://"},
 		Types:    []string{"run"},
 	})
@@ -313,18 +305,16 @@ func run() error {
 	section(4, "ONE RUN, TWO SINKS, TWO GRANULARITIES   ← N:M selectivity")
 
 	fmt.Println("  slack   takes every kind and edits one message as the answer arrives")
-	fmt.Println("  webhook takes lifecycle.completed only and posts exactly once")
+	fmt.Println("  webhook takes run.completed only and posts exactly once")
 	fmt.Println()
 
-	// Invoke registers the run's routes with the router first (an event for
-	// a run it has no routes for has nowhere to go), then accepts: it pins
-	// the version, publishes the accepted event, and submits the run
-	// durably. From here the process could be killed and restarted and the
-	// run would still finish.
-	meshRun := runtime.RunID(tag.Tenant, tag.ID)
-	acc, err := app.Invoke(ctx, tag)
+	// Accept pins the version, publishes the accepted event, and submits
+	// the run durably. From here the process could be killed and restarted
+	// and the run would still finish.
+	meshRun := runtime.RunKey(tenant, trigger.ID, "docs-bot")
+	acc, err := app.Runtime().Accept(ctx, trigger, "docs-bot")
 	if err != nil {
-		return fmt.Errorf("accept tag: %w", err)
+		return fmt.Errorf("accept: %w", err)
 	}
 	fmt.Printf("  accepted run %s on channel %s, pinned to version %s\n\n",
 		acc.RunID, acc.Channel, acc.Version)
@@ -360,8 +350,8 @@ func run() error {
 	fmt.Printf("  slack   was delivered %d of them (every kind)\n", slackCount)
 	fmt.Printf("  webhook was delivered %d of them (%s)\n", hook.delivered(meshRun), kindList(hook.seenKinds()))
 	fmt.Println()
-	fmt.Println("  same run, same bus, same events. selectivity is a field on the route,")
-	fmt.Println("  not a separate topic and not a separate run — which is why adding the")
+	fmt.Println("  same run, same bus, same events. selectivity is a field on the")
+	fmt.Println("  subscription, not a separate topic or run, which is why adding the")
 	fmt.Println("  webhook cost nothing on the agent side.")
 
 	// ── 5 ───────────────────────────────────────────────────────────
@@ -374,7 +364,7 @@ func run() error {
 	}
 
 	fmt.Println("  this subscriber holds one subscription to agent:docs-bot.")
-	fmt.Println("  it did not raise the tag, no route names it, and the run cannot")
+	fmt.Println("  it did not raise the event, no sink names it, and the run cannot")
 	fmt.Println("  tell it is there. it sees the whole stream anyway:")
 	fmt.Println()
 	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "kind", "payload")
@@ -415,21 +405,27 @@ func run() error {
 	// ── 7 ───────────────────────────────────────────────────────────
 	section(7, "A REPLAYED RUN DOES NOT RE-EXECUTE A RECORDED ACTIVITY")
 
-	// A second tag for the same agent, this time from a schedule. cron has no
-	// surface to answer into and this tag declares no routes, so it runs and
-	// publishes and delivers nowhere — which is legal, and is the reverse
-	// asymmetry from the webhook, a sink that can never trigger.
-	nightly := envelope.Tag{
-		ID:     "nightly-2026-07-26",
-		Tenant: tenant,
-		Agent:  "docs-bot",
-		Origin: "cron",
-		Text:   "summarise how a release gets out the door",
-		At:     fixedClock(),
+	// A second event for the same agent, this time from a schedule. cron
+	// has no surface to answer into and no sink subscribes to its channel,
+	// so it runs and publishes and delivers nowhere, which is legal, and is
+	// the reverse asymmetry from the webhook, a sink that can never trigger.
+	nightly := event.Envelope{
+		ID:      "nightly-2026-07-26",
+		Source:  "cron:" + tenant + "/nightly",
+		Type:    event.TypeCronTick,
+		Channel: "cron://" + tenant + "/nightly",
+		Time:    fixedClock(),
+		Tenant:  tenant,
+		Data: event.CronTick{
+			Request:    event.Request{Text: "summarise how a release gets out the door"},
+			Schedule:   "nightly",
+			Expression: "0 2 * * *",
+			Occurrence: fixedClock(),
+		},
 	}
-	cronRun := runtime.RunID(nightly.Tenant, nightly.ID)
+	cronRun := runtime.RunKey(tenant, nightly.ID, "docs-bot")
 
-	// Arm one failure: the first attempt's lifecycle.completed will not reach
+	// Arm one failure: the first attempt's run.completed will not reach
 	// the bus. The runtime treats a failed publish as a failed turn — a run
 	// whose events nobody can see has not done its job — so anchor will
 	// replay the turn. Everything the turn recorded before that point is
@@ -438,10 +434,10 @@ func run() error {
 
 	before := exec.modelCalls()
 	fmt.Printf("  model calls so far           %d\n", before)
-	fmt.Println("  arming a broker outage on this run's lifecycle.completed event...")
+	fmt.Println("  arming a broker outage on this run's run.completed event...")
 	fmt.Println()
 
-	if _, err := app.Invoke(ctx, nightly); err != nil {
+	if _, err := app.Runtime().Accept(ctx, nightly, "docs-bot"); err != nil {
 		return fmt.Errorf("accept nightly: %w", err)
 	}
 	nightlyOut, err := app.Runtime().Result(ctx, cronRun)
@@ -513,7 +509,7 @@ const rule = "──────────────────────
 
 func banner() {
 	fmt.Println()
-	fmt.Println("  fiber — tag an agent from anywhere, run it durably, stream it to")
+	fmt.Println("  fiber: tag an agent from anywhere, run it durably, stream it to")
 	fmt.Println("            everyone, deliver it anywhere.")
 	fmt.Println()
 	fmt.Println("  one process, no API key, no network, no infrastructure.")

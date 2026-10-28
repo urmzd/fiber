@@ -8,7 +8,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 )
 
@@ -19,7 +18,7 @@ import (
 type fullPeer struct{ name string }
 
 func (f fullPeer) Name() string { return f.name }
-func (f fullPeer) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
+func (f fullPeer) Ingest(ctx context.Context, _ connector.Publish) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -31,7 +30,7 @@ func (f fullPeer) Actions() []connector.Action {
 type triggerOnly struct{}
 
 func (triggerOnly) Name() string { return "cron" }
-func (triggerOnly) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
+func (triggerOnly) Ingest(ctx context.Context, _ connector.Publish) error {
 	<-ctx.Done()
 	return ctx.Err()
 }

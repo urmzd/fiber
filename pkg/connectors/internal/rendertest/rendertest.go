@@ -1,40 +1,45 @@
-// Package rendertest checks that a connector's tags, read as events, render
-// the exact request text the tags render today.
+// Package rendertest checks that a connector's events render through the
+// catalog as their request text, and render the same bytes after a JSON round
+// trip, which is what a replay reads back.
 package rendertest
 
 import (
 	"encoding/json"
 	"testing"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
-	"github.com/urmzd/fiber/pkg/event/legacy"
 )
 
-// Check reads tag as an event, renders it through the catalog and fails t
-// unless the bytes equal agentrt.RequestText of the tag. It returns the
-// event's type.
-func Check(t testing.TB, tag envelope.Tag) string {
+// Check renders e through the catalog and fails t unless the bytes equal
+// event.RequestText of its prompt and survive a JSON round trip unchanged. It
+// returns the event's type.
+func Check(t testing.TB, e event.Envelope) string {
 	t.Helper()
-	raw, err := json.Marshal(tag)
+	got, err := event.Render(e)
 	if err != nil {
-		t.Fatalf("rendertest: marshal tag: %v", err)
+		t.Fatalf("rendertest: render %s: %v", e.Type, err)
 	}
-	tr, err := legacy.DecodeTag(raw)
-	if err != nil {
-		t.Fatalf("rendertest: decode tag %s: %v", tag.ID, err)
-	}
-	e, ok := event.Lookup(tr.Event.Type)
+	text, meta, ok := event.Prompt(e.Data)
 	if !ok {
-		t.Fatalf("rendertest: %s is not registered", tr.Event.Type)
+		t.Fatalf("rendertest: %s asks nothing", e.Type)
 	}
-	got, err := e.Render(tr.Event)
+	if want := event.RequestText(text, meta); got != want {
+		t.Errorf("rendertest: %s renders\n%q\nwant\n%q", e.Type, got, want)
+	}
+	raw, err := json.Marshal(e)
 	if err != nil {
-		t.Fatalf("rendertest: render %s: %v", tr.Event.Type, err)
+		t.Fatalf("rendertest: marshal %s: %v", e.ID, err)
 	}
-	if want := agentrt.RequestText(tag.Text, tag.Meta); got != want {
-		t.Errorf("rendertest: %s renders\n%q\nwant\n%q", tr.Event.Type, got, want)
+	var back event.Envelope
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("rendertest: decode %s: %v", e.ID, err)
 	}
-	return tr.Event.Type
+	again, err := event.Render(back)
+	if err != nil {
+		t.Fatalf("rendertest: render %s after a round trip: %v", e.Type, err)
+	}
+	if again != got {
+		t.Errorf("rendertest: %s renders\n%q\nafter a round trip, want\n%q", e.Type, again, got)
+	}
+	return e.Type
 }

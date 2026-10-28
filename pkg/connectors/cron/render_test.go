@@ -7,11 +7,11 @@ import (
 	"github.com/urmzd/fiber/pkg/event"
 )
 
-// A tick renders through the event catalog as the tag renders today,
-// schedule meta included.
+// A tick renders through the event catalog as its request text, schedule
+// context included.
 func TestRenderMatchesRequestText(t *testing.T) {
 	s := nightly()
-	s.Meta = map[string]string{"team": "ops", "cron_schedule": "spoofed", "_host.pinned": "x"}
+	s.Context = map[string]string{"team": "ops", "cron_schedule": "spoofed", "_host.pinned": "x"}
 	clk := &clock{at: at(t, "2026-07-20T04:00:00Z")}
 	c, tags := start(t, memory(t, s), clk)
 	tick(t, c)

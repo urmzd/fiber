@@ -20,7 +20,7 @@ func TestRenderMatchesRequestText(t *testing.T) {
 		{"created-1", issueCreated, fevent.TypeJiraIssueCreated},
 	} {
 		c.ServeHTTP(httptest.NewRecorder(), deliver(t, tc.id, tc.body))
-		if typ := rendertest.Check(t, receive(t, tags)); typ != tc.want {
+		if typ := rendertest.Check(t, receive(t, tags).Envelope); typ != tc.want {
 			t.Errorf("%s: type = %s, want %s", tc.id, typ, tc.want)
 		}
 	}

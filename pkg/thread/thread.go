@@ -68,6 +68,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Sentinel errors. Callers match with errors.Is.
@@ -115,10 +116,10 @@ type Key struct {
 	Surface string `json:"surface"`
 }
 
-// KeyOf returns the thread a tag belongs to.
+// KeyOf returns the thread a run of agent answering e belongs to.
 //
-// The surface is the tag's Source address reduced to what identifies a
-// conversation:
+// The surface is e's Source, read as an address, reduced to what identifies
+// a conversation:
 //
 //	connector://workspace/path[?thread=<value>]
 //
@@ -134,17 +135,18 @@ type Key struct {
 //	github://acme/handbook/pull/7?head_sha=abc123     -> github://acme/handbook/pull/7
 //	jira://acme/PROJ-5                                -> jira://acme/PROJ-5
 //
-// A tag with no source address (a schedule, a bare API call) has no surface a
-// second tag could share, so it is its own one-shot thread, keyed by the tag's
-// id. A redelivery of that tag carries the same id and lands on the same
-// thread.
-func KeyOf(tag envelope.Tag) Key {
-	k := Key{Tenant: tag.Tenant, Agent: strings.ToLower(strings.TrimSpace(tag.Agent))}
-	if tag.Source.IsZero() {
-		k.Surface = oneShot + tag.ID
+// An event whose Source is not an address (a schedule's tick, a delegation)
+// has no surface a second event could share, so it is its own one-shot
+// thread, keyed by the event's id. A redelivery carries the same id and lands
+// on the same thread.
+func KeyOf(e event.Envelope, agent string) Key {
+	k := Key{Tenant: e.Tenant, Agent: strings.ToLower(strings.TrimSpace(agent))}
+	src, err := address.Parse(e.Source)
+	if err != nil {
+		k.Surface = oneShot + e.ID
 		return k
 	}
-	k.Surface = Surface(tag.Source)
+	k.Surface = Surface(src)
 	return k
 }
 

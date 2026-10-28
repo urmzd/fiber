@@ -89,12 +89,12 @@ func TestPRCommentPinsTheHeadBeforeAcceptance(t *testing.T) {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
 	select {
-	case tag := <-tags:
-		if tag.Source.Params["head_sha"] != commitSHA {
-			t.Fatalf("unpinned tag %+v", tag)
+	case e := <-tags:
+		if !strings.HasSuffix(e.Channel, "?head_sha="+commitSHA) || ref(t, e).HeadSHA != commitSHA {
+			t.Fatalf("unpinned event %+v", e)
 		}
 	default:
-		t.Fatal("missing tag")
+		t.Fatal("missing event")
 	}
 }
 

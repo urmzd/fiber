@@ -5,17 +5,13 @@
 // A schedule is not a place. Slack has a thread to answer in and GitHub has an
 // issue to comment on, but "every weekday at 09:00" has no surface, so there is
 // nothing for a Sink to render onto and this connector deliberately implements
-// none. pkg/connector.RolesOf derives that from the type, so a route naming a
-// cron:// target is refused by Registry.Sink with ErrUnsupported rather than
-// accepted and dropped.
+// none.
 //
-// That is also what makes the connector interesting rather than trivial. A cron
-// tag carries Routes like any other tag, so a schedule can deliver its answer
-// into a Slack channel, a Jira ticket and an outbound webhook at once, none of
-// which it knows anything about. A schedule with no routes at all still runs and
-// still publishes every event to the bus, where anyone subscribed to the agent's
-// topic sees it. Origin and destination are independent; cron is the case that
-// proves it, because it has no origin surface to fall back to.
+// A tick is published as cron.tick.v1 on the schedule's channel,
+// cron://<tenant>/<name>. It names no agent. A schedule's Agent becomes a
+// member of that channel that wakes on its ticks (Config.Members), and any
+// egress adapter subscribed to the channel, such as an outbound webhook,
+// renders what the run produces.
 //
 // # The whole correctness story is the occurrence id
 //
@@ -23,12 +19,12 @@
 // that matters is that a given firing of a given schedule has ONE identity, no
 // matter which process computed it or how many times:
 //
-//	Tag.ID = "<schedule>@<unix seconds of the scheduled instant>"
+//	id = "<schedule>@<unix seconds of the scheduled instant>"
 //
 // The id comes from the instant the expression selected, never from the instant
 // this process noticed it was due. So a restart, a redelivery, and a second
-// replica all produce the same string, and Tag.ID is the run's idempotency key —
-// they join one run instead of starting three. See OccurrenceID.
+// replica all produce the same string, and the event id is part of the run key,
+// so they join one run instead of starting three. See OccurrenceID.
 //
 // On top of that, the ticker never looks backwards. A schedule seen for the
 // first time starts from the current instant, so a process that was down over
@@ -59,7 +55,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/internal/inbound"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/membership"
 )
 
 // Name is the address scheme this connector owns.
@@ -114,6 +110,18 @@ type Config struct {
 	// Log receives the errors the background ticker cannot return to anyone.
 	// Nil means slog.Default.
 	Log *slog.Logger
+
+	// Members, when set, makes each schedule's Agent a member of the
+	// schedule's channel that wakes on cron.tick events, before its first tick
+	// is published. Nil leaves membership to the host.
+	Members Members
+}
+
+// Members is the part of a membership store a schedule needs: joining its
+// agent to its channel. *membership.Memory and *membership.Postgres satisfy
+// it.
+type Members interface {
+	Join(ctx context.Context, tenant, channel, agent string, rule membership.Rule) error
 }
 
 // Connector is the schedule peer. It implements pkg/connector's Trigger face and
@@ -126,7 +134,8 @@ type Connector struct {
 	now        func() time.Time
 	log        *slog.Logger
 
-	pipe inbound.Pipe
+	pipe    inbound.Pipe
+	members Members
 
 	// tick serializes Tick, so a caller driving it by hand cannot race the
 	// background loop into emitting an occurrence twice. Cursors are only ever
@@ -134,6 +143,9 @@ type Connector struct {
 	tick    sync.Mutex
 	cursors map[string]time.Time
 	specs   map[string]Spec
+	// joined is the agent each schedule's channel was last joined for, so a
+	// schedule joins once per process and again when its agent changes.
+	joined map[string]string
 }
 
 // Compile-time proof of the faces. The absence of Sink and Actor is the
@@ -157,6 +169,8 @@ func New(cfg Config) (*Connector, error) {
 		log:        cfg.Log,
 		cursors:    make(map[string]time.Time),
 		specs:      make(map[string]Spec),
+		joined:     make(map[string]string),
+		members:    cfg.Members,
 	}
 	if c.interval == 0 {
 		c.interval = DefaultInterval
@@ -181,10 +195,10 @@ func (c *Connector) Name() string { return Name }
 
 // Ingest implements connector.Trigger.
 //
-// It claims out, starts the ticker, and parks until ctx is cancelled. With a
+// It claims publish, starts the ticker, and parks until ctx is cancelled. With a
 // non-positive Config.Interval no ticker is started and the caller is expected
 // to drive Tick.
-func (c *Connector) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
+func (c *Connector) Ingest(ctx context.Context, publish connector.Publish) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -198,7 +212,7 @@ func (c *Connector) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
 		close(done)
 	}
 
-	err := c.pipe.Serve(ctx, out)
+	err := c.pipe.Serve(ctx, publish)
 	// Serve returned, so the channel is no longer claimed and the ticker has
 	// nowhere to send. Stop it before returning, so Ingest owns the whole
 	// lifetime of everything it started.
@@ -237,7 +251,7 @@ func (c *Connector) loop(ctx context.Context) {
 // leaves Config.Interval non-positive.
 //
 // Emission is ordered and cursor-advancing: a schedule's cursor moves only after
-// its tag has been taken by the running Ingest, so a tick that fails to hand off
+// its tick has been published by the running Ingest, so a tick that fails to hand off
 // leaves the occurrence owed rather than lost. Errors from separate schedules
 // are joined, because one broken expression must not stop the others.
 func (c *Connector) Tick(ctx context.Context) error {
@@ -266,6 +280,7 @@ func (c *Connector) Tick(ctx context.Context) error {
 	for name := range c.cursors {
 		if _, ok := live[name]; !ok {
 			delete(c.cursors, name)
+			delete(c.joined, name)
 		}
 	}
 	return errors.Join(errs...)
@@ -299,7 +314,10 @@ func (c *Connector) fire(ctx context.Context, s Schedule, now time.Time) error {
 		if occurrence.After(now) {
 			return nil
 		}
-		if err := c.pipe.Send(ctx, s.tag(occurrence)); err != nil {
+		if err := c.join(ctx, s); err != nil {
+			return err
+		}
+		if err := c.pipe.Send(ctx, s.tick(occurrence)); err != nil {
 			// The cursor stays where it was, so this occurrence is emitted again
 			// on the next tick. That is safe precisely because its id is derived
 			// from the scheduled instant: a retry cannot become a second run.
@@ -308,6 +326,21 @@ func (c *Connector) fire(ctx context.Context, s Schedule, now time.Time) error {
 		cursor = occurrence
 		c.cursors[s.Name] = occurrence
 	}
+	return nil
+}
+
+// join makes the schedule's agent a member of its channel that wakes on its
+// ticks, once per process and agent. The channel is the schedule's own, so
+// the membership replaces nothing the host set elsewhere.
+func (c *Connector) join(ctx context.Context, s Schedule) error {
+	if c.members == nil || s.Agent == "" || c.joined[s.Name] == s.Agent {
+		return nil
+	}
+	rule := membership.Rule{Types: []string{"cron.tick"}}.Ambient()
+	if err := c.members.Join(ctx, s.Tenant, s.Channel().String(), s.Agent, rule); err != nil {
+		return fmt.Errorf("cron: schedule %q: join %s to its channel: %w", s.Name, s.Agent, err)
+	}
+	c.joined[s.Name] = s.Agent
 	return nil
 }
 

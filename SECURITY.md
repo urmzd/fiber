@@ -38,7 +38,7 @@ Invariants:
 
 GitHub signs the body alone, with no timestamp in the base string, so a captured
 GitHub request stays valid as long as the secret does. No code in this package
-can change that. That defense lives downstream in `Tag.ID` idempotency, where a
+can change that. That defense lives downstream in event id idempotency, where a
 replayed delivery joins the run it duplicated rather than starting a second one.
 This is stated plainly rather than implying a protection the package cannot
 provide.
@@ -61,10 +61,10 @@ spawn gating, and prohibition override. Default is always deny.
 ## Tenant isolation
 
 Tenant is an authorization scope, and fiber authenticates nothing: it has no
-transport and no notion of a caller. `App.Invoke`, `Stop`, `Answer` and
-`Status` trust the tenant and actor they are handed. A program that accepts
-tags or requests from callers (Humagen is one) sets `Tag.Tenant`, `Tag.Actor`
-and `Actor.User` from its own credential and overwrites whatever a client
+transport and no notion of a caller. `App.Publish`, `Runtime.Accept`, `Stop`,
+`Answer` and `Status` trust the tenant and actor they are handed. A program
+that accepts events or requests from callers (Humagen is one) sets the
+event's `Tenant`, its request's `Actor` and `Actor.User` from its own credential and overwrites whatever a client
 sent; that check lives in that program, not here.
 
 What fiber does guarantee is that a tenant, once set, scopes everything

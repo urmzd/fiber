@@ -272,9 +272,9 @@ func (w *world) work(t *testing.T, rt *runtime.Runtime, between func()) {
 	})
 }
 
-func (w *world) accept(t *testing.T, rt *runtime.Runtime, tg envelope.Tag) string {
+func (w *world) accept(t *testing.T, rt *runtime.Runtime, tg fixture) string {
 	t.Helper()
-	acc, err := rt.AcceptTag(context.Background(), tg)
+	acc, err := accept(context.Background(), rt, tg)
 	if err != nil {
 		t.Fatalf("Accept(%s): %v", tg.ID, err)
 	}
@@ -566,7 +566,7 @@ func TestAStoppedRunKeepsItsPartialAnswerAndTheNextTurnIsShownIt(t *testing.T) {
 
 	// The journal: the request, then the partial answer and the marker, byte
 	// for byte, once.
-	key := thread.KeyOf(first)
+	key := first.key()
 	wantJournal := []string{
 		"user: why did the deploy fail?",
 		"assistant: The deploy failed because\n\n[This turn was stopped before it finished.]",
@@ -701,7 +701,7 @@ func TestAStopBeforeTheTurnStartsIsNotLost(t *testing.T) {
 	ended(t, w.bus.of(runID))
 
 	want := []string{"user: explain the outage", "assistant: [This turn was stopped before it finished.]"}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); !reflect.DeepEqual(got, want) {
+	if got := said(journal(t, w.threads, tg.key())); !reflect.DeepEqual(got, want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 }
@@ -726,7 +726,7 @@ func TestAStopBeforeTheTurnStartsStopsARealTurn(t *testing.T) {
 		t.Errorf("the model was called %d times; a recorded stop ends the turn before it starts", n)
 	}
 	want := []string{"user: explain the outage", "assistant: [This turn was stopped before it finished.]"}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); !reflect.DeepEqual(got, want) {
+	if got := said(journal(t, w.threads, tg.key())); !reflect.DeepEqual(got, want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 }
@@ -748,7 +748,7 @@ func TestAStopAfterTheRunCompletedDoesNothing(t *testing.T) {
 		t.Fatalf("the run was stopped before anyone asked: %+v", out)
 	}
 	events := fingerprint(w.bus.of(runID))
-	entries := said(journal(t, w.threads, thread.KeyOf(tg)))
+	entries := said(journal(t, w.threads, tg.key()))
 
 	w.stop(t, rt, "acme", runID, "too late", "U1")
 	time.Sleep(50 * time.Millisecond)
@@ -756,7 +756,7 @@ func TestAStopAfterTheRunCompletedDoesNothing(t *testing.T) {
 	if got := fingerprint(w.bus.of(runID)); !reflect.DeepEqual(got, events) {
 		t.Errorf("a stop after completion changed the run's events:\n got %v\nwant %v", got, events)
 	}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); !reflect.DeepEqual(got, entries) {
+	if got := said(journal(t, w.threads, tg.key())); !reflect.DeepEqual(got, entries) {
 		t.Errorf("a stop after completion changed the thread:\n got %q\nwant %q", got, entries)
 	}
 	again := w.result(t, rt, runID)
@@ -795,7 +795,7 @@ func TestStoppingTwiceIsStoppingOnce(t *testing.T) {
 		t.Errorf("lifecycle.stopped carries reason %q, want the first", body.Reason)
 	}
 	want := []string{"user: explain", "assistant: Half an\n\n[This turn was stopped before it finished.]"}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); !reflect.DeepEqual(got, want) {
+	if got := said(journal(t, w.threads, tg.key())); !reflect.DeepEqual(got, want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 }
@@ -868,7 +868,7 @@ func TestReplayingAStoppedRunOffersTheJournalTheSameBytesAndRunsNothingTwice(t *
 			t.Errorf("attempt %d offered the journal\n     %q\nwant %q", i+1, got, want)
 		}
 	}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); !reflect.DeepEqual(got, want) {
+	if got := said(journal(t, w.threads, tg.key())); !reflect.DeepEqual(got, want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 
@@ -902,7 +902,7 @@ func TestAStopBetweenTwoAttemptsStopsTheNextOne(t *testing.T) {
 	})
 	// The run id is a function of the tag, so it is known before Accept makes
 	// the run claimable.
-	runID = runtime.RunID(tg.Tenant, tg.ID)
+	runID = tg.runID()
 	if got := w.accept(t, rt, tg); got != runID {
 		t.Fatalf("Accept returned run %s, want %s", got, runID)
 	}
@@ -956,7 +956,7 @@ func TestATurnThatIgnoresAStopIsCancelledAndTheRunStillEndsStopped(t *testing.T)
 		t.Errorf("the executor ran %d times, want 1", n)
 	}
 	want := []string{"user: explain", "assistant: Half an answer\n\n[This turn was stopped before it finished.]"}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); !reflect.DeepEqual(got, want) {
+	if got := said(journal(t, w.threads, tg.key())); !reflect.DeepEqual(got, want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 }
@@ -1083,7 +1083,7 @@ func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testin
 func TestATagForTheControlNamespaceIsRefused(t *testing.T) {
 	w := newWorld(t)
 	rt := w.runtime(t, newPatient())
-	if _, err := rt.AcceptTag(context.Background(), tag("_control", "evt-1", "hello")); !errors.Is(err, runtime.ErrInvalid) {
+	if _, err := accept(context.Background(), rt, tag("_control", "evt-1", "hello")); !errors.Is(err, runtime.ErrInvalid) {
 		t.Fatalf("Accept for the control namespace = %v, want ErrInvalid", err)
 	}
 }

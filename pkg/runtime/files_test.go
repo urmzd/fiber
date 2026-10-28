@@ -95,7 +95,7 @@ func TestAFileAttachedInOneTurnIsStillSeenInTheNextWithAByteIdenticalPrefix(t *t
 		t.Error("the earlier file was attached to the new question as well")
 	}
 
-	entries := journal(t, w.threads, thread.KeyOf(first))
+	entries := journal(t, w.threads, first.key())
 	if len(entries) != 4 || !reflect.DeepEqual(entries[0].Attachments, first.Attachments) || entries[2].Attachments != nil {
 		t.Fatalf("journal = %+v, want the files on the first question only", entries)
 	}
@@ -122,7 +122,7 @@ func TestAStoppedTurnJournalsItsFilesWithTheRequestAndKeepsTheMarker(t *testing.
 	}
 
 	var mine []thread.Entry
-	for _, e := range journal(t, w.threads, thread.KeyOf(tg)) {
+	for _, e := range journal(t, w.threads, tg.key()) {
 		if e.RunID == runID {
 			mine = append(mine, e)
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -77,7 +78,9 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 	}
 	listFor := func(a envelope.Actor) agentrt.Granted {
 		t.Helper()
-		g, err := app.ToolsFor(ctx, envelope.Tag{Tenant: tenant, Agent: "triage", Origin: "test", Actor: a})
+		e := posted("list", tenant, "triage", "inbox://"+tenant+"/out", "")
+		e.Data = event.MessagePosted{Request: event.Request{Actor: a, Mentions: []string{"triage"}}}
+		g, err := app.ToolsFor(ctx, e, "triage")
 		if err != nil {
 			t.Fatalf("ToolsFor %+v: %v", a, err)
 		}
@@ -148,7 +151,7 @@ func TestAListingNeedsAnExecutorThatCanGiveOne(t *testing.T) {
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.ToolsFor(ctx, envelope.Tag{Tenant: "acme", Agent: "triage"}); !errors.Is(err, errors.ErrUnsupported) {
+	if _, err := app.ToolsFor(ctx, posted("list", "acme", "triage", "inbox://acme/out", ""), "triage"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("ToolsFor = %v, want errors.ErrUnsupported", err)
 	}
 }

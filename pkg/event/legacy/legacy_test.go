@@ -149,7 +149,7 @@ func TestKindSelectorSelectsWhatItDid(t *testing.T) {
 		if err != nil || event.Family(typ) != "run" {
 			continue
 		}
-		was := envelope.Route{}.Wants(typ)
+		was := event.Selects("run", typ)
 		now := slices.ContainsFunc(all, func(p string) bool { return event.Selects(p, typ) })
 		if was != now {
 			t.Errorf("empty route on %q: was %v, now %v", k, was, now)
@@ -306,7 +306,25 @@ func TestDecodeEntry(t *testing.T) {
 	}
 }
 
-func decodeTag(t *testing.T, tag envelope.Tag) legacy.Trigger {
+// oldTag is the JSON shape of the removed envelope.Tag, as it was stored.
+type oldTag struct {
+	ID      string            `json:"id"`
+	Tenant  string            `json:"tenant,omitempty"`
+	Agent   string            `json:"agent,omitempty"`
+	Origin  string            `json:"origin"`
+	Source  address.Address   `json:"source,omitzero"`
+	Text    string            `json:"text"`
+	Deliver []oldRoute        `json:"deliver,omitempty"`
+	Meta    map[string]string `json:"meta,omitempty"`
+	At      time.Time         `json:"at"`
+}
+
+type oldRoute struct {
+	Target address.Address `json:"target"`
+	Kinds  []string        `json:"kinds,omitempty"`
+}
+
+func decodeTag(t *testing.T, tag oldTag) legacy.Trigger {
 	t.Helper()
 	raw, err := json.Marshal(tag)
 	if err != nil {
@@ -334,38 +352,38 @@ func TestDecodeTag(t *testing.T) {
 	slackSource := address.Address{Connector: "slack", Workspace: "T01", Path: []string{"C02"}}.WithParam("thread", "1699.001")
 	for _, tc := range []struct {
 		name string
-		tag  envelope.Tag
+		tag  oldTag
 		want string
 	}{
-		{"slack mention", envelope.Tag{ID: "Ev1", Origin: "slack", Agent: "helper", Source: slackSource, Text: "hi",
+		{"slack mention", oldTag{ID: "Ev1", Origin: "slack", Agent: "helper", Source: slackSource, Text: "hi",
 			Meta: map[string]string{"slack_team": "T01", "slack_channel": "C02", "slack_user": "U1", "slack_event": "app_mention", "slack_ts": "1699.002", "slack_thread_ts": "1699.001"}},
 			event.TypeMessagePosted},
-		{"slash command", envelope.Tag{ID: "command:1", Origin: "slack", Text: "/ask x",
+		{"slash command", oldTag{ID: "command:1", Origin: "slack", Text: "/ask x",
 			Meta: map[string]string{"slack_team": "T01", "slack_channel": "C02", "slack_user": "U1", "slack_event": "slash_command", "slack_command": "/ask"}},
 			event.TypeSlackCommandInvoked},
-		{"console", envelope.Tag{ID: "c1", Origin: "console", Agent: "helper", Text: "hi", Meta: map[string]string{"humagen.project": "p"}},
+		{"console", oldTag{ID: "c1", Origin: "console", Agent: "helper", Text: "hi", Meta: map[string]string{"humagen.project": "p"}},
 			event.TypeMessagePosted},
-		{"github review comment", envelope.Tag{ID: "d1", Origin: "github", Text: "look",
+		{"github review comment", oldTag{ID: "d1", Origin: "github", Text: "look",
 			Meta: map[string]string{"github_event": "pull_request_review_comment", "github_action": "created", "github_owner": "o", "github_repo": "r",
 				"github_number": "4", "github_kind": "pull", "github_title": "T", "github_sender": "s", "github_comment_id": "9", "github_review_root_id": "8",
 				"github_labels": "a,b", "github_draft": "true", "github_installation_id": "77"}},
 			event.TypeGitHubReviewCommentCreated},
-		{"github with a malformed number", envelope.Tag{ID: "d2", Origin: "github", Text: "look",
+		{"github with a malformed number", oldTag{ID: "d2", Origin: "github", Text: "look",
 			Meta: map[string]string{"github_event": "issues", "github_action": "opened", "github_owner": "o", "github_repo": "r",
 				"github_number": "four", "github_kind": "issue", "github_title": "T", "github_sender": "s"}},
 			event.TypeMessagePosted},
-		{"github event without a type", envelope.Tag{ID: "d3", Origin: "github", Text: "x", Meta: map[string]string{"github_event": "push", "github_action": ""}},
+		{"github event without a type", oldTag{ID: "d3", Origin: "github", Text: "x", Meta: map[string]string{"github_event": "push", "github_action": ""}},
 			event.TypeMessagePosted},
-		{"jira assigned", envelope.Tag{ID: "j1", Origin: "jira", Text: "ticket",
+		{"jira assigned", oldTag{ID: "j1", Origin: "jira", Text: "ticket",
 			Meta: map[string]string{"jira_event": "jira:issue_updated", "jira_site": "acme", "jira_key": "P-1", "jira_assigned": "true", "jira_labels": "x"}},
 			event.TypeJiraIssueAssigned},
-		{"jira comment", envelope.Tag{ID: "j2", Origin: "jira", Text: "please",
+		{"jira comment", oldTag{ID: "j2", Origin: "jira", Text: "please",
 			Meta: map[string]string{"jira_event": "comment_created", "jira_site": "acme", "jira_key": "P-1", "jira_comment_id": "100"}},
 			event.TypeJiraCommentCreated},
-		{"jira created", envelope.Tag{ID: "j3", Origin: "jira", Text: "new",
+		{"jira created", oldTag{ID: "j3", Origin: "jira", Text: "new",
 			Meta: map[string]string{"jira_event": "jira:issue_created", "jira_site": "acme", "jira_key": "P-1"}},
 			event.TypeJiraIssueCreated},
-		{"cron", envelope.Tag{ID: "nightly@1", Origin: "cron", Tenant: "acme", Agent: "helper", Text: "report",
+		{"cron", oldTag{ID: "nightly@1", Origin: "cron", Tenant: "acme", Agent: "helper", Text: "report",
 			Source: address.Address{Connector: "cron", Workspace: "acme", Path: []string{"nightly"}},
 			Meta:   map[string]string{"cron_schedule": "nightly", "cron_expression": "0 3 * * *", "cron_occurrence": "2026-10-28T03:00:00Z", "team": "ops"}},
 			event.TypeCronTick},
@@ -391,10 +409,10 @@ func TestDecodeTag(t *testing.T) {
 
 func TestDecodeTagMovesPrivateMetaAndRoutes(t *testing.T) {
 	target := address.Address{Connector: "webhook", Workspace: "acme", Path: []string{"hook"}}
-	tag := envelope.Tag{
+	tag := oldTag{
 		ID: "c1", Origin: "console", Agent: "helper", Text: "hi", At: at,
 		Meta:    map[string]string{"_host.sources": "playbook", "channel": "ops"},
-		Deliver: []envelope.Route{{Target: target, Kinds: []string{"lifecycle.completed", "usage"}}, {Target: target}},
+		Deliver: []oldRoute{{Target: target, Kinds: []string{"lifecycle.completed", "usage"}}, {Target: target}},
 	}
 	tr := decodeTag(t, tag)
 	if tr.Event.Private["_host.sources"] != "playbook" || len(tr.Event.Private) != 1 {
@@ -416,7 +434,7 @@ func TestDecodeTagMovesPrivateMetaAndRoutes(t *testing.T) {
 		t.Errorf("private meta serialized: %s", raw)
 	}
 
-	tag.Deliver = []envelope.Route{{Target: target, Kinds: []string{"lifecycle.finished"}}}
+	tag.Deliver = []oldRoute{{Target: target, Kinds: []string{"lifecycle.finished"}}}
 	raw, _ = json.Marshal(tag)
 	if _, err := legacy.DecodeTag(raw); !errors.Is(err, legacy.ErrUnknown) {
 		t.Errorf("an unknown selector: err = %v, want ErrUnknown", err)

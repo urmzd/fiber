@@ -33,8 +33,8 @@ var _ thread.Lister = (*Connector)(nil)
 // Messages implements thread.Lister: the Slack thread surface names, as Slack
 // holds it now, oldest first.
 //
-// The message timestamp is the id, which is also what a tag's slack_ts meta
-// carries, so the message that raised a tag is recognized. A message posted
+// The message timestamp is the id, which is also what message.posted.v1's slack
+// ts carries, so the message that raised a run is recognized. A message posted
 // by this app, or by a bot user that stands for an agent, is Own. A file on a
 // message is brought in only when the journal first sees that message, and
 // under the tenant this connector serves.

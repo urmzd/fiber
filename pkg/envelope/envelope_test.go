@@ -2,11 +2,8 @@ package envelope_test
 
 import (
 	"testing"
-	"time"
 
-	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -43,128 +40,6 @@ func TestKindFamilyAndMatches(t *testing.T) {
 		if got := tc.kind.Matches(tc.sel); got != tc.want {
 			t.Errorf("%s.Matches(%q) = %v, want %v", tc.kind, tc.sel, got, tc.want)
 		}
-	}
-}
-
-// The N:M case from the design: one run, two sinks, each choosing a different
-// granularity. GitHub renders the live stream; the webhook only learns it
-// shipped.
-func TestRouteSelectivity(t *testing.T) {
-	stream := envelope.Route{
-		Target: address.MustParse("github://urmzd/fiber/issues/42"),
-		Kinds:  []string{"delta", "lifecycle.completed"},
-	}
-	notify := envelope.Route{
-		Target: address.MustParse("webhook://acme/deploys"),
-		Kinds:  []string{"lifecycle.completed"},
-	}
-	everything := envelope.Route{Target: address.MustParse("slack://T01/C02")}
-
-	cases := []struct {
-		name                            string
-		typ                             string
-		wantStream, wantNotify, wantAll bool
-	}{
-		{"text delta", event.TypeText, true, false, true},
-		{"citation", event.TypeCitation, true, false, true},
-		{"started", event.TypeStarted, false, false, true},
-		{"completed", event.TypeCompleted, true, true, true},
-		{"failed", event.TypeFailed, false, false, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := stream.Wants(tc.typ); got != tc.wantStream {
-				t.Errorf("stream.Wants(%s) = %v, want %v", tc.typ, got, tc.wantStream)
-			}
-			if got := notify.Wants(tc.typ); got != tc.wantNotify {
-				t.Errorf("notify.Wants(%s) = %v, want %v", tc.typ, got, tc.wantNotify)
-			}
-			if got := everything.Wants(tc.typ); got != tc.wantAll {
-				t.Errorf("everything.Wants(%s) = %v, want %v", tc.typ, got, tc.wantAll)
-			}
-		})
-	}
-}
-
-func TestTagValidate(t *testing.T) {
-	valid := envelope.Tag{
-		ID: "ev1", Agent: "docs-bot", Origin: "github",
-		Source: address.MustParse("github://urmzd/fiber/issues/42"),
-		At:     time.Now(),
-	}
-	if err := valid.Validate(); err != nil {
-		t.Fatalf("valid tag rejected: %v", err)
-	}
-
-	missingID := valid
-	missingID.ID = ""
-	if err := missingID.Validate(); err == nil {
-		t.Error("tag without an id accepted; it is the idempotency key")
-	}
-
-	missingAgent := valid
-	missingAgent.Agent = ""
-	if err := missingAgent.Validate(); err == nil {
-		t.Error("tag without an agent accepted")
-	}
-
-	missingOrigin := valid
-	missingOrigin.Origin = ""
-	if err := missingOrigin.Validate(); err == nil {
-		t.Error("tag without an origin accepted")
-	}
-
-	badRoute := valid
-	badRoute.Deliver = []envelope.Route{{}}
-	if err := badRoute.Validate(); err == nil {
-		t.Error("tag with a targetless route accepted")
-	}
-}
-
-// A tag raised in GitHub delivering into Jira: origin and destination move
-// independently, which is the whole point of the mesh.
-func TestRoutesDecoupleOriginFromDestination(t *testing.T) {
-	tag := envelope.Tag{
-		ID: "ev1", Agent: "review-bot", Origin: "github",
-		Source:  address.MustParse("github://urmzd/fiber/pull/7"),
-		Deliver: []envelope.Route{{Target: address.MustParse("jira://acme/PROJ-5")}},
-	}
-	routes := tag.Routes()
-	if len(routes) != 1 {
-		t.Fatalf("Routes() returned %d routes, want 1", len(routes))
-	}
-	if got := routes[0].Target.Connector; got != "jira" {
-		t.Fatalf("route target connector = %q, want jira", got)
-	}
-}
-
-// With no explicit routes, the answer goes back where the tag came from.
-func TestRoutesFallBackToSource(t *testing.T) {
-	tag := envelope.Tag{
-		ID: "ev1", Agent: "docs-bot", Origin: "slack",
-		Source: address.MustParse("slack://T01/C02?thread=1699.001"),
-	}
-	routes := tag.Routes()
-	if len(routes) != 1 {
-		t.Fatalf("Routes() returned %d routes, want 1", len(routes))
-	}
-	if routes[0].Target.String() != tag.Source.String() {
-		t.Fatalf("fallback route = %q, want source %q", routes[0].Target, tag.Source)
-	}
-	if !routes[0].Wants(event.TypeText) {
-		t.Error("fallback route should want every kind")
-	}
-}
-
-// A cron-triggered tag has no surface to answer into, so it produces no
-// routes unless it declares them. It still runs and still reaches the bus.
-func TestCronTagWithoutRoutesHasNoDestination(t *testing.T) {
-	tag := envelope.Tag{ID: "occ-1", Agent: "nightly", Origin: "cron"}
-	if got := tag.Routes(); len(got) != 0 {
-		t.Fatalf("Routes() = %v, want none", got)
-	}
-	if err := tag.Validate(); err != nil {
-		t.Fatalf("a routeless cron tag should still be valid: %v", err)
 	}
 }
 
@@ -240,45 +115,5 @@ func TestSubscriptionAcceptsAndResumes(t *testing.T) {
 	}
 	if !resumed.Accepts(newEvent(6, "docs-bot", "run1", 1, "slack", envelope.KindText)) {
 		t.Error("resume cursor dropped the next event")
-	}
-}
-
-// Usage is opt-in for a route. A route with no kind filter was written to
-// receive the conversation and the outcome, and its receiver may refuse, or
-// fail and have retried, a kind it has never seen, once per model call. Only
-// a route that names the family or one of its kinds receives it.
-func TestARouteReceivesUsageOnlyWhenItAsksForIt(t *testing.T) {
-	cases := []struct {
-		name  string
-		kinds []string
-		want  map[string]bool
-	}{
-		{"no filter", nil, map[string]bool{event.TypeUsageCall: false, event.TypeUsageChild: false, event.TypeCompleted: true}},
-		{"an empty selector", []string{""}, map[string]bool{event.TypeUsageCall: false, event.TypeCompleted: true}},
-		{"the conversation", []string{"delta", "lifecycle"}, map[string]bool{event.TypeUsageCall: false, event.TypeUsageChild: false}},
-		{"the family", []string{"usage"}, map[string]bool{event.TypeUsageCall: true, event.TypeUsageChild: true, event.TypeText: false}},
-		{"one kind", []string{"usage.child"}, map[string]bool{event.TypeUsageCall: false, event.TypeUsageChild: true}},
-		{"usage and the outcome", []string{"usage.call", "lifecycle.completed"}, map[string]bool{event.TypeUsageCall: true, event.TypeCompleted: true, event.TypeText: false}},
-		// Compactions are opt-in the same way.
-		{"no filter, compactions", nil, map[string]bool{event.TypeCompacted: false}},
-		{"the context family", []string{"context"}, map[string]bool{event.TypeCompacted: true, event.TypeUsageCall: false}},
-		{"one context kind", []string{"context.compacted"}, map[string]bool{event.TypeCompacted: true}},
-	}
-	for _, tc := range cases {
-		r := envelope.Route{Target: address.MustParse("webhook://acme/deploys"), Kinds: tc.kinds}
-		for kind, want := range tc.want {
-			if got := r.Wants(kind); got != want {
-				t.Errorf("%s: Wants(%s) = %v, want %v", tc.name, kind, got, want)
-			}
-		}
-	}
-}
-
-// A key is the host's only when it starts with the private prefix.
-func TestAPrivateMetaKeyStartsWithTheUnderscore(t *testing.T) {
-	for key, want := range map[string]bool{"_warp.sources": true, "_": true, "issue": false, "warp._x": false, "": false} {
-		if got := envelope.PrivateMeta(key); got != want {
-			t.Errorf("PrivateMeta(%q) = %v, want %v", key, got, want)
-		}
 	}
 }

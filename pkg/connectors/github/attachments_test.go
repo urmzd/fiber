@@ -143,10 +143,10 @@ func commentWith(body string, private bool) string {
 	return strings.Replace(b, `"private": false`, fmt.Sprintf(`"private": %v`, private), 1)
 }
 
-// The files in a public repository's comment become the tag's attachments,
+// The files in a public repository's comment become the event's attachments,
 // in order, stored under the connector's tenant, fetched without any
 // credential. A file GitHub no longer serves is carried as unread.
-func TestFilesInAPublicCommentBecomeTheTagsAttachments(t *testing.T) {
+func TestFilesInAPublicCommentBecomeTheEventsAttachments(t *testing.T) {
 	store := blob.NewMemory()
 	srv, auth := assets(t, map[string]string{
 		"/user-attachments/assets/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0": assetPNG,
@@ -164,16 +164,17 @@ func TestFilesInAPublicCommentBecomeTheTagsAttachments(t *testing.T) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	tag := receive(t, tags)
-	if tag.Tenant != "acme" || len(tag.Attachments) != 3 {
-		t.Fatalf("tag tenant %q attachments %+v", tag.Tenant, tag.Attachments)
+	files := request(t, tag).Attachments
+	if tag.Tenant != "acme" || len(files) != 3 {
+		t.Fatalf("event tenant %q attachments %+v", tag.Tenant, files)
 	}
-	if a := tag.Attachments[0]; a.MediaType != "image/png" || a.Alt != "build log" || a.Origin.String() != "github://urmzd/fiber/issues/42" {
+	if a := files[0]; a.MediaType != "image/png" || a.Alt != "build log" || a.Origin.String() != "github://urmzd/fiber/issues/42" {
 		t.Errorf("screenshot = %+v", a)
 	}
-	if a := tag.Attachments[1]; a.MediaType != "video/mp4" {
+	if a := files[1]; a.MediaType != "video/mp4" {
 		t.Errorf("video = %+v", a)
 	}
-	if a := tag.Attachments[2]; a.Unread != "the surface did not return it" || a.Alt != "gone" {
+	if a := files[2]; a.Unread != "the surface did not return it" || a.Alt != "gone" {
 		t.Errorf("missing file = %+v", a)
 	}
 	if got := auth.Load().(string); got != "" {
@@ -183,7 +184,7 @@ func TestFilesInAPublicCommentBecomeTheTagsAttachments(t *testing.T) {
 
 // A private repository's files are read through the signed URLs in the
 // rendered body, which the API returns for the installation token. When that
-// read fails, each file is carried as unread and the tag still runs.
+// read fails, each file is carried as unread and the event is still published.
 func TestFilesInAPrivateCommentAreFetchedThroughSignedURLs(t *testing.T) {
 	store := blob.NewMemory()
 	srv, _ := assets(t, map[string]string{"/1502855/signed-0b1c.png": assetPNG})
@@ -196,16 +197,16 @@ func TestFilesInAPrivateCommentAreFetchedThroughSignedURLs(t *testing.T) {
 
 	body := "@docs-bot why?\n\n![build log](https://github.com/user-attachments/assets/0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0)\n"
 	c.ServeHTTP(httptest.NewRecorder(), deliver(t, "issue_comment", "d-files-2", commentWith(body, true)))
-	tag := receive(t, tags)
-	if len(tag.Attachments) != 1 || tag.Attachments[0].MediaType != "image/png" || tag.Attachments[0].Alt != "build log" {
-		t.Fatalf("attachments = %+v", tag.Attachments)
+	files := request(t, receive(t, tags)).Attachments
+	if len(files) != 1 || files[0].MediaType != "image/png" || files[0].Alt != "build log" {
+		t.Fatalf("attachments = %+v", files)
 	}
 
 	unsigned := strings.Replace(commentWith(body, true), `"id": 2201234567`, `"id": 2209999999`, 1)
 	c.ServeHTTP(httptest.NewRecorder(), deliver(t, "issue_comment", "d-files-3", unsigned))
-	tag = receive(t, tags)
-	if len(tag.Attachments) != 1 || tag.Attachments[0].Unread != "the surface refused access to it" {
-		t.Fatalf("without a signed URL: %+v", tag.Attachments)
+	files = request(t, receive(t, tags)).Attachments
+	if len(files) != 1 || files[0].Unread != "the surface refused access to it" {
+		t.Fatalf("without a signed URL: %+v", files)
 	}
 }
 

@@ -51,7 +51,7 @@ event. Each run pins an agent revision, so retries use the same definition.
 ## Features
 
 - **Agents are documents.** Create one by submitting a spec. No redeploy, no code, no restart. A run accepted under revision 6 executes as revision 6 forever, even after a revise.
-- **Subscribe once, route by event.** `agent:docs-bot` receives every current and future run of that agent. Each run goes to multiple destinations, and each picks text, citations, lifecycle events, or all of them.
+- **Subscribe by channel and type.** A run publishes on the channel of the event that started it. Every sink subscribed to that channel receives it, and each picks text, citations, lifecycle events, or all of them by type prefix.
 - **Connectors act, not just talk.** Connectors contribute native verbs (transition a Jira ticket, request a review) as sandboxed agent tools, each emitting an auditable `action.taken` event.
 - **Backends are values.** `fiber.WithPostgres(pool)` puts every store on one pool; `fiber.WithBus` takes the in-memory, Redis Streams or Postgres bus. Memory is a complete implementation, not a stub.
 - **Citations are first-class events**, carrying the exact quoted source and resolvable provenance.
@@ -81,9 +81,9 @@ cd fiber
 go run ./examples/local
 ```
 
-It creates an agent, revises it, tags it from a simulated GitHub trigger with
-delivery routed to Slack and a webhook, shows a third party listening to the
-agent's topic, and demonstrates that a replayed run does not pay for the model
+It creates an agent, revises it, asks it from a simulated GitHub event whose
+channel a Slack sink and a webhook subscribe to, shows a third party listening
+to the channels, and demonstrates that a replayed run does not pay for the model
 twice.
 
 ### Compose it
@@ -114,11 +114,14 @@ model:
 ---
 You answer questions about the deploy pipeline. Cite your sources.
 `})
-acc, err := app.Invoke(ctx, envelope.Tag{
-    ID: "req-1", Tenant: "acme", Agent: "docs-bot", Origin: "api",
-    Text: "how does a release get out the door?",
-    Deliver: []envelope.Route{{Target: address.MustParse("webhook://acme/deploys"),
-        Kinds: []string{"lifecycle.completed"}}},
+// docs-bot answers what is posted on its channel.
+app.Memberships().Join(ctx, "acme", "slack://T01/C02", "docs-bot", membership.Rule{Types: []string{"message"}})
+err = app.Publish(ctx, event.Envelope{
+    ID: "req-1", Tenant: "acme", Time: time.Now(),
+    Source: "slack://T01/C02", Channel: "slack://T01/C02", Type: event.TypeMessagePosted,
+    Data: event.MessagePosted{Request: event.Request{
+        Text: "how does a release get out the door?", Mentions: []string{"docs-bot"},
+    }},
 })
 ```
 
@@ -244,7 +247,7 @@ docs-bot is running with the offline provider, so no model was called. ...
 [lifecycle.completed] attempt 1, 1 model calls, 0 tokens in, 0 out
 ```
 
-Each line is one event under its kind, the name a route's `kinds` selects,
+Each line is one event under its kind, the name an old webhook `kinds` selector names,
 except the answer and any reasoning, which stream inline as they arrive.
 Warnings from the operator log, such as a granted tool this composition
 cannot resolve, go to standard error.
@@ -355,7 +358,7 @@ starts. Postgres migrates itself and keeps its rows. See
 - Citations are derived from RAG context blocks. Citations a model or tool reports itself are not translated into events yet.
 - The bus is at-least-once with no consumer groups.
 - Agent specs load from JSON, not YAML.
-- `App.Status` reports a stopped run as `stopped`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A route that selects only `lifecycle.completed` is not told about a stop.
+- `App.Status` reports a stopped run as `stopped`. A stop is recorded in the run ledger before it is announced on the bus, so once it is acknowledged the run ends stopped unless its turn had already returned its answer. A sink that subscribes only to `run.completed` is not told about a stop.
 - A request to compact a running turn (`App.Compact`) is not recorded: it reaches only the attempt running when it is made, before that turn's next model call. See [Compacting a run on request](docs/architecture/overview.md#compacting-a-run-on-request).
 - A program declares MCP tool providers with `fiber.WithToolProvider`, or writes them to the tool provider store (`App.ToolProviders`). A group grant that cannot be expanded (no such provider for the tenant, the server unreachable, nothing the grant's class admits) is dropped like a single unavailable tool: the run continues without it, the model is told it is unavailable, the operator is logged why, and `Runner.Unavailable` lists it. `agentrt.WithStrictTools` fails the build with `agentrt.ErrNoSuchToolGroup` instead.
 - A person-scoped MCP provider's tools are expanded per person, so two people in one thread can be offered different tools, and the thread's prompt cache misses when the person changes. At most 128 person sessions are kept open (`mcptools.WithPersonSessions` on a hand-built `Grants`); past that the one used longest ago is closed and a turn still holding its tools sees a tool error. A stdio provider runs a server per open person session. The resolver is asked on every turn, and a new value behind an unchanged reference is not noticed until the reference, the secret or the provider record changes.
@@ -363,7 +366,7 @@ starts. Postgres migrates itself and keeps its rows. See
 - A granted tool this deployment cannot resolve (no connector contributes it, or an MCP tool is held back) is dropped rather than failing the run. The model is told it is unavailable and the server logs a warning naming the tool and the reason; `agentrt.WithStrictTools` restores the old refusal.
 - Tool events carry the call's arguments, capped at 8 KiB; scrub sensitive ones with `agentrt.WithToolArguments`.
 - A parked run waits on a person through the run ledger. An answer or a stop wakes it at once; an expired question is noticed by the worker's janitor poll (30 seconds by default), so its default applies up to that late. The requester cannot approve their own calls unless the spec sets `self_approval`, and `approvers`/`answerers` restrict who may answer. `tagged_only` is a hint for hosts: an agent that sets it runs only when a message names it, and is never asked to take an untagged one on its own; fiber itself carries and hashes it, nothing more. A tool implementing `agentrt.Approving` decides per call whether it needs approval and may name that call's approvers, which then replace the spec's. A host Delegator that blocks on a child run holds a worker and can exhaust them; `runtime.WithChildRuns` parks the parent on the child instead. Approvals inside an in-turn sub-task (a `tag_<agent>` call without child runs or a Delegator) are refused, not asked. See [Parking a run on a person](docs/architecture/overview.md#parking-a-run-on-a-person).
-- Cost is reported only for models the price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to routes that select `usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
+- Cost is reported only for models the price catalog prices, in integer micro-units with the catalog's `as_of`; anything else reports tokens and no cost. Usage is delivered only to sinks that subscribe to `run.usage`. A turn that crashes mid-call is on the bus but not in the run's total. In-turn delegation is one level deep (a sub-task holds no spawn grant), and a host that runs delegations as runs of their own rolls them up with `runtime.ReportChildUsage`. See [Usage](docs/architecture/overview.md#usage).
 
 ## Configuration
 
@@ -395,10 +398,11 @@ guides.
 
 | Method | Does |
 |--------|------|
-| `App.Invoke` | Raises a tag and returns the accepted run |
-| `App.Bus().Subscribe` | Streams any topic (`agent:docs-bot` sees every run of that agent) |
+| `App.Publish` | Puts an ingress event on the bus; the channel's members each start a run |
+| `App.Runtime().Accept` | Starts one agent's run for an event, without membership |
+| `App.Bus().Subscribe` | Streams a tenant's events by channel and type prefix |
 | `App.Status`, `App.Stop`, `App.Compact`, `App.Answer` | Act on a run |
-| `App.ToolsFor` | Lists what a run of a tag would be granted, without running it |
+| `App.ToolsFor` | Lists what an agent's run of an event would be granted, without running it |
 | `App.WebhookHandler()` | An `http.Handler` for the connectors that receive webhooks, for your program to mount |
 
 Full reference: [pkg.go.dev/github.com/urmzd/fiber](https://pkg.go.dev/github.com/urmzd/fiber)

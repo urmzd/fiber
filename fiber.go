@@ -1,5 +1,5 @@
 // Package fiber is an agent library you compose in Go. New assembles the
-// agent registry, the bus, the router, the durable runtime, the sandbox,
+// agent definitions, the bus, dispatch, egress, the durable runtime, the sandbox,
 // knowledge, thread journals, files, MCP tool providers, the author agent and
 // the connectors into an App, and Run drives it in process. It is a library:
 // there is no service, no configuration file and no environment variable,
@@ -20,7 +20,9 @@
 //	if err != nil { ... }
 //	defer app.Close()
 //	go app.Run(ctx)
-//	acc, err := app.Invoke(ctx, tag)
+//	_ = app.Memberships().Join(ctx, "acme", "slack://T01/C02", "docs-bot",
+//		membership.Rule{Types: []string{"message"}})
+//	err = app.Publish(ctx, msg) // a message.posted.v1 naming docs-bot
 //
 // Code-shaped extensions are options too: a model provider, a tool source, a
 // connector, an MCP tool provider. Configuration from files or the
@@ -52,6 +54,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/cron"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/egress"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/membership"
@@ -77,13 +80,13 @@ func apply(opts []Option) options {
 // Deployment.
 
 // WithTenant sets the authorization scope this deployment serves. It is
-// stamped onto every tag a connector raises (a trigger has no credential to
-// derive one from), mentions on Slack, GitHub and Jira resolve agents in it,
-// the author agent is seeded for it, and tool providers declared without a
-// tenant are recorded under it. There is no default: without it nothing is
-// seeded, and WithSlack, WithGitHub and WithJira are ErrConfig, since they
-// would raise nothing a run could be accepted for. A schedule carries its own
-// tenant.
+// stamped onto every event a connector publishes (a trigger has no credential
+// to derive one from), mentions on GitHub and Jira resolve agents in it, Run
+// dispatches and delivers its events, the author agent is seeded for it, and
+// tool providers declared without a tenant are recorded under it. There is no
+// default: without it nothing is seeded, and WithSlack, WithGitHub and
+// WithJira are ErrConfig, since they would publish nothing a run could be
+// accepted for. A schedule carries its own tenant.
 func WithTenant(tenant string) Option { return func(o *options) { o.Tenant = tenant } }
 
 // WithWorkspace sets the directory the sandbox writes agent artifacts under.
@@ -175,6 +178,11 @@ func WithWorkerOptions(opts ...worker.Option) Option {
 	return func(o *options) { o.WorkerOpts = append(o.WorkerOpts, opts...) }
 }
 
+// WithEgressOptions adds options to the egress engine, after the App's own.
+func WithEgressOptions(opts ...egress.Option) Option {
+	return func(o *options) { o.EgressOpts = append(o.EgressOpts, opts...) }
+}
+
 // Extensions.
 
 // WithModelProvider makes a model provider selectable by name: a spec whose
@@ -253,7 +261,7 @@ func WithToolProvider(p toolprovider.Provider, accept ...toolprovider.Tool) Opti
 
 // WithPersonCredentials sets how a person-scoped MCP tool provider
 // (toolprovider.ScopePerson) finds the credential of the person a run acts
-// for. That person is the actor on the run's tag as it was accepted, which
+// for. That person is the actor on the run's trigger as it was accepted, which
 // the program composing fiber sets from the caller's credential (a surface
 // marked ActAs names the person it authenticated) and which no model output
 // can change. A reference the resolver returns is resolved like a provider's

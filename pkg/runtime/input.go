@@ -1,45 +1,11 @@
 package runtime
 
 import (
-	"net/url"
 	"strings"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 )
-
-// TriggerOf reads a tag as the event a run answers: message.posted.v1 with
-// the tag's text, actor, files and meta (as context, which renders the same
-// request text a tag always did). The source is the tag's surface address,
-// or "<origin>:<tenant>" for a tag with none, which is not an address, so the
-// run has no surface and its thread is its own.
-func TriggerOf(tag envelope.Tag) event.Envelope {
-	req := event.Request{Text: tag.Text, Actor: tag.Actor, Attachments: tag.Attachments}
-	if len(tag.Meta) > 0 {
-		req.Context = tag.Meta
-	}
-	if tag.Agent != "" {
-		req.Mentions = []string{tag.Agent}
-	}
-	source := tag.Source.String()
-	if tag.Source.IsZero() {
-		origin := tag.Origin
-		if origin == "" {
-			origin = "fiber"
-		}
-		source = origin + ":" + url.PathEscape(TenantOf(tag))
-	}
-	return event.Envelope{
-		ID:      tag.ID,
-		Source:  source,
-		Type:    event.TypeMessagePosted,
-		Channel: ChannelOf(tag),
-		Time:    tag.At,
-		Tenant:  tag.Tenant,
-		Data:    event.MessagePosted{Request: req},
-	}
-}
 
 // runID is the run this input belongs to.
 func (in Input) runID() string {
@@ -49,24 +15,49 @@ func (in Input) runID() string {
 	return RunID(in.Trigger.Tenant, in.Trigger.ID)
 }
 
-// Tag is the trigger read back as the tag TriggerOf made it from. The thread
-// journal, the surface reconciler and the answer rules still speak tags.
-func (in Input) Tag() envelope.Tag {
-	req, _ := event.RequestOf(in.Trigger.Data)
-	t := envelope.Tag{
-		ID:          in.Trigger.ID,
-		Tenant:      in.Trigger.Tenant,
-		Agent:       in.Subscriber,
-		Text:        req.Text,
-		Actor:       req.Actor,
-		Meta:        req.Context,
-		Attachments: req.Attachments,
-		At:          in.Trigger.Time,
+// request is what the trigger asks: its request, empty for a body that asks
+// nothing.
+func (in Input) request() event.Request {
+	r, _ := event.RequestOf(in.Trigger.Data)
+	return r
+}
+
+// Actor is who the run acts for: the actor on the trigger's request.
+func (in Input) Actor() event.Actor { return in.request().Actor }
+
+// surface is the address the trigger came from, and false for a trigger with
+// no surface (its source is not an address), such as a schedule's tick.
+func (in Input) surface() (address.Address, bool) {
+	a, err := address.Parse(in.Trigger.Source)
+	if err != nil {
+		return address.Address{}, false
 	}
-	if a, err := address.Parse(in.Trigger.Source); err == nil {
-		t.Source, t.Origin = a, a.Connector
-	} else {
-		t.Origin, _, _ = strings.Cut(in.Trigger.Source, ":")
+	return a, true
+}
+
+// Origin is the surface the trigger came through: the scheme of its source,
+// such as "slack", "github", "cron" or "delegation".
+func (in Input) Origin() string {
+	if a, ok := in.surface(); ok {
+		return a.Connector
 	}
-	return t
+	scheme, _, _ := strings.Cut(in.Trigger.Source, ":")
+	return scheme
+}
+
+// prompt is what the trigger asks of the model: its request text and the
+// trigger context rendered next to it (event.Prompt).
+func (in Input) prompt() (string, map[string]string) {
+	text, context, _ := event.Prompt(in.Trigger.Data)
+	return text, context
+}
+
+// rendered is the trigger as the catalog renders it for a model, and "" when
+// it cannot be rendered.
+func (in Input) rendered() string {
+	s, err := event.Render(in.Trigger)
+	if err != nil {
+		return ""
+	}
+	return s
 }

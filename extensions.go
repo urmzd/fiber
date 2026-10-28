@@ -20,6 +20,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/cron"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/egress"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/membership"
@@ -66,6 +67,7 @@ type options struct {
 	Workspace   string
 	RuntimeOpts []runtime.Option
 	WorkerOpts  []worker.Option
+	EgressOpts  []egress.Option
 
 	// Deployment.
 	Tenant         string

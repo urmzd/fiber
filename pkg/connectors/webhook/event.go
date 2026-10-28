@@ -2,77 +2,80 @@ package webhook
 
 import (
 	"encoding/json"
-	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/event"
-	"github.com/urmzd/fiber/pkg/event/legacy"
 )
 
-// Body is the JSON an outbound POST carries: one event, in the v1 wire shape
-// receivers already read (a kind, a topic and an inline payload). The v2 body,
-// the envelope itself, replaces it with the adapter rework.
+// SpecVersion is the CloudEvents version the body follows.
+const SpecVersion = "1.0"
+
+// BodyVersion is the version of the body shape, sent in HeaderVersion. The
+// first body carried a kind, a topic and a payload; version 2 is the event
+// envelope itself.
+const BodyVersion = "2"
+
+// Body is the JSON an outbound POST carries: one event envelope, with the
+// CloudEvents specversion. Data is the typed body as inline JSON. A sensitive
+// body (event.Entry.Sensitive) is left out unless the endpoint opts in, and
+// Redacted says so.
 type Body struct {
-	Seq    uint64 `json:"seq"`
-	Topic  string `json:"topic"`
-	RunID  string `json:"run_id"`
-	Tenant string `json:"tenant"`
-	Agent  string `json:"agent"`
-	Rev    int    `json:"rev"`
-	Origin string `json:"origin"`
-	Kind   string `json:"kind"`
-
-	// Payload carries a JSON payload inline.
-	Payload json.RawMessage `json:"payload,omitempty"`
-	// PayloadB64 carries a payload that is not JSON. The two fields are
-	// distinct rather than one polymorphic field so a consumer never has to
-	// guess which encoding it received.
-	PayloadB64 []byte `json:"payload_b64,omitempty"`
-
-	At time.Time `json:"at"`
+	SpecVersion string          `json:"specversion"`
+	ID          string          `json:"id"`
+	Source      string          `json:"source"`
+	Type        string          `json:"type"`
+	Subject     string          `json:"subject,omitempty"`
+	Channel     string          `json:"channel"`
+	Time        time.Time       `json:"time"`
+	Hops        int             `json:"hops"`
+	Tenant      string          `json:"tenant,omitempty"`
+	Run         string          `json:"run,omitempty"`
+	Seq         uint64          `json:"seq,omitempty"`
+	Agent       string          `json:"agent,omitempty"`
+	Version     string          `json:"version,omitempty"`
+	Digest      string          `json:"digest,omitempty"`
+	Data        json.RawMessage `json:"data,omitempty"`
+	Redacted    bool            `json:"redacted,omitempty"`
 }
 
-// BodyOf renders an event in the v1 wire shape. The kind is the old kind the
-// type replaced, the topic is the old run topic, the revision is the pinned
-// version's major number, and the origin is the channel's scheme.
-func BodyOf(e event.Envelope) Body {
-	kind, ok := legacy.KindOf(e.Type)
-	if !ok {
-		kind = e.Type
-	}
-	major, _, _ := strings.Cut(e.Version, ".")
-	rev, _ := strconv.Atoi(major)
+// BodyOf renders an event as a body. With sensitive false, a body the
+// catalog marks sensitive is left out.
+func BodyOf(e event.Envelope, sensitive bool) (Body, error) {
 	b := Body{
-		Seq:    e.Seq,
-		Topic:  legacy.Topic(e.Agent, e.Run),
-		RunID:  e.Run,
-		Tenant: e.Tenant,
-		Agent:  e.Agent,
-		Rev:    rev,
-		Origin: originOf(e.Channel),
-		Kind:   kind,
-		At:     e.Time.UTC(),
+		SpecVersion: SpecVersion,
+		ID:          e.ID,
+		Source:      e.Source,
+		Type:        e.Type,
+		Subject:     e.Subject,
+		Channel:     e.Channel,
+		Time:        e.Time.UTC(),
+		Hops:        e.Hops,
+		Tenant:      e.Tenant,
+		Run:         e.Run,
+		Seq:         e.Seq,
+		Agent:       e.Agent,
+		Version:     e.Version,
+		Digest:      e.Digest,
+	}
+	if entry, ok := event.Lookup(e.Type); ok && entry.Sensitive && !sensitive {
+		b.Redacted = true
+		return b, nil
 	}
 	if e.Data != nil {
-		if p, err := json.Marshal(e.Data); err == nil && string(p) != "null" {
-			b.Payload = p
+		data, err := json.Marshal(e.Data)
+		if err != nil {
+			return Body{}, err
+		}
+		if string(data) != "null" {
+			b.Data = data
 		}
 	}
-	return b
+	return b, nil
 }
 
-// originOf is the scheme of a channel: the surface the run was raised on.
-func originOf(channel string) string {
-	u, err := url.Parse(channel)
-	if err != nil {
-		return ""
-	}
-	return u.Scheme
-}
-
-// DeliveryID identifies one event exactly, and is what a receiver dedupes on.
+// DeliveryID identifies one event exactly, and is what a receiver dedupes on:
+// "<run>/<seq>" for a run event, and the event id for any other.
 //
 // Run plus sequence number rather than a fresh uuid per attempt: the whole point
 // is that a retry carries the SAME id as the attempt it repeats, so the receiver
