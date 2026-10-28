@@ -258,7 +258,8 @@ func (d *Dispatcher) Handle(ctx context.Context, e event.Envelope) ([]runtime.Ac
 }
 
 // producedBy reports whether agent produced e: it is the event's agent, or
-// the bot that wrote it.
+// the bot that wrote it. Ingress adapters set the event's agent when a bot
+// login maps to an agent, as GitHub does for a bot's push.
 func producedBy(e event.Envelope, agent string) bool {
 	if e.Agent == agent {
 		return true

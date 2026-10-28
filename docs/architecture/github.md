@@ -58,7 +58,9 @@ bot's comment publishes nothing whatever it mentions.
 The connector chooses no agent. The channel's members decide who answers
 (`pkg/membership`, `pkg/dispatch`). A login in `Bots` names its agent wherever
 it is mentioned, the app's own too, so when `Bots` maps the app's login,
-`@humagen what changed?` mentions that agent.
+`@humagen what changed?` mentions that agent. A `synchronize` sent by a bot
+login in `Bots` carries that agent as the event's `agent`, so an agent's own
+push never wakes the same agent.
 
 ## Where the answer lands
 

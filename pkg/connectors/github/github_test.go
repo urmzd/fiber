@@ -648,3 +648,26 @@ func ref(t *testing.T, e event.Envelope) event.GitHubRef {
 	}
 	return r
 }
+
+// A push by an agent's own bot names that agent as the event's producer, so
+// the dispatcher never wakes the agent on its own commit.
+func TestABotPushNamesItsAgent(t *testing.T) {
+	sync := strings.Replace(reviewRequested, `"action": "review_requested"`, `"action": "synchronize"`, 1)
+	sync = strings.Replace(sync, `"sha": "deadbeef"`, `"sha": "`+strings.Repeat("a", 40)+`"`, 1)
+	body := strings.Replace(sync, `"sender": {"login": "urmzd", "type": "User"}`, `"sender": {"login": "acme-app[bot]", "type": "Bot"}`, 1)
+	c, tags := start(t, github.Config{
+		Bots:       map[string]string{"acme-app[bot]": "reviewer"},
+		Automation: func(github.Hook) (string, bool) { return "review", true },
+	})
+	w := httptest.NewRecorder()
+	c.ServeHTTP(w, deliver(t, "pull_request", "d-sync", body))
+	if e := receive(t, tags); e.Agent != "reviewer" {
+		t.Fatalf("Agent = %q, want reviewer", e.Agent)
+	}
+
+	human := strings.Replace(sync, strings.Repeat("a", 40), strings.Repeat("b", 40), 1)
+	c.ServeHTTP(httptest.NewRecorder(), deliver(t, "pull_request", "d-sync-2", human))
+	if e := receive(t, tags); e.Agent != "" {
+		t.Fatalf("a person's push names agent %q", e.Agent)
+	}
+}

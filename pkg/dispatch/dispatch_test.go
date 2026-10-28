@@ -266,3 +266,30 @@ func TestSessionStopMapsToRuns(t *testing.T) {
 		t.Fatalf("stopped %v; want %v", got, want)
 	}
 }
+
+// A push by an agent's own bot, which GitHub ingress marks with that agent,
+// does not wake the agent, even though the bot's login is not its name.
+func TestBotPushDoesNotWakeItsAgent(t *testing.T) {
+	d, m, rt, _ := setup(t)
+	const gh = "github://acme/repo/pull/7"
+	rule := membership.Rule{Types: []string{"github.pull_request.synchronize"}}.Ambient()
+	for _, agent := range []string{"reviewer", "other"} {
+		if err := m.Join(context.Background(), "acme", "github://acme/", agent, rule); err != nil {
+			t.Fatal(err)
+		}
+	}
+	push := event.Envelope{
+		ID: "sync-1", Source: gh, Type: event.TypeGitHubPullSynchronize, Channel: gh, Tenant: "acme",
+		Time: time.Now().UTC(), Agent: "reviewer",
+		Data: event.GitHubPullSynchronize{Request: event.Request{Text: "review", Actor: event.Actor{ID: "acme-app[bot]", Bot: true}}},
+	}
+	handle(t, d, push)
+	for _, sub := range rt.runs() {
+		if sub == "reviewer" {
+			t.Fatal("reviewer was woken by its own push")
+		}
+	}
+	if len(rt.runs()) != 1 {
+		t.Fatalf("runs = %v; want one for other", rt.runs())
+	}
+}

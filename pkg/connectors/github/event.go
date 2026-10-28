@@ -351,8 +351,18 @@ func (c *Connector) eventFrom(name, delivery string, h hook) (event.Envelope, bo
 		Channel: channel.String(),
 		Time:    at,
 		Tenant:  c.cfg.Tenant,
+		Agent:   c.botAgent(h.Sender),
 		Data:    body,
 	}, true
+}
+
+// botAgent is the agent a bot sender stands for (Config.Bots), so the
+// dispatcher never wakes an agent on its own push. Empty for a person.
+func (c *Connector) botAgent(sender user) string {
+	if sender.Type != "Bot" {
+		return ""
+	}
+	return c.bots[strings.ToLower(sender.Login)]
 }
 
 // refOf is the issue or pull request an event is about, as its body carries
