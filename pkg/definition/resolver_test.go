@@ -175,3 +175,48 @@ func TestResolveRefusesRetired(t *testing.T) {
 		t.Errorf("a pinned run lost its retired sub-agent: %v", err)
 	}
 }
+
+// A delegation resolves its sub-agent under the parent's pin: every agent it
+// reaches stays at the version the parent recorded, even after a newer one
+// is published in range.
+func TestResolveUnderKeepsTheParentsVersions(t *testing.T) {
+	ctx := context.Background()
+	src := definition.NewMemory()
+	put(t, src, definitiontest.Record("acme", "checker", "1.0.0", "Check."))
+	put(t, src, definition.Record{Tenant: "acme", Content: withSubagent("writer", "1.0.0", "checker@^1"), CreatedBy: "ada"})
+	put(t, src, definition.Record{Tenant: "acme", Content: withSubagent("router", "1.0.0", "writer@^1"), CreatedBy: "ada"})
+	r := definition.NewResolver(src, definition.Checks{})
+	parent, err := r.Resolve(ctx, "acme", "router")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := parent.SubagentVersion("checker"); v != "1.0.0" {
+		t.Fatalf("parent pinned checker at %q", v)
+	}
+
+	put(t, src, definitiontest.Record("acme", "checker", "1.1.0", "Check harder."))
+	child, err := r.ResolveUnder(ctx, "acme", parent, "writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Version != "1.0.0" {
+		t.Errorf("writer pinned at %q, want 1.0.0", child.Version)
+	}
+	if v, _ := child.SubagentVersion("checker"); v != "1.0.0" {
+		t.Errorf("checker pinned at %q under the parent, want the parent's 1.0.0", v)
+	}
+	if _, err := r.Verify(ctx, "acme", child); err != nil {
+		t.Errorf("verify: %v", err)
+	}
+
+	// A name the parent did not pin fails terminally, never resolves latest.
+	if _, err := r.ResolveUnder(ctx, "acme", parent, "stranger"); !errors.Is(err, definition.ErrPin) || !run.IsNonRetryable(err) {
+		t.Errorf("resolve outside the pin = %v, want a terminal ErrPin", err)
+	}
+	// A reachable sub-agent the parent did not pin fails the same way.
+	partial := parent
+	partial.Subagents = []definition.Version{{Name: "writer", Version: "1.0.0"}}
+	if _, err := r.ResolveUnder(ctx, "acme", partial, "writer"); !errors.Is(err, definition.ErrPin) || !run.IsNonRetryable(err) {
+		t.Errorf("resolve with checker unpinned = %v, want a terminal ErrPin", err)
+	}
+}

@@ -1264,18 +1264,11 @@ func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (event.Questi
 	return event.Question{}, false
 }
 
-// subagent loads the definition a delegation runs: the version the parent's
-// pin names for target, verified, or the latest when the pin names none.
+// subagent loads the definition a delegation runs, verified: target and
+// every sub-agent it reaches at the versions the parent's pin names. A
+// target the pin does not name fails terminally.
 func (s *Sandbox) subagent(ctx context.Context, parent Request, target string) (definition.Loaded, error) {
-	var (
-		pin definition.Pin
-		err error
-	)
-	if v, ok := parent.Pin.SubagentVersion(definition.NormalizeName(target)); ok {
-		pin, err = s.defs.ResolveAt(ctx, parent.Tenant, target, v)
-	} else {
-		pin, err = s.defs.Resolve(ctx, parent.Tenant, target)
-	}
+	pin, err := s.defs.ResolveUnder(ctx, parent.Tenant, parent.Pin, target)
 	if err != nil {
 		return definition.Loaded{}, err
 	}

@@ -15,7 +15,6 @@ import (
 	"github.com/urmzd/anchor/pkg/run"
 
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/turn/native"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
@@ -992,10 +991,9 @@ func (r *Runtime) startChild(ctx context.Context, parent Input, q event.Question
 	if err != nil {
 		return "", anchor.NonRetryable(err)
 	}
-	// The child runs the version its parent pinned for it, when it pinned
-	// one; a target outside the pin resolves its latest.
-	version, _ := parent.Pin.SubagentVersion(definition.NormalizeName(target))
-	acc, err := r.start(context.WithoutCancel(ctx), in, version)
+	// The child runs exactly what its parent pinned for it, sub-agents
+	// included. A target outside the pin fails terminally.
+	acc, err := r.start(context.WithoutCancel(ctx), in, parent.Pin)
 	if err != nil {
 		if acc.RunID != "" {
 			// Durable, and the janitor will drive it.

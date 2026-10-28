@@ -183,13 +183,14 @@ type Bus interface {
 // *definition.Resolver implements it.
 //
 // Resolve is called once, at accept time, and is the only place "latest" is
-// ever asked for. ResolveAt pins one exact version, for a delegation that
-// runs the sub-agent version its parent pinned. Verify is called on every
+// ever asked for. ResolveUnder pins a sub-agent exactly as its parent's pin
+// names it, for a delegation, and fails terminally for a name the parent did
+// not pin. Verify is called on every
 // execution of a run with the pin it accepted; it reloads exactly that and
 // fails terminally when it no longer holds.
 type Definitions interface {
 	Resolve(ctx context.Context, tenant, name string) (definition.Pin, error)
-	ResolveAt(ctx context.Context, tenant, name, version string) (definition.Pin, error)
+	ResolveUnder(ctx context.Context, tenant string, parent definition.Pin, name string) (definition.Pin, error)
 	Verify(ctx context.Context, tenant string, pin definition.Pin) (definition.Loaded, error)
 }
 
@@ -643,13 +644,13 @@ func (r *Runtime) Accept(ctx context.Context, trigger event.Envelope, subscriber
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: no subscriber", trigger.ID, ErrInvalid)
 	}
 	runID := RunKey(trigger.Tenant, trigger.ID, subscriber)
-	return r.start(ctx, Input{Trigger: trigger, Subscriber: subscriber, Run: runID}, "")
+	return r.start(ctx, Input{Trigger: trigger, Subscriber: subscriber, Run: runID}, definition.Pin{})
 }
 
 // start resolves and pins the definition and history of in, then announces
-// and submits the run, in that order (see Accept). A version pins that exact
-// version, for a child run.
-func (r *Runtime) start(ctx context.Context, in Input, version string) (Acceptance, error) {
+// and submits the run, in that order (see Accept). A non-zero parent pins
+// the agent exactly as the parent's pin names it, for a child run.
+func (r *Runtime) start(ctx context.Context, in Input, parent definition.Pin) (Acceptance, error) {
 	id := in.Trigger.ID
 	if in.Subscriber == ReservedName {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", id, ErrInvalid, in.Subscriber)
@@ -662,8 +663,8 @@ func (r *Runtime) start(ctx context.Context, in Input, version string) (Acceptan
 		pin definition.Pin
 		err error
 	)
-	if version != "" {
-		pin, err = r.defs.ResolveAt(ctx, in.Trigger.Tenant, in.Subscriber, version)
+	if !parent.IsZero() {
+		pin, err = r.defs.ResolveUnder(ctx, in.Trigger.Tenant, parent, in.Subscriber)
 	} else {
 		pin, err = r.defs.Resolve(ctx, in.Trigger.Tenant, in.Subscriber)
 	}

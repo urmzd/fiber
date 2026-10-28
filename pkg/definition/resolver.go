@@ -110,8 +110,9 @@ func (r *Resolver) Resolve(ctx context.Context, tenant, name string) (Pin, error
 	return r.pin(ctx, tenant, root)
 }
 
-// ResolveAt pins one exact version of name. It is how a delegation runs the
-// sub-agent version its parent pinned.
+// ResolveAt pins one exact version of name, with each sub-agent at the latest
+// version its range admits. A delegation uses ResolveUnder instead, which
+// keeps every sub-agent at the version its parent pinned.
 func (r *Resolver) ResolveAt(ctx context.Context, tenant, name, version string) (Pin, error) {
 	root, err := r.src.Get(ctx, tenant, NormalizeName(name), version)
 	if err != nil {
@@ -120,8 +121,39 @@ func (r *Resolver) ResolveAt(ctx context.Context, tenant, name, version string) 
 	return r.pin(ctx, tenant, root)
 }
 
+// ResolveUnder pins the sub-agent name exactly as parent pinned it: the
+// version parent recorded for it, and every sub-agent it reaches at the
+// version parent recorded for that one. It never asks for "latest", so a
+// delegation or a retried turn cannot run a prompt parent did not pin. A
+// reachable name parent did not pin fails terminally with ErrPin.
+func (r *Resolver) ResolveUnder(ctx context.Context, tenant string, parent Pin, name string) (Pin, error) {
+	name = NormalizeName(name)
+	fixed := make(map[string]string, len(parent.Subagents))
+	for _, s := range parent.Subagents {
+		fixed[s.Name] = s.Version
+	}
+	version, ok := fixed[name]
+	if !ok {
+		return Pin{}, anchor.NonRetryable(fmt.Errorf("%w: %s@%s did not pin %s", ErrPin, parent.Name, parent.Version, name))
+	}
+	root, err := r.src.Get(ctx, tenant, name, version)
+	if errors.Is(err, ErrNotFound) {
+		return Pin{}, anchor.NonRetryable(fmt.Errorf("%w: %s@%s pinned %s@%s, which is gone: %w", ErrPin, parent.Name, parent.Version, name, version, err))
+	}
+	if err != nil {
+		return Pin{}, err
+	}
+	return r.pinTree(ctx, tenant, root, fixed)
+}
+
 func (r *Resolver) pin(ctx context.Context, tenant string, root Record) (Pin, error) {
-	tree, err := r.tree(ctx, tenant, root)
+	return r.pinTree(ctx, tenant, root, nil)
+}
+
+// pinTree pins root. With fixed nil, each sub-agent is the latest version its
+// range admits; otherwise it is exactly the version fixed names.
+func (r *Resolver) pinTree(ctx context.Context, tenant string, root Record, fixed map[string]string) (Pin, error) {
+	tree, err := r.tree(ctx, tenant, root, fixed)
 	if err != nil {
 		return Pin{}, err
 	}
@@ -138,9 +170,10 @@ func (r *Resolver) pin(ctx context.Context, tenant string, root Record) (Pin, er
 }
 
 // tree picks the root and the highest live version of every sub-agent it
-// reaches whose range admits it. One version per name: two references to
-// one name that admit different versions are refused.
-func (r *Resolver) tree(ctx context.Context, tenant string, root Record) ([]Agent, error) {
+// reaches whose range admits it, or the version fixed names when fixed is not
+// nil. One version per name: two references to one name that admit
+// different versions are refused.
+func (r *Resolver) tree(ctx context.Context, tenant string, root Record, fixed map[string]string) ([]Agent, error) {
 	picked := map[string]Record{root.Name: root}
 	order := []Record{root}
 	var agents []Agent
@@ -169,22 +202,13 @@ func (r *Resolver) tree(ctx context.Context, tenant string, root Record) ([]Agen
 				}
 				continue
 			}
-			if _, err := r.src.Latest(ctx, tenant, ref.Name); err != nil {
-				return nil, fmt.Errorf("%s: sub-agent %s: %w", rec.Name, ref.Name, err)
-			}
-			versions, err := r.src.Versions(ctx, tenant, ref.Name)
-			if err != nil {
-				return nil, fmt.Errorf("%s: sub-agent %s: %w", rec.Name, ref.Name, err)
-			}
 			var pick *Record
-			for j := len(versions) - 1; j >= 0; j-- {
-				if v, err := sdef.ParseVersion(versions[j].Version); err == nil && rng.Matches(v) {
-					pick = &versions[j]
-					break
+			if fixed != nil {
+				if pick, err = r.fixedVersion(ctx, tenant, rec, ref.Name, rng, fixed); err != nil {
+					return nil, err
 				}
-			}
-			if pick == nil {
-				return nil, fmt.Errorf("%w: %s: no version of %s matches %q", ErrNotFound, rec.Name, ref.Name, ref.Range)
+			} else if pick, err = r.latestInRange(ctx, tenant, rec, ref.Name, ref.Range, rng); err != nil {
+				return nil, err
 			}
 			if len(order) >= MaxTree {
 				return nil, fmt.Errorf("%w: %s reaches more than %d definitions", ErrInvalid, root.Name, MaxTree)
@@ -194,6 +218,44 @@ func (r *Resolver) tree(ctx context.Context, tenant string, root Record) ([]Agen
 		}
 	}
 	return agents, nil
+}
+
+// latestInRange is the highest live version of name that rng admits.
+func (r *Resolver) latestInRange(ctx context.Context, tenant string, rec Record, name, raw string, rng sdef.Range) (*Record, error) {
+	if _, err := r.src.Latest(ctx, tenant, name); err != nil {
+		return nil, fmt.Errorf("%s: sub-agent %s: %w", rec.Name, name, err)
+	}
+	versions, err := r.src.Versions(ctx, tenant, name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: sub-agent %s: %w", rec.Name, name, err)
+	}
+	for j := len(versions) - 1; j >= 0; j-- {
+		if v, err := sdef.ParseVersion(versions[j].Version); err == nil && rng.Matches(v) {
+			return &versions[j], nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s: no version of %s matches %q", ErrNotFound, rec.Name, name, raw)
+}
+
+// fixedVersion is the version of name that fixed pins. A name it does not
+// pin, a pinned version that is gone or one rng does not admit fails
+// terminally.
+func (r *Resolver) fixedVersion(ctx context.Context, tenant string, rec Record, name string, rng sdef.Range, fixed map[string]string) (*Record, error) {
+	version, ok := fixed[name]
+	if !ok {
+		return nil, anchor.NonRetryable(fmt.Errorf("%w: %s reaches %s, which the parent did not pin", ErrPin, rec.Name, name))
+	}
+	if v, err := sdef.ParseVersion(version); err != nil || !rng.Matches(v) {
+		return nil, anchor.NonRetryable(fmt.Errorf("%w: %s asks for %s in a range that excludes the pinned %s", ErrPin, rec.Name, name, version))
+	}
+	got, err := r.src.Get(ctx, tenant, name, version)
+	if errors.Is(err, ErrNotFound) {
+		return nil, anchor.NonRetryable(fmt.Errorf("%w: pinned %s@%s is gone: %w", ErrPin, name, version, err))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &got, nil
 }
 
 // resolve runs saige's registry over exactly the given definitions.

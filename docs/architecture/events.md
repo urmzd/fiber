@@ -347,6 +347,11 @@ when the reloaded digest or policy hash does not match, when a pinned row is
 missing, or when the digest is empty. A newer prompt never runs under an old
 pin.
 
+**Delegation** resolves a sub-agent under its parent's pin
+(`Resolver.ResolveUnder`): the sub-agent and every agent it reaches run at the
+version the parent recorded in `Subagents`. A target or a reachable name the
+parent did not pin fails terminally with `ErrPin`; it never resolves "latest".
+
 **The definition Source** is scoped by tenant and insert only. A version, once
 written, is never updated, so a pin stays resolvable for as long as the run
 can be replayed. `Put` of identical content is a no-op and of other content
