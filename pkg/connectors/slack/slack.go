@@ -74,6 +74,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Name is the address scheme this connector owns.
@@ -315,7 +316,7 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Deliver implements connector.Sink.
-func (c *Connector) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (c *Connector) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	if err := c.reachable(target); err != nil {
 		return err
 	}

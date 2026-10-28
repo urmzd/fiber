@@ -29,6 +29,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/thread/threadtest"
@@ -600,11 +601,11 @@ func TestAJournalThatLostWhatARunPinnedFailsTheRunTerminally(t *testing.T) {
 	if n := h.exec.count(); n != 0 {
 		t.Errorf("the executor ran %d times, want 0: the loss must be caught before the model", n)
 	}
-	failed := h.bus.ofKind(envelope.KindFailed)
+	failed := h.bus.ofKind(event.TypeFailed)
 	if len(failed) == 0 {
 		t.Fatal("no failure was published")
 	}
-	body, err := payload.Decode[payload.Lifecycle](failed[0])
+	body, err := decode[payload.Lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -635,14 +636,14 @@ func TestAFailedJournalAppendIsRetriedWithoutPayingForTheModelAgain(t *testing.T
 	if got := said(journal(t, store, thread.KeyOf(tg))); !reflect.DeepEqual(got, []string{"user: hello", "assistant: answered"}) {
 		t.Fatalf("journal = %q, want the exchange recorded by the retry", got)
 	}
-	failed := h.bus.ofKind(envelope.KindFailed)
+	failed := h.bus.ofKind(event.TypeFailed)
 	if len(failed) != 1 {
 		t.Fatalf("got %d failed events, want 1 for the attempt that could not record", len(failed))
 	}
-	if body, err := payload.Decode[payload.Lifecycle](failed[0]); err != nil || body.Terminal {
+	if body, err := decode[payload.Lifecycle](failed[0]); err != nil || body.Terminal {
 		t.Errorf("the failed append was reported as %+v, %v; want a retryable failure", body, err)
 	}
-	completed := h.bus.ofKind(envelope.KindCompleted)
+	completed := h.bus.ofKind(event.TypeCompleted)
 	if len(completed) != 1 || completed[0].Seq <= failed[0].Seq {
 		t.Errorf("want exactly one completed event, after the failed attempt; got %d", len(completed))
 	}

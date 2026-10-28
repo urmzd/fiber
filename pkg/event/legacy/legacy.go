@@ -90,6 +90,20 @@ func TypeOf(kind string) (string, error) {
 	return "", fmt.Errorf("%w: %q", ErrUnknown, kind)
 }
 
+// KindOf returns the old kind a type replaced, for a reader that still
+// speaks the old wire shape. A type with no old kind reports false.
+func KindOf(typ string) (string, bool) {
+	for k, t := range kinds {
+		if t == typ {
+			return k, true
+		}
+	}
+	return "", false
+}
+
+// Topic is the old topic a run event was published to: agent:<name>:<run>.
+func Topic(agent, run string) string { return "agent:" + agent + ":" + run }
+
 // KeptKinds returns the old kinds that still map to a type, sorted. Stored
 // data depends on these names, so they never change.
 func KeptKinds() []string {

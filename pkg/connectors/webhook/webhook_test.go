@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,9 +16,8 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/signature"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 const secret = "an outbound signing secret"
@@ -87,7 +87,7 @@ func TestTheBodyCarriesTheEventWithAJsonPayloadInline(t *testing.T) {
 	c := connectorAt(t, rec.URL, nil)
 
 	e := textEvent(7, "the retry path posts twice")
-	e.Tenant, e.Rev = "acme", 3
+	e.Tenant, e.Version = "acme", "3"
 	if err := c.Deliver(context.Background(), target, e); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestTheBodyCarriesTheEventWithAJsonPayloadInline(t *testing.T) {
 	}
 	for header, want := range map[string]string{
 		webhook.HeaderDelivery: "run_1/7",
-		webhook.HeaderEvent:    string(envelope.KindText),
+		webhook.HeaderEvent:    "delta.text",
 		webhook.HeaderTopic:    "agent:docs-bot:run_1",
 		"X-Receiver-Key":       "configured",
 	} {
@@ -120,7 +120,7 @@ func TestTheBodyCarriesTheEventWithAJsonPayloadInline(t *testing.T) {
 	if body.Seq != 7 || body.RunID != "run_1" || body.Agent != "docs-bot" || body.Rev != 3 || body.Tenant != "acme" {
 		t.Errorf("body = %+v", body)
 	}
-	if body.Kind != string(envelope.KindText) || body.Origin != "cron" {
+	if body.Kind != "delta.text" || body.Origin != "cron" {
 		t.Errorf("kind/origin = %q/%q", body.Kind, body.Origin)
 	}
 	// The payload arrives as an object, not as a base64 string a receiver would
@@ -136,26 +136,6 @@ func TestTheBodyCarriesTheEventWithAJsonPayloadInline(t *testing.T) {
 	}
 	if len(body.PayloadB64) != 0 {
 		t.Error("a JSON payload was also base64 encoded, so a receiver has two places to look")
-	}
-}
-
-func TestAPayloadThatIsNotJsonTravelsInItsOwnField(t *testing.T) {
-	rec := newReceiver(t, http.StatusOK)
-	c := connectorAt(t, rec.URL, nil)
-
-	e := event(1, envelope.KindText, "\xff\xfe raw bytes")
-	if err := c.Deliver(context.Background(), target, e); err != nil {
-		t.Fatal(err)
-	}
-	var body webhook.Body
-	if err := json.Unmarshal(rec.only(t).body, &body); err != nil {
-		t.Fatal(err)
-	}
-	if len(body.Payload) != 0 {
-		t.Errorf("payload = %s, want the non-JSON field instead", body.Payload)
-	}
-	if string(body.PayloadB64) != "\xff\xfe raw bytes" {
-		t.Errorf("payload_b64 = %q", body.PayloadB64)
 	}
 }
 
@@ -533,23 +513,33 @@ func connectorAt(t *testing.T, base string, tweak func(*webhook.Config)) *webhoo
 	return c
 }
 
-func event(seq uint64, kind envelope.Kind, payload string) envelope.Event {
-	return envelope.Event{
+func ev(seq uint64, typ, data string) event.Envelope {
+	if data == "" {
+		data = "{}"
+	}
+	body, err := event.Decode(typ, json.RawMessage(data))
+	if err != nil {
+		panic(err)
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("run_1:%d", seq),
+		Source:  "fiber://run/run_1",
+		Type:    typ,
+		Channel: "cron://acme/nightly",
+		Tenant:  "acme",
+		Run:     "run_1",
 		Seq:     seq,
-		Topic:   topic.MustParse("agent:docs-bot:run_1"),
-		RunID:   "run_1",
 		Agent:   "docs-bot",
-		Origin:  "cron",
-		Kind:    kind,
-		Payload: []byte(payload),
-		At:      time.Unix(1784600000, 0).UTC(),
+		Version: "1",
+		Time:    time.Unix(1784600000, 0).UTC(),
+		Data:    body,
 	}
 }
 
-func textEvent(seq uint64, s string) envelope.Event {
+func textEvent(seq uint64, s string) event.Envelope {
 	encoded, err := json.Marshal(s)
 	if err != nil {
 		panic(err)
 	}
-	return event(seq, envelope.KindText, `{"text":`+string(encoded)+`}`)
+	return ev(seq, event.TypeText, `{"text":`+string(encoded)+`}`)
 }

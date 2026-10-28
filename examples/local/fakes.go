@@ -22,9 +22,8 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
@@ -101,7 +100,7 @@ type slackThread struct {
 	target string
 	edits  int
 	body   strings.Builder
-	notes  []payload.Citation
+	notes  []event.Citation
 	events int
 	done   bool
 }
@@ -116,45 +115,37 @@ func (s *slackSink) Name() string { return "slack" }
 
 // Deliver implements connector.Sink. It is handed every event whose kind the
 // route selected — for this demo, every kind at all.
-func (s *slackSink) Deliver(_ context.Context, target address.Address, e envelope.Event) error {
+func (s *slackSink) Deliver(_ context.Context, target address.Address, e event.Envelope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	th := s.threads[e.RunID]
+	th := s.threads[e.Run]
 	if th == nil {
 		th = &slackThread{target: target.String()}
-		s.threads[e.RunID] = th
+		s.threads[e.Run] = th
 	}
 	th.events++
 
-	switch e.Kind {
-	case envelope.KindAccepted:
+	switch b := e.Data.(type) {
+	case event.Accepted:
 		th.edits++
 		s.out.record(e.Seq, "slack", "    slack   post   %s", th.target)
 		s.out.record(e.Seq, "slack", "    slack   edit %d  %s", th.edits, "_docs-bot is looking into this..._")
 
-	case envelope.KindCitation:
-		c, err := payload.Decode[payload.Citation](e)
-		if err != nil {
-			return err
-		}
-		th.notes = append(th.notes, c)
+	case event.Citation:
+		th.notes = append(th.notes, b)
 
-	case envelope.KindText:
-		t, err := payload.Decode[payload.Text](e)
-		if err != nil {
-			return err
-		}
-		th.body.WriteString(t.Text)
+	case event.Text:
+		th.body.WriteString(b.Text)
 		th.edits++
 		s.out.record(e.Seq, "slack", "    slack   edit %d  %s", th.edits, quote(th.body.String()))
 
-	case envelope.KindStopped:
+	case event.Stopped:
 		// A stopped run is over too: its partial answer is the last edit.
 		th.done = true
 		s.out.record(e.Seq, "slack", "    slack   edit %d  (stopped)", th.edits+1)
 
-	case envelope.KindCompleted:
+	case event.Completed:
 		th.done = true
 		s.out.record(e.Seq, "slack", "    slack   edit %d  (final, with %d footnote(s))", th.edits+1, len(th.notes))
 		for _, c := range th.notes {
@@ -187,35 +178,38 @@ type webhookSink struct {
 
 	mu     sync.Mutex
 	posts  map[string]int // run id -> bodies posted
-	kinds  map[envelope.Kind]int
+	kinds  map[string]int
 	bodies []string
 }
 
 func newWebhookSink(out *transcript) *webhookSink {
-	return &webhookSink{out: out, posts: make(map[string]int), kinds: make(map[envelope.Kind]int)}
+	return &webhookSink{out: out, posts: make(map[string]int), kinds: make(map[string]int)}
 }
 
 func (w *webhookSink) Name() string { return "webhook" }
 
-func (w *webhookSink) Deliver(_ context.Context, target address.Address, e envelope.Event) error {
-	life, err := payload.Decode[payload.Lifecycle](e)
-	if err != nil {
-		return err
+func (w *webhookSink) Deliver(_ context.Context, target address.Address, e event.Envelope) error {
+	var text string
+	switch b := e.Data.(type) {
+	case event.Completed:
+		text = b.Text
+	case event.Stopped:
+		text = b.Text
 	}
 	body, err := json.Marshal(map[string]any{
-		"run":   e.RunID,
-		"agent": e.Agent,
-		"rev":   e.Rev,
-		"kind":  string(e.Kind),
-		"text":  life.Text,
+		"run":     e.Run,
+		"agent":   e.Agent,
+		"version": e.Version,
+		"type":    e.Type,
+		"text":    text,
 	})
 	if err != nil {
 		return err
 	}
 
 	w.mu.Lock()
-	w.posts[e.RunID]++
-	w.kinds[e.Kind]++
+	w.posts[e.Run]++
+	w.kinds[e.Type]++
 	w.bodies = append(w.bodies, string(body))
 	w.mu.Unlock()
 
@@ -232,10 +226,10 @@ func (w *webhookSink) delivered(runID string) int {
 
 // seenKinds returns every kind this sink was ever handed, which is the evidence
 // for "the webhook never saw a delta".
-func (w *webhookSink) seenKinds() map[envelope.Kind]int {
+func (w *webhookSink) seenKinds() map[string]int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make(map[envelope.Kind]int, len(w.kinds))
+	out := make(map[string]int, len(w.kinds))
 	for k, v := range w.kinds {
 		out[k] = v
 	}
@@ -357,14 +351,14 @@ func newFlakyBus(b bus.Bus) *flakyBus {
 }
 
 // failOnce arms one failure for the next publish of kind on runID.
-func (f *flakyBus) failOnce(runID string, kind envelope.Kind) {
+func (f *flakyBus) failOnce(runID, typ string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.fail[runID+"/"+string(kind)]++
+	f.fail[runID+"/"+typ]++
 }
 
-func (f *flakyBus) Publish(ctx context.Context, e envelope.Event) error {
-	key := e.RunID + "/" + string(e.Kind)
+func (f *flakyBus) Publish(ctx context.Context, e event.Envelope) error {
+	key := e.Run + "/" + e.Type
 	f.mu.Lock()
 	armed := f.fail[key] > 0
 	if armed {
@@ -373,7 +367,7 @@ func (f *flakyBus) Publish(ctx context.Context, e envelope.Event) error {
 	f.mu.Unlock()
 
 	if armed {
-		return fmt.Errorf("simulated broker outage publishing %s seq %d", e.Kind, e.Seq)
+		return fmt.Errorf("simulated broker outage publishing %s seq %d", e.Type, e.Seq)
 	}
 	return f.Bus.Publish(ctx, e)
 }
@@ -386,12 +380,12 @@ func (f *flakyBus) Publish(ctx context.Context, e envelope.Event) error {
 
 type observer struct {
 	mu   sync.Mutex
-	seen []envelope.Event
+	seen []event.Envelope
 }
 
 // watch subscribes and collects until ctx is cancelled. It returns a channel
 // closed when the subscription has ended, so main can shut down cleanly.
-func (o *observer) watch(ctx context.Context, b bus.Bus, sub envelope.Subscription) (<-chan struct{}, error) {
+func (o *observer) watch(ctx context.Context, b bus.Bus, sub bus.Subscription) (<-chan struct{}, error) {
 	stream, err := b.Subscribe(ctx, sub)
 	if err != nil {
 		return nil, err
@@ -414,12 +408,12 @@ func (o *observer) watch(ctx context.Context, b bus.Bus, sub envelope.Subscripti
 }
 
 // events returns everything the observer saw for one run, in arrival order.
-func (o *observer) events(runID string) []envelope.Event {
+func (o *observer) events(runID string) []event.Envelope {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	var out []envelope.Event
+	var out []event.Envelope
 	for _, e := range o.seen {
-		if e.RunID == runID {
+		if e.Run == runID {
 			out = append(out, e)
 		}
 	}
@@ -445,18 +439,18 @@ func (o *observer) runs() []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, e := range o.seen {
-		if !seen[e.RunID] {
-			seen[e.RunID] = true
-			out = append(out, e.RunID)
+		if !seen[e.Run] {
+			seen[e.Run] = true
+			out = append(out, e.Run)
 		}
 	}
 	return out
 }
 
 // sawKind reports whether the observer received a kind for a run.
-func (o *observer) sawKind(runID string, kind envelope.Kind) bool {
+func (o *observer) sawKind(runID, typ string) bool {
 	for _, e := range o.events(runID) {
-		if e.Kind == kind {
+		if e.Type == typ {
 			return true
 		}
 	}
@@ -487,39 +481,24 @@ func quote(s string) string {
 	return `"` + s[:width-20] + " … " + s[len(s)-17:] + `"`
 }
 
-// decodeCitation reads a delta.citation event's body.
-func decodeCitation(e envelope.Event) (payload.Citation, error) {
-	return payload.Decode[payload.Citation](e)
-}
-
-// summarize renders an event's payload as one short line, for the observer's
-// log. It goes through pkg/agentrt/payload, which is a leaf package: decoding
-// an event needs neither saige nor anchor, which is the point of it existing.
-func summarize(e envelope.Event) string {
-	body, known, err := payload.Of(e)
-	if err != nil || !known {
-		return ""
-	}
-	switch v := body.(type) {
-	case payload.Text:
+// summarize renders an event's body as one short line, for the observer's
+// log. Bodies are typed, so a type switch is the whole decoder.
+func summarize(e event.Envelope) string {
+	switch v := e.Data.(type) {
+	case event.Text:
 		return quote(v.Text)
-	case payload.Citation:
+	case event.Citation:
 		return fmt.Sprintf("%s %s", v.Label, v.Source.SourceURI)
-	case payload.Lifecycle:
-		var parts []string
-		if v.Rev > 0 {
-			parts = append(parts, fmt.Sprintf("rev=%d", v.Rev))
-		}
-		if v.Attempt > 0 {
-			parts = append(parts, fmt.Sprintf("attempt=%d", v.Attempt))
-		}
-		if v.Text != "" {
-			parts = append(parts, quote(v.Text))
-		}
-		if v.Error != "" {
-			parts = append(parts, "error="+v.Error)
-		}
-		return strings.Join(parts, " ")
+	case event.Accepted:
+		return "version=" + e.Version
+	case event.Started:
+		return fmt.Sprintf("attempt=%d", v.Attempt)
+	case event.Resumed:
+		return fmt.Sprintf("attempt=%d", v.Attempt)
+	case event.Completed:
+		return strings.TrimSpace(fmt.Sprintf("attempt=%d %s", v.Attempt, quote(v.Text)))
+	case event.Failed:
+		return fmt.Sprintf("attempt=%d error=%s", v.Attempt, v.Error)
 	default:
 		return ""
 	}

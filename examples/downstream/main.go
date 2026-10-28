@@ -27,11 +27,12 @@ import (
 
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/registry"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
@@ -76,16 +77,22 @@ func run() error {
 		return err
 	}
 
-	// Watch the agent's topic, then raise a tag the way any trigger would.
-	stream, err := app.Bus().Subscribe(ctx, envelope.Subscription{Topic: topic.MustParse("agent:oncall")})
+	// Watch the channel the tag is raised on, then raise it the way any
+	// trigger would.
+	tag := envelope.Tag{
+		ID: fmt.Sprintf("downstream-%d", time.Now().UnixNano()), Tenant: tenant,
+		Agent: "oncall", Origin: "downstream", Text: "api is down", At: time.Now(),
+	}
+	stream, err := app.Bus().Subscribe(ctx, bus.Subscription{
+		Tenant:   runtime.TenantOf(tag),
+		Channels: []string{runtime.ChannelOf(tag)},
+		Types:    []string{"run"},
+	})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stream.Close() }()
-	acc, err := app.Invoke(ctx, envelope.Tag{
-		ID: fmt.Sprintf("downstream-%d", time.Now().UnixNano()), Tenant: tenant,
-		Agent: "oncall", Origin: "downstream", Text: "api is down", At: time.Now(),
-	})
+	acc, err := app.Invoke(ctx, tag)
 	if err != nil {
 		return err
 	}
@@ -94,16 +101,14 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if e.RunID != acc.RunID {
+		if e.Run != acc.RunID {
 			continue
 		}
-		switch e.Kind {
-		case envelope.KindText:
-			if t, err := payload.Decode[payload.Text](e); err == nil {
-				fmt.Print(t.Text)
-			}
-		case envelope.KindCompleted, envelope.KindFailed, envelope.KindStopped:
-			fmt.Printf("\nrun %s: %s\n", acc.RunID, e.Kind)
+		switch b := e.Data.(type) {
+		case event.Text:
+			fmt.Print(b.Text)
+		case event.Completed, event.Failed, event.Stopped:
+			fmt.Printf("\nrun %s: %s\n", acc.RunID, e.Type)
 			cancel()
 			return <-done
 		}

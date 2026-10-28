@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -77,8 +78,8 @@ func toolResult(t *testing.T, chunks []agentrt.Chunk) payload.ToolDone {
 	t.Helper()
 	for _, c := range chunks {
 		if c.Kind == envelope.KindToolDone {
-			done, err := payload.Decode[payload.ToolDone](envelope.Event{Kind: c.Kind, Payload: c.Payload})
-			if err != nil {
+			var done payload.ToolDone
+			if err := json.Unmarshal(c.Payload, &done); err != nil {
 				t.Fatal(err)
 			}
 			return done

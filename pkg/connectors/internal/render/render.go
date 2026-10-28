@@ -32,29 +32,27 @@
 // only lifecycle events may see Seq 1, 40, 900 — and a scheme keyed on gaps in
 // the numbering would either grow without bound or fold immediately.
 //
-// # Payload tolerance
+// # Typed bodies
 //
-// Event.Payload is bytes and the bus never decodes it, so the runtime and these
-// connectors have to agree by convention rather than by type. The decoders here
-// accept the documented JSON shape and degrade to treating the payload as plain
-// text when it is not JSON, because a text delta that renders as its own bytes
-// is right far more often than one that renders as nothing. See payload.go for
-// the exact shapes.
+// Events carry typed bodies (pkg/event), so the document switches on the body
+// type and never decodes bytes by convention. A type it does not render, an
+// Unknown body included, changes nothing.
 //
-// This package depends only on the envelope, the address, and the standard
-// library. It knows nothing about any surface's markup: that is the sink's job,
-// and it reads a View.
+// This package depends only on the event and address packages and the
+// standard library. It knows nothing about any surface's markup: that is the
+// sink's job, and it reads a View.
 package render
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/address"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // DefaultWindow is how many sequence numbers above the mark a document
@@ -175,11 +173,13 @@ type Action struct {
 // renderer cannot mutate the document it is drawing and two renderers can draw
 // the same snapshot for two different surfaces.
 type View struct {
-	Agent  string
-	RunID  string
-	Rev    int
-	Origin string
-	Tenant string
+	Agent string
+	RunID string
+	// Version is the pinned definition version that produced the run.
+	Version string
+	// Channel is where the run's events were published.
+	Channel string
+	Tenant  string
 
 	Status Status
 	// Error is the failure message from lifecycle.failed, empty otherwise.
@@ -243,8 +243,7 @@ type Doc struct {
 	// Window overrides DefaultWindow. Zero means the default.
 	Window int
 
-	agent, runID, origin, tenant string
-	rev                          int
+	agent, runID, version, channel, tenant string
 
 	status    Status
 	statusSeq uint64
@@ -289,7 +288,7 @@ func New() *Doc { return &Doc{} }
 // does not render, which is what lets a sink skip a network round trip it does
 // not need — the single most common case in a live stream is a redelivery after
 // a resubscribe.
-func (d *Doc) Apply(e envelope.Event) bool {
+func (d *Doc) Apply(e event.Envelope) bool {
 	if e.Seq != 0 {
 		if e.Seq <= d.mark {
 			return false
@@ -300,7 +299,7 @@ func (d *Doc) Apply(e envelope.Event) bool {
 	}
 
 	if d.runID == "" {
-		d.runID, d.agent, d.origin, d.tenant, d.rev = e.RunID, e.Agent, e.Origin, e.Tenant, e.Rev
+		d.runID, d.agent, d.version, d.channel, d.tenant = e.Run, e.Agent, e.Version, e.Channel, e.Tenant
 	}
 
 	changed := d.effect(e)
@@ -315,115 +314,87 @@ func (d *Doc) Apply(e envelope.Event) bool {
 	if e.Seq > d.seq {
 		d.seq = e.Seq
 	}
-	if e.At.After(d.at) {
-		d.at = e.At
+	if e.Time.After(d.at) {
+		d.at = e.Time
 	}
 	return changed
 }
 
-// effect applies the kind-specific change and reports whether anything moved.
-func (d *Doc) effect(e envelope.Event) bool {
-	switch e.Kind {
-	case envelope.KindText:
-		return d.addText(streamText, e.Seq, decodeText(e.Payload))
-	case envelope.KindThinking:
-		return d.addText(streamThinking, e.Seq, decodeText(e.Payload))
-	case envelope.KindToolCall:
-		return d.addToolCall(e)
-	case envelope.KindToolDone:
+// effect applies the body-specific change and reports whether anything moved.
+func (d *Doc) effect(e event.Envelope) bool {
+	latest := e.Seq == 0 || e.Seq >= d.statusSeq
+	switch b := e.Data.(type) {
+	case event.Text:
+		return d.addText(streamText, e.Seq, b.Text)
+	case event.Thinking:
+		return d.addText(streamThinking, e.Seq, b.Text)
+	case event.ToolCall:
+		return d.addToolCall(e.Seq, b)
+	case event.ToolDone:
 		// A delegation that waited on a child's question has its answer.
 		d.waiting = nil
-		return d.addToolDone(e)
-	case envelope.KindCitation:
-		return d.addCitations(e)
-	case envelope.KindActionTaken:
-		return d.addAction(e)
-	case envelope.KindAccepted:
+		return d.addToolDone(e.Seq, b)
+	case event.Citation:
+		return d.addCitation(e.Seq, b)
+	case event.Action:
+		return d.addAction(e.Seq, b)
+	case event.Accepted:
 		return d.setStatus(e.Seq, StatusAccepted, "")
-	case envelope.KindStarted:
+	case event.Started:
 		return d.setStatus(e.Seq, StatusRunning, "")
-	case envelope.KindResumed:
+	case event.Resumed:
 		changed := d.setStatus(e.Seq, StatusRunning, "")
-		if e.Seq == 0 || e.Seq >= d.statusSeq {
-			body, err := payload.Decode[payload.Lifecycle](e)
-			if err == nil && body.Answer != nil {
-				d.question, d.answered = nil, answeredOf(body.Answer)
-				changed = true
-			}
+		if latest && b.Answer != nil {
+			d.question, d.answered = nil, answeredOf(b.Answer)
+			changed = true
 		}
 		return changed
-	case envelope.KindParked:
+	case event.Parked:
 		changed := d.setStatus(e.Seq, StatusParked, "")
-		if e.Seq == 0 || e.Seq >= d.statusSeq {
-			body, err := payload.Decode[payload.Lifecycle](e)
-			if err == nil && body.Question != nil {
-				d.question = questionOf(*body.Question)
-				changed = true
-			}
+		if latest && b.Question != nil {
+			d.question = questionOf(*b.Question)
+			changed = true
 		}
 		return changed
-	case envelope.KindChildParked:
-		body, err := payload.Decode[payload.ChildQuestion](e)
-		if err != nil || body.Question.ID == "" {
+	case event.ChildParked:
+		if b.Question.ID == "" {
 			return false
 		}
-		q := questionOf(body.Question)
-		q.RunID, q.Agent = body.RunID, body.Agent
+		q := questionOf(b.Question)
+		q.RunID, q.Agent = b.RunID, b.Agent
 		d.waiting = q
 		return true
-	case envelope.KindCompleted:
+	case event.Completed:
 		changed := d.setStatus(e.Seq, StatusDone, "")
-		if e.Seq == 0 || e.Seq >= d.statusSeq {
-			var final struct {
-				Text string `json:"text"`
+		if latest && b.Text != "" && b.Text != d.finalText {
+			d.finalText = b.Text
+			changed = true
+		}
+		return changed
+	case event.Failed:
+		return d.setStatus(e.Seq, StatusFailed, b.Error)
+	case event.Stopped:
+		changed := d.setStatus(e.Seq, StatusStopped, "")
+		if latest {
+			// The partial answer travels on the event, as a completed
+			// run's answer does, so a route that selected only lifecycle
+			// types still shows what the agent had said.
+			if b.Text != "" && b.Text != d.finalText {
+				d.finalText = b.Text
+				changed = true
 			}
-			if json.Unmarshal(e.Payload, &final) == nil && final.Text != "" && final.Text != d.finalText {
-				d.finalText = final.Text
+			if b.Reason != d.reason {
+				d.reason = b.Reason
 				changed = true
 			}
 		}
 		return changed
-	case envelope.KindFailed:
-		return d.setStatus(e.Seq, StatusFailed, decodeError(e.Payload))
-	case envelope.KindStopped:
-		changed := d.setStatus(e.Seq, StatusStopped, "")
-		if e.Seq == 0 || e.Seq >= d.statusSeq {
-			// The partial answer travels on the event, as a completed
-			// run's answer does, so a route that selected only lifecycle
-			// kinds still shows what the agent had said.
-			var stopped struct {
-				Text   string `json:"text"`
-				Reason string `json:"reason"`
-			}
-			if json.Unmarshal(e.Payload, &stopped) == nil {
-				if stopped.Text != "" && stopped.Text != d.finalText {
-					d.finalText = stopped.Text
-					changed = true
-				}
-				if stopped.Reason != d.reason {
-					d.reason = stopped.Reason
-					changed = true
-				}
-			}
-		}
-		return changed
-	case envelope.KindCompacted:
-		// Not rendered either: that the agent summarized its own context
-		// is for the host that drives it, not for the people in the thread.
-		return false
-	case envelope.KindUsageCall, envelope.KindUsageChild:
-		// Deliberately not rendered. A chat surface is the conversation, and
-		// often a shared one: token counts and cost are accounting for the
-		// host that pays, not something everyone in a Slack channel or on an
-		// issue should be shown. Reporting no change also spares a sink the
-		// edit a usage event would otherwise cost after every model call. A
-		// route that wants usage delivered selects "usage" on a webhook.
-		return false
 	default:
-		// An unknown kind is not an error: kinds are an open set precisely so
-		// that a connector released today can be sent an event kind invented
-		// tomorrow. It contributes nothing to render, and saying so avoids an
-		// edit that would change no bytes.
+		// Usage and compaction are deliberately not rendered: a chat
+		// surface is the conversation, and token counts are accounting for
+		// the host that pays. Any other type, an Unknown body included,
+		// contributes nothing, and saying so spares an edit that would
+		// change no bytes.
 		return false
 	}
 }
@@ -455,24 +426,22 @@ func (d *Doc) builder(str stream) *strings.Builder {
 	return &d.text
 }
 
-func (d *Doc) addToolCall(e envelope.Event) bool {
-	p := decodeTool(e.Payload)
+func (d *Doc) addToolCall(seq uint64, p event.ToolCall) bool {
 	if p.Name == "" && p.ID == "" {
 		return false
 	}
-	t := d.tool(p.ID, e.Seq)
+	t := d.tool(p.ID, seq)
 	if p.Name != "" {
 		d.tools[t].Name = p.Name
 	}
-	if p.Args != "" {
-		d.tools[t].Args = p.Args
+	if args := compact(p.Arguments); args != "" {
+		d.tools[t].Args = args
 	}
 	return true
 }
 
-func (d *Doc) addToolDone(e envelope.Event) bool {
-	p := decodeTool(e.Payload)
-	t := d.tool(p.ID, e.Seq)
+func (d *Doc) addToolDone(seq uint64, p event.ToolDone) bool {
+	t := d.tool(p.ID, seq)
 	if p.Name != "" && d.tools[t].Name == "" {
 		d.tools[t].Name = p.Name
 	}
@@ -505,42 +474,78 @@ func (d *Doc) tool(id string, seq uint64) int {
 	return i
 }
 
-func (d *Doc) addCitations(e envelope.Event) bool {
-	cites := decodeCitations(e.Payload)
-	changed := false
-	for _, c := range cites {
-		if c.URI == "" && c.Title == "" {
-			continue
-		}
-		key := c.URI + "\x00" + c.Title
-		if i, ok := d.citeAt[key]; ok {
-			// The same source cited twice is one footnote. Keep the earliest
-			// sequence number so numbering does not shuffle on redelivery.
-			if e.Seq != 0 && e.Seq < d.cites[i].seq {
-				d.cites[i].seq = e.Seq
-				changed = true
-			}
-			continue
-		}
-		c.seq = e.Seq
-		d.cites = append(d.cites, c)
-		if d.citeAt == nil {
-			d.citeAt = make(map[string]int)
-		}
-		d.citeAt[key] = len(d.cites) - 1
-		changed = true
+func (d *Doc) addCitation(seq uint64, b event.Citation) bool {
+	c := Citation{
+		Label:   b.Label,
+		Title:   first(b.Source.DocumentTitle, b.Source.SectionHeading),
+		URI:     b.Source.SourceURI,
+		Snippet: b.Text,
 	}
-	return changed
+	if c.URI == "" && c.Title == "" {
+		return false
+	}
+	key := c.URI + "\x00" + c.Title
+	if i, ok := d.citeAt[key]; ok {
+		// The same source cited twice is one footnote. Keep the earliest
+		// sequence number so numbering does not shuffle on redelivery.
+		if seq != 0 && seq < d.cites[i].seq {
+			d.cites[i].seq = seq
+			return true
+		}
+		return false
+	}
+	c.seq = seq
+	d.cites = append(d.cites, c)
+	if d.citeAt == nil {
+		d.citeAt = make(map[string]int)
+	}
+	d.citeAt[key] = len(d.cites) - 1
+	return true
 }
 
-func (d *Doc) addAction(e envelope.Event) bool {
-	a := decodeAction(e.Payload)
+func (d *Doc) addAction(seq uint64, b event.Action) bool {
+	a := Action{Summary: b.Summary, Address: validAddress(b.Address), seq: seq}
 	if a.Summary == "" && a.Address == "" {
 		return false
 	}
-	a.seq = e.Seq
 	d.actions = append(d.actions, a)
 	return true
+}
+
+// validAddress returns s when it parses as an address, so a broken one is
+// dropped rather than rendered as a broken link.
+func validAddress(s string) string {
+	if s == "" {
+		return ""
+	}
+	if _, err := address.Parse(s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// compact removes insignificant whitespace from tool arguments so that they
+// render on one line. Arguments that are not valid JSON are returned as they
+// came, since they are about to be shown to a human either way.
+func compact(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return string(raw)
+	}
+	return buf.String()
+}
+
+// first returns the first non-empty argument.
+func first(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // setStatus moves the run's status forward.
@@ -616,16 +621,16 @@ func (d *Doc) window() int {
 // View returns a snapshot of the document.
 func (d *Doc) View() View {
 	v := View{
-		Agent:  d.agent,
-		RunID:  d.runID,
-		Rev:    d.rev,
-		Origin: d.origin,
-		Tenant: d.tenant,
-		Status: d.status,
-		Error:  d.errText,
-		Reason: d.reason,
-		Seq:    d.seq,
-		At:     d.at,
+		Agent:   d.agent,
+		RunID:   d.runID,
+		Version: d.version,
+		Channel: d.channel,
+		Tenant:  d.tenant,
+		Status:  d.status,
+		Error:   d.errText,
+		Reason:  d.reason,
+		Seq:     d.seq,
+		At:      d.at,
 	}
 	if d.status == StatusParked && d.question != nil {
 		q := *d.question
@@ -676,7 +681,7 @@ func assemble(settled *strings.Builder, pending []piece, str stream) string {
 	return b.String()
 }
 
-func questionOf(q payload.Question) *Question {
+func questionOf(q event.Question) *Question {
 	out := &Question{Kind: q.Kind, Prompt: q.Prompt, Options: append([]string(nil), q.Options...), AskedOf: q.AskedOf, Expires: q.ExpiresAt, Child: q.ChildRunID}
 	if q.Tool != nil {
 		out.Tool, out.Args = q.Tool.Name, string(q.Tool.Arguments)
@@ -684,14 +689,14 @@ func questionOf(q payload.Question) *Question {
 	return out
 }
 
-func answeredOf(a *payload.Answer) *Answered {
+func answeredOf(a *event.Answer) *Answered {
 	out := &Answered{By: a.By, Expired: a.Expired}
 	switch {
-	case a.Decision == payload.DecisionApprove && len(a.Arguments) > 0:
+	case a.Decision == event.DecisionApprove && len(a.Arguments) > 0:
 		out.Summary = "approved with changes"
-	case a.Decision == payload.DecisionApprove:
+	case a.Decision == event.DecisionApprove:
 		out.Summary = "approved"
-	case a.Decision == payload.DecisionDeny:
+	case a.Decision == event.DecisionDeny:
 		out.Summary = "denied"
 	case a.Choice != "":
 		out.Summary = a.Choice

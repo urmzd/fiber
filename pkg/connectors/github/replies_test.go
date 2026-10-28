@@ -13,6 +13,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/github"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 func TestReviewMentionsReplyToTheRootAndEditOneAnswer(t *testing.T) {
@@ -43,7 +44,7 @@ func TestReviewMentionsReplyToTheRootAndEditOneAnswer(t *testing.T) {
 			if tag.Source.Params["review_comment"] != fmt.Sprint(root) {
 				t.Fatalf("source %+v", tag.Source)
 			}
-			for _, e := range []envelope.Event{event(1, envelope.KindStarted, `{}`), textEvent(2, "Explanation"), event(3, envelope.KindCompleted, `{"text":"Explanation"}`)} {
+			for _, e := range []event.Envelope{ev(1, event.TypeStarted, `{}`), textEvent(2, "Explanation"), ev(3, event.TypeCompleted, `{"text":"Explanation"}`)} {
 				for range 2 {
 					if err := c.Deliver(context.Background(), tag.Source, e); err != nil {
 						t.Fatal(err)
@@ -88,7 +89,7 @@ func TestInvalidReviewTargetsNeverFallBackToTopLevelComments(t *testing.T) {
 	fake := github.NewFake()
 	c, _ := github.New(github.Config{API: fake})
 	for _, uri := range []string{"github://acme/repo/issues/1?review_comment=91", "github://acme/repo/pull/1?review_comment=-1", "github://acme/repo/pull/1?review_comment=bad", "github://acme/repo/pull/1?review_comment="} {
-		if err := c.Deliver(context.Background(), address.MustParse(uri), event(1, envelope.KindStarted, `{}`)); err == nil {
+		if err := c.Deliver(context.Background(), address.MustParse(uri), ev(1, event.TypeStarted, `{}`)); err == nil {
 			t.Fatalf("accepted %s", uri)
 		}
 	}

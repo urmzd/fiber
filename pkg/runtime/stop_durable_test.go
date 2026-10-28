@@ -30,9 +30,9 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -62,10 +62,10 @@ func (w *world) stopRecords(t *testing.T, runID string) []payload.StopRequest {
 }
 
 // controlEvents returns every stop request published to the bus.
-func (w *world) controlEvents() []envelope.Event {
-	var out []envelope.Event
+func (w *world) controlEvents() []event.Envelope {
+	var out []event.Envelope
 	for _, e := range w.bus.rec.all() {
-		if e.Topic.IsControl() {
+		if event.IsControl(e.Channel) {
 			out = append(out, e)
 		}
 	}
@@ -76,11 +76,12 @@ func (w *world) controlEvents() []envelope.Event {
 func noise(t *testing.T, b bus.Bus, n int) {
 	t.Helper()
 	for i := range n {
-		tp, err := topic.Run("someone-else", fmt.Sprintf("run_%d", i))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := b.Publish(context.Background(), envelope.Event{Topic: tp, Kind: envelope.KindText}); err != nil {
+		run := fmt.Sprintf("run_%d", i)
+		if err := b.Publish(context.Background(), event.Envelope{
+			ID: run + ":1", Source: "fiber://run/" + run, Type: event.TypeText,
+			Channel: "github://someone/else", Tenant: "acme", Run: run, Seq: 1,
+			Agent: "someone-else", Data: event.Text{Text: "noise"},
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -219,8 +220,8 @@ func TestAStopThatLandsAsTheTurnFinishesLeavesItCompleted(t *testing.T) {
 	}
 	events := w.bus.of(runID)
 	last := events[len(events)-1]
-	if last.Kind != envelope.KindCompleted {
-		t.Fatalf("last event %s, want completed: %v", last.Kind, kindsOf(events))
+	if last.Type != event.TypeCompleted {
+		t.Fatalf("last event %s, want completed: %v", last.Type, kindsOf(events))
 	}
 	want := []string{"user: explain", "assistant: The whole answer."}
 	if got := entriesOf(t, w.threads, tg, runID); fmt.Sprint(got) != fmt.Sprint(want) {
@@ -257,10 +258,10 @@ func TestAStopRacingCompletionEndsExactlyOneWayEverywhere(t *testing.T) {
 		outcomes[stopped]++
 
 		events := w.bus.of(runID)
-		var terminal []envelope.Kind
+		var terminal []string
 		for _, e := range events {
-			if e.Kind == envelope.KindCompleted || e.Kind == envelope.KindStopped {
-				terminal = append(terminal, e.Kind)
+			if e.Type == event.TypeCompleted || e.Type == event.TypeStopped {
+				terminal = append(terminal, e.Type)
 			}
 		}
 		last := events[len(events)-1]
@@ -273,15 +274,15 @@ func TestAStopRacingCompletionEndsExactlyOneWayEverywhere(t *testing.T) {
 			if out.Text != "" {
 				answer = out.Text + "\n\n" + runtime.StopMarker
 			}
-			if len(terminal) != 1 || last.Kind != envelope.KindStopped || stoppedBody(t, last).Text != out.Text ||
+			if len(terminal) != 1 || last.Type != event.TypeStopped || stoppedBody(t, last).Text != out.Text ||
 				entries[1] != "assistant: "+answer {
-				t.Fatalf("run %d stopped but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Kind, entries, out)
+				t.Fatalf("run %d stopped but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Type, entries, out)
 			}
 		} else {
-			body, err := payload.Decode[payload.Lifecycle](last)
-			if err != nil || len(terminal) != 1 || last.Kind != envelope.KindCompleted || body.Text != out.Text ||
+			body, err := decode[payload.Lifecycle](last)
+			if err != nil || len(terminal) != 1 || last.Type != event.TypeCompleted || body.Text != out.Text ||
 				entries[1] != "assistant: "+out.Text {
-				t.Fatalf("run %d completed but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Kind, entries, out)
+				t.Fatalf("run %d completed but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Type, entries, out)
 			}
 		}
 		rec, err := w.ledger.GetRun(context.Background(), runID)
@@ -304,9 +305,9 @@ func TestACompletedRunRetriedAfterItsJournalEntryStaysCompleted(t *testing.T) {
 	rt := w.runtime(t, exec)
 
 	var once sync.Once
-	w.bus.rec.failWhen(func(e envelope.Event) error {
+	w.bus.rec.failWhen(func(e event.Envelope) error {
 		var err error
-		if e.Kind == envelope.KindCompleted {
+		if e.Type == event.TypeCompleted {
 			once.Do(func() { err = errors.New("broker outage") })
 		}
 		return err
@@ -324,11 +325,11 @@ func TestACompletedRunRetriedAfterItsJournalEntryStaysCompleted(t *testing.T) {
 		t.Fatalf("Output = %+v, want the completed answer", out)
 	}
 	events := w.bus.of(runID)
-	if last := events[len(events)-1]; last.Kind != envelope.KindCompleted {
-		t.Fatalf("last event %s, want completed: %v", last.Kind, kindsOf(events))
+	if last := events[len(events)-1]; last.Type != event.TypeCompleted {
+		t.Fatalf("last event %s, want completed: %v", last.Type, kindsOf(events))
 	}
 	for _, e := range events {
-		if e.Kind == envelope.KindStopped {
+		if e.Type == event.TypeStopped {
 			t.Fatalf("a completed run was also announced stopped: %v", kindsOf(events))
 		}
 	}

@@ -16,8 +16,8 @@ import (
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/router"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // Targets used throughout. Each one belongs to a different connector, so a
@@ -42,7 +42,7 @@ func TestEventReachesOnlyTheRoutesThatWantItsKind(t *testing.T) {
 	slack, github, hook := newSink("slack"), newSink("github"), newSink("webhook")
 	h := start(t, registry(t, slack, github, hook))
 
-	if err := h.Register("run_1", []envelope.Route{
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{
 		{Target: address.MustParse(slackTarget)},                                        // every kind
 		{Target: address.MustParse(githubTarget), Kinds: []string{"delta"}},             // a family
 		{Target: address.MustParse(hookTarget), Kinds: []string{"lifecycle.completed"}}, // one kind
@@ -50,18 +50,18 @@ func TestEventReachesOnlyTheRoutesThatWantItsKind(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	published := []envelope.Kind{envelope.KindText, envelope.KindThinking, envelope.KindCompleted}
+	published := []string{event.TypeText, event.TypeThinking, event.TypeCompleted}
 	for i, kind := range published {
-		h.publish(t, event("docs-bot", "run_1", uint64(i+1), kind))
+		h.publish(t, runEvent("docs-bot", "run_1", uint64(i+1), kind))
 	}
 
 	want := []struct {
 		sink  *sink
-		kinds []envelope.Kind
+		kinds []string
 	}{
 		{slack, published},
-		{github, []envelope.Kind{envelope.KindText, envelope.KindThinking}},
-		{hook, []envelope.Kind{envelope.KindCompleted}},
+		{github, []string{event.TypeText, event.TypeThinking}},
+		{hook, []string{event.TypeCompleted}},
 	}
 	for _, w := range want {
 		w.sink.waitFor(t, len(w.kinds))
@@ -81,15 +81,15 @@ func TestTwoRoutesToOneTargetDeliverOnce(t *testing.T) {
 	h := start(t, registry(t, slack))
 
 	// Both routes name the same surface, and both select the first event.
-	if err := h.Register("run_1", []envelope.Route{
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{
 		{Target: address.MustParse(slackTarget), Kinds: []string{"delta"}},
 		{Target: address.MustParse(slackTarget), Kinds: []string{"delta.text", "lifecycle"}},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
-	h.publish(t, event("docs-bot", "run_1", 2, envelope.KindCompleted))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
+	h.publish(t, runEvent("docs-bot", "run_1", 2, event.TypeCompleted))
 
 	slack.waitFor(t, 2)
 	time.Sleep(waitIdle)
@@ -104,17 +104,17 @@ func TestOrderIsPreservedPerRunAndTargetWhenTheSinkIsSlow(t *testing.T) {
 	slack := newSink("slack")
 	// Later events render faster than earlier ones, so anything that delivered
 	// a lane concurrently would reorder rather than merely interleave.
-	slack.hook = func(ctx context.Context, _ int, e envelope.Event) error {
+	slack.hook = func(ctx context.Context, _ int, e event.Envelope) error {
 		time.Sleep(time.Duration(events+1-int(e.Seq)) * time.Millisecond)
 		return nil
 	}
 	h := start(t, registry(t, slack))
 
-	if err := h.Register("run_1", []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	for seq := uint64(1); seq <= events; seq++ {
-		h.publish(t, event("docs-bot", "run_1", seq, envelope.KindText))
+		h.publish(t, runEvent("docs-bot", "run_1", seq, event.TypeText))
 	}
 
 	got := seqsOf(slack.waitFor(t, events))
@@ -130,7 +130,7 @@ func TestASlowSinkDoesNotDelayAnother(t *testing.T) {
 	var once sync.Once
 
 	slow, fast := newSink("slack"), newSink("webhook")
-	slow.hook = func(ctx context.Context, _ int, _ envelope.Event) error {
+	slow.hook = func(ctx context.Context, _ int, _ event.Envelope) error {
 		once.Do(func() { close(entered) })
 		select {
 		case <-release:
@@ -141,14 +141,14 @@ func TestASlowSinkDoesNotDelayAnother(t *testing.T) {
 	}
 	h := start(t, registry(t, slow, fast))
 
-	if err := h.Register("run_1", []envelope.Route{
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{
 		{Target: address.MustParse(slackTarget)},
 		{Target: address.MustParse(hookTarget)},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
-	h.publish(t, event("docs-bot", "run_1", 2, envelope.KindCompleted))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
+	h.publish(t, runEvent("docs-bot", "run_1", 2, event.TypeCompleted))
 
 	// The barrier, not a sleep: the fast sink must finish both events while the
 	// slow one is provably still inside its first.
@@ -211,13 +211,13 @@ func TestTransientFailuresAreRetriedAndPermanentOnesAreNot(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			slack := newSink("slack")
-			slack.hook = func(_ context.Context, attempt int, _ envelope.Event) error { return tc.fail(attempt) }
+			slack.hook = func(_ context.Context, attempt int, _ event.Envelope) error { return tc.fail(attempt) }
 			h := start(t, registry(t, slack), router.WithAttempts(3))
 
-			if err := h.Register("run_1", []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+			if err := h.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 				t.Fatalf("Register: %v", err)
 			}
-			h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
+			h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
 
 			slack.waitTries(t, tc.wantTries)
 			h.logs.waitFor(t, tc.wantLog)
@@ -236,10 +236,10 @@ func TestTransientFailuresAreRetriedAndPermanentOnesAreNot(t *testing.T) {
 
 func TestAPanickingSinkIsContainedAndTheRestStillDeliver(t *testing.T) {
 	boom, slack := newSink("webhook"), newSink("slack")
-	boom.hook = func(context.Context, int, envelope.Event) error { panic("sink is broken") }
+	boom.hook = func(context.Context, int, event.Envelope) error { panic("sink is broken") }
 	h := start(t, registry(t, boom, slack))
 
-	if err := h.Register("run_1", []envelope.Route{
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{
 		{Target: address.MustParse(hookTarget)},
 		{Target: address.MustParse(slackTarget)},
 	}); err != nil {
@@ -248,9 +248,9 @@ func TestAPanickingSinkIsContainedAndTheRestStillDeliver(t *testing.T) {
 
 	// The panic must not take the event's other delivery with it, and must not
 	// take the router down: a later event still gets through.
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
 	slack.waitFor(t, 1)
-	h.publish(t, event("docs-bot", "run_1", 2, envelope.KindCompleted))
+	h.publish(t, runEvent("docs-bot", "run_1", 2, event.TypeCompleted))
 	slack.waitFor(t, 2)
 
 	h.logs.waitFor(t, "delivery failed, giving up", "panicked", "stack=")
@@ -264,7 +264,7 @@ func TestAPanickingSinkIsContainedAndTheRestStillDeliver(t *testing.T) {
 func TestQueueOverflowIsDroppedLoudlyAndNeverBlocksAnotherRun(t *testing.T) {
 	release := make(chan struct{})
 	stuck, fast := newSink("slack"), newSink("webhook")
-	stuck.hook = func(ctx context.Context, _ int, _ envelope.Event) error {
+	stuck.hook = func(ctx context.Context, _ int, _ event.Envelope) error {
 		select {
 		case <-release:
 			return nil
@@ -279,7 +279,7 @@ func TestQueueOverflowIsDroppedLoudlyAndNeverBlocksAnotherRun(t *testing.T) {
 		runID  string
 		target string
 	}{{"run_stuck", slackTarget}, {"run_fast", hookTarget}} {
-		if err := h.Register(spec.runID, []envelope.Route{{Target: address.MustParse(spec.target)}}); err != nil {
+		if err := h.Register(spec.runID, "acme", runChannel, []envelope.Route{{Target: address.MustParse(spec.target)}}); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
 	}
@@ -287,14 +287,14 @@ func TestQueueOverflowIsDroppedLoudlyAndNeverBlocksAnotherRun(t *testing.T) {
 	// Far more than the unresponsive run's lane can hold, so it overflows, and
 	// the dispatch loop must not stall on the drops.
 	for seq := uint64(1); seq <= 10; seq++ {
-		h.publish(t, event("docs-bot", "run_stuck", seq, envelope.KindText))
+		h.publish(t, runEvent("docs-bot", "run_stuck", seq, event.TypeText))
 	}
 	h.logs.waitFor(t, "delivery dropped, sink is not keeping up", "run_stuck")
 
 	// The healthy run keeps being delivered, one event at a time so that the
 	// deliberately tiny queue is never what limits it.
 	for seq := uint64(1); seq <= 5; seq++ {
-		h.publish(t, event("docs-bot", "run_fast", seq, envelope.KindText))
+		h.publish(t, runEvent("docs-bot", "run_fast", seq, event.TypeText))
 		fast.waitFor(t, int(seq))
 	}
 	if h.logs.contains("run=run_fast") {
@@ -306,8 +306,12 @@ func TestEventForAnUnroutedRunIsDroppedAndLogged(t *testing.T) {
 	slack := newSink("slack")
 	h := start(t, registry(t, slack))
 
-	// No Register: the run belongs to some other node, or to nobody.
-	h.publish(t, event("docs-bot", "run_elsewhere", 1, envelope.KindText))
+	// The router listens on the channel for run_1. run_elsewhere publishes on
+	// the same channel but belongs to some other node, or to nobody.
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+		t.Fatal(err)
+	}
+	h.publish(t, runEvent("docs-bot", "run_elsewhere", 1, event.TypeText))
 
 	h.logs.waitFor(t, "no routes for", "run_elsewhere")
 	if got := slack.tries(); got != 0 {
@@ -322,25 +326,25 @@ func TestAControlRequestIsNeverDeliveredToASurface(t *testing.T) {
 	slack := newSink("slack")
 	h := start(t, registry(t, slack))
 	for _, id := range []string{"stop-run_1", "run_1"} {
-		if err := h.Register(id, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+		if err := h.Register(id, "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	tp, err := topic.Control("stop", "run_1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.publish(t, envelope.Event{Topic: tp, Tenant: "acme", Kind: envelope.KindStop, Payload: []byte(`{"run_id":"run_1"}`)})
+	h.publish(t, event.Envelope{
+		ID: "stop-1", Source: "fiber://control", Type: event.TypeStop,
+		Channel: event.ControlChannel("acme", "stop", "run_1"), Tenant: "acme", Run: "run_1",
+		Data: event.StopRequest{RunID: "run_1"},
+	})
 	// The run's own events still arrive, the stopped one included, and the
 	// request published ahead of them is not among what was delivered.
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindAccepted))
-	h.publish(t, event("docs-bot", "run_1", 2, envelope.KindStopped))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeAccepted))
+	h.publish(t, runEvent("docs-bot", "run_1", 2, event.TypeStopped))
 
 	slack.waitFor(t, 2)
 	for _, e := range slack.events() {
-		if e.Kind == envelope.KindStop || e.Topic.IsControl() {
-			t.Fatalf("a control request was delivered to a surface: %s on %s", e.Kind, e.Topic)
+		if e.Type == event.TypeStop || event.IsControl(e.Channel) {
+			t.Fatalf("a control request was delivered to a surface: %s on %s", e.Type, e.Channel)
 		}
 	}
 	if got := slack.count(); got != 2 {
@@ -358,19 +362,19 @@ func TestReleasedRunStopsDeliveringAndLeavesNoGoroutines(t *testing.T) {
 	}
 	// One run stays registered for the whole test, so the baseline includes a
 	// live router with live lanes and only the released ones can move it.
-	if err := h.Register("run_keep", routes[:1]); err != nil {
+	if err := h.Register("run_keep", "acme", runChannel, routes[:1]); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_keep", 1, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_keep", 1, event.TypeText))
 	slack.waitFor(t, 1)
 	base := runtime.NumGoroutine()
 
 	released := []string{"run_a", "run_b", "run_c", "run_d", "run_e"}
 	for _, runID := range released {
-		if err := h.Register(runID, routes); err != nil {
+		if err := h.Register(runID, "acme", runChannel, routes); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
-		h.publish(t, event("docs-bot", runID, 1, envelope.KindText))
+		h.publish(t, runEvent("docs-bot", runID, 1, event.TypeText))
 	}
 	slack.waitFor(t, 1+len(released))
 	github.waitFor(t, len(released))
@@ -385,7 +389,7 @@ func TestReleasedRunStopsDeliveringAndLeavesNoGoroutines(t *testing.T) {
 
 	// A released run has nobody listening for it here any more.
 	before := slack.tries()
-	h.publish(t, event("docs-bot", "run_a", 2, envelope.KindCompleted))
+	h.publish(t, runEvent("docs-bot", "run_a", 2, event.TypeCompleted))
 	h.logs.waitFor(t, "no routes for", "run_a")
 	if got := slack.tries(); got != before {
 		t.Errorf("sink was called %d times after Release, want %d", got, before)
@@ -397,10 +401,10 @@ func TestCancellingRunLeavesNoGoroutines(t *testing.T) {
 
 	slack := newSink("slack")
 	h := start(t, registry(t, slack))
-	if err := h.Register("run_1", []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
 	slack.waitFor(t, 1)
 
 	h.stop(t) // Run returns only once every lane it started has exited.
@@ -413,7 +417,7 @@ func TestARouteNothingCanReceiveIsDroppedAtRegistration(t *testing.T) {
 	// never be delivered and is not worth discovering per event.
 	h := start(t, registry(t, slack, schedule{"cron"}))
 
-	if err := h.Register("run_1", []envelope.Route{
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{
 		{Target: address.MustParse(cronTarget)},
 		{Target: address.MustParse(slackTarget)},
 		{Target: address.MustParse("jira://acme/PROJ-5")}, // no such connector here
@@ -423,23 +427,39 @@ func TestARouteNothingCanReceiveIsDroppedAtRegistration(t *testing.T) {
 	h.logs.waitFor(t, "route has no sink", cronTarget, "jira://acme/PROJ-5")
 
 	// The routes that can be served still are.
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
 	slack.waitFor(t, 1)
 }
 
 func TestRegisterRejectsWhatItCouldNeverServe(t *testing.T) {
 	cases := []struct {
-		name   string
-		runID  string
-		routes []envelope.Route
+		name    string
+		runID   string
+		routes  []envelope.Route
+		tenant  string
+		channel string
 	}{
 		{name: "no run id", runID: "", routes: []envelope.Route{{Target: address.MustParse(slackTarget)}}},
 		{name: "a route with no target", runID: "run_1", routes: []envelope.Route{{}}},
+		{name: "no tenant", runID: "run_1", routes: []envelope.Route{{Target: address.MustParse(slackTarget)}}, tenant: "-"},
+		{name: "no channel", runID: "run_1", routes: []envelope.Route{{Target: address.MustParse(slackTarget)}}, channel: "-"},
+		{name: "a control channel", runID: "run_1", routes: []envelope.Route{{Target: address.MustParse(slackTarget)}}, channel: event.ControlChannel("acme", "stop", "run_1")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := start(t, registry(t, newSink("slack")))
-			err := h.Register(tc.runID, tc.routes)
+			tenant, channel := "acme", runChannel
+			if tc.tenant == "-" {
+				tenant = ""
+			}
+			switch tc.channel {
+			case "-":
+				channel = ""
+			case "":
+			default:
+				channel = tc.channel
+			}
+			err := h.Register(tc.runID, tenant, channel, tc.routes)
 			if !errors.Is(err, router.ErrInvalid) {
 				t.Fatalf("Register(%q) = %v, want router.ErrInvalid", tc.runID, err)
 			}
@@ -453,18 +473,18 @@ func TestReRegisteringKeepsTheCursorAndRetiresRoutesThatWentAway(t *testing.T) {
 
 	slackRoute := envelope.Route{Target: address.MustParse(slackTarget)}
 	githubRoute := envelope.Route{Target: address.MustParse(githubTarget)}
-	if err := h.Register("run_1", []envelope.Route{slackRoute, githubRoute}); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{slackRoute, githubRoute}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
 	slack.waitFor(t, 1)
 	github.waitFor(t, 1)
 
 	// Replay re-registers, this time without the GitHub route.
-	if err := h.Register("run_1", []envelope.Route{slackRoute}); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{slackRoute}); err != nil {
 		t.Fatalf("re-Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_1", 2, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 2, event.TypeText))
 	slack.waitFor(t, 2)
 	time.Sleep(waitIdle)
 	if got := github.count(); got != 1 {
@@ -476,15 +496,15 @@ func TestFallingBehindTheBusResubscribesAndDoesNotRedeliver(t *testing.T) {
 	// The first stream ends the way a slow consumer is told to reconnect; the
 	// second replays from the start of what the bus still retains, which is
 	// exactly the duplication a per-run cursor has to absorb.
-	first := []envelope.Event{
-		event("docs-bot", "run_1", 1, envelope.KindText),
-		event("docs-bot", "run_1", 2, envelope.KindText),
+	first := []event.Envelope{
+		runEvent("docs-bot", "run_1", 1, event.TypeText),
+		runEvent("docs-bot", "run_1", 2, event.TypeText),
 	}
-	second := []envelope.Event{
-		event("docs-bot", "run_1", 1, envelope.KindText),
-		event("docs-bot", "run_1", 2, envelope.KindText),
-		event("docs-bot", "run_1", 3, envelope.KindText),
-		event("docs-bot", "run_1", 4, envelope.KindCompleted),
+	second := []event.Envelope{
+		runEvent("docs-bot", "run_1", 1, event.TypeText),
+		runEvent("docs-bot", "run_1", 2, event.TypeText),
+		runEvent("docs-bot", "run_1", 3, event.TypeText),
+		runEvent("docs-bot", "run_1", 4, event.TypeCompleted),
 	}
 	gate := make(chan struct{})
 	b := &scriptedBus{
@@ -497,7 +517,7 @@ func TestFallingBehindTheBusResubscribesAndDoesNotRedeliver(t *testing.T) {
 
 	slack := newSink("slack")
 	h := startOn(t, b, registry(t, slack))
-	if err := h.Register("run_1", []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	close(gate) // the run is routed: let the streams run
@@ -520,7 +540,7 @@ func TestRunRestartsWithoutReusingRetiredLanes(t *testing.T) {
 	slack := newSink("slack")
 	b := bus.NewMemory()
 	r := router.New(b, registry(t, slack), router.WithLogger(newLogs().logger()))
-	if err := r.Register("run_1", []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+	if err := r.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -529,7 +549,7 @@ func TestRunRestartsWithoutReusingRetiredLanes(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- r.Run(ctx) }()
 
-		if err := b.Publish(context.Background(), event("docs-bot", "run_1", uint64(round), envelope.KindText)); err != nil {
+		if err := b.Publish(context.Background(), runEvent("docs-bot", "run_1", uint64(round), event.TypeText)); err != nil {
 			t.Fatalf("round %d: publish: %v", round, err)
 		}
 		// The catch-up window replays the earlier rounds; the cursor the run
@@ -556,10 +576,10 @@ func TestASecondRunIsRefused(t *testing.T) {
 
 	// A delivery is the proof that the first Run is up: asking before it has
 	// claimed the router would only test the test's own scheduling.
-	if err := h.Register("run_1", []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
 	slack.waitFor(t, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -629,29 +649,36 @@ func (h *harness) stop(t *testing.T) {
 	})
 }
 
-func (h *harness) publish(t *testing.T, e envelope.Event) {
+func (h *harness) publish(t *testing.T, e event.Envelope) {
 	t.Helper()
 	if err := h.bus.Publish(context.Background(), e); err != nil {
-		t.Fatalf("publish %s seq %d: %v", e.Kind, e.Seq, err)
+		t.Fatalf("publish %s seq %d: %v", e.Type, e.Seq, err)
 	}
 }
 
-func event(agent, runID string, seq uint64, kind envelope.Kind) envelope.Event {
-	tp, err := topic.Run(agent, runID)
+// runChannel is where every test run's events are published.
+const runChannel = "github://acme/fiber"
+
+func runEvent(agent, runID string, seq uint64, typ string) event.Envelope {
+	body, err := event.Decode(typ, nil)
 	if err != nil {
 		panic(err)
 	}
-	return envelope.Event{
-		Seq:     seq,
-		Topic:   tp,
-		RunID:   runID,
+	if typ == event.TypeText {
+		body = event.Text{Text: fmt.Sprintf("%s/%d", runID, seq)}
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("%s:%d", runID, seq),
+		Source:  "fiber://run/" + runID,
+		Type:    typ,
+		Channel: runChannel,
 		Tenant:  "acme",
+		Run:     runID,
+		Seq:     seq,
 		Agent:   agent,
-		Rev:     3,
-		Origin:  "github",
-		Kind:    kind,
-		Payload: []byte(fmt.Sprintf("%s/%d", runID, seq)),
-		At:      time.Now().UTC(),
+		Version: "3",
+		Time:    time.Now().UTC(),
+		Data:    body,
 	}
 }
 
@@ -670,18 +697,18 @@ type sink struct {
 	name string
 	// hook runs before the event is recorded, so an event a hook fails on is
 	// counted as an attempt and never as a delivery.
-	hook func(ctx context.Context, attempt int, e envelope.Event) error
+	hook func(ctx context.Context, attempt int, e event.Envelope) error
 
 	mu       sync.Mutex
 	attempts int
-	got      []envelope.Event
+	got      []event.Envelope
 }
 
 func newSink(name string) *sink { return &sink{name: name} }
 
 func (s *sink) Name() string { return s.name }
 
-func (s *sink) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (s *sink) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	s.mu.Lock()
 	s.attempts++
 	attempt := s.attempts
@@ -698,10 +725,10 @@ func (s *sink) Deliver(ctx context.Context, target address.Address, e envelope.E
 	return nil
 }
 
-func (s *sink) events() []envelope.Event {
+func (s *sink) events() []event.Envelope {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]envelope.Event(nil), s.got...)
+	return append([]event.Envelope(nil), s.got...)
 }
 
 func (s *sink) count() int { return len(s.events()) }
@@ -713,7 +740,7 @@ func (s *sink) tries() int {
 }
 
 // waitFor blocks until n events have been delivered and returns them.
-func (s *sink) waitFor(t *testing.T, n int) []envelope.Event {
+func (s *sink) waitFor(t *testing.T, n int) []event.Envelope {
 	t.Helper()
 	deadline := time.Now().Add(waitLong)
 	for {
@@ -764,7 +791,7 @@ func registry(t *testing.T, cs ...connector.Connector) *connector.Registry {
 // script is one subscription's worth of behaviour: events to hand over, then an
 // error to end with. A nil error means the stream blocks until it is closed.
 type script struct {
-	events []envelope.Event
+	events []event.Envelope
 	err    error
 }
 
@@ -780,9 +807,9 @@ type scriptedBus struct {
 	calls int
 }
 
-func (b *scriptedBus) Publish(context.Context, envelope.Event) error { return nil }
+func (b *scriptedBus) Publish(context.Context, event.Envelope) error { return nil }
 
-func (b *scriptedBus) Subscribe(_ context.Context, _ envelope.Subscription) (bus.Stream, error) {
+func (b *scriptedBus) Subscribe(_ context.Context, _ bus.Subscription) (bus.Stream, error) {
 	b.mu.Lock()
 	i := b.calls
 	b.calls++
@@ -808,12 +835,12 @@ type scriptedStream struct {
 	closed chan struct{}
 }
 
-func (s *scriptedStream) Recv(ctx context.Context) (envelope.Event, error) {
+func (s *scriptedStream) Recv(ctx context.Context) (event.Envelope, error) {
 	if s.gate != nil {
 		select {
 		case <-s.gate:
 		case <-ctx.Done():
-			return envelope.Event{}, bus.ErrClosed
+			return event.Envelope{}, bus.ErrClosed
 		}
 	}
 	if len(s.script.events) > 0 {
@@ -824,13 +851,13 @@ func (s *scriptedStream) Recv(ctx context.Context) (envelope.Event, error) {
 	if s.script.err != nil {
 		err := s.script.err
 		s.script.err = nil
-		return envelope.Event{}, err
+		return event.Envelope{}, err
 	}
 	select {
 	case <-s.closed:
 	case <-ctx.Done():
 	}
-	return envelope.Event{}, bus.ErrClosed
+	return event.Envelope{}, bus.ErrClosed
 }
 
 func (s *scriptedStream) Close() error {
@@ -914,15 +941,15 @@ func stacks() string {
 	return string(buf[:runtime.Stack(buf, true)])
 }
 
-func kindsOf(events []envelope.Event) []envelope.Kind {
-	out := make([]envelope.Kind, 0, len(events))
+func kindsOf(events []event.Envelope) []string {
+	out := make([]string, 0, len(events))
 	for _, e := range events {
-		out = append(out, e.Kind)
+		out = append(out, e.Type)
 	}
 	return out
 }
 
-func seqsOf(events []envelope.Event) []uint64 {
+func seqsOf(events []event.Envelope) []uint64 {
 	out := make([]uint64, 0, len(events))
 	for _, e := range events {
 		out = append(out, e.Seq)
@@ -930,7 +957,7 @@ func seqsOf(events []envelope.Event) []uint64 {
 	return out
 }
 
-func equalKinds(got, want []envelope.Kind) bool {
+func equalKinds(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
 	}
@@ -960,23 +987,23 @@ func equalSeqs(got, want []uint64) bool {
 func TestUsageReachesOnlyARouteThatAskedForIt(t *testing.T) {
 	slack, hook := newSink("slack"), newSink("webhook")
 	h := start(t, registry(t, slack, hook))
-	if err := h.Register("run_1", []envelope.Route{
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{
 		{Target: address.MustParse(slackTarget)},
 		{Target: address.MustParse(hookTarget), Kinds: []string{"usage", "lifecycle.completed"}},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	published := []envelope.Kind{envelope.KindText, envelope.KindUsageCall, envelope.KindUsageChild, envelope.KindCompleted}
+	published := []string{event.TypeText, event.TypeUsageCall, event.TypeUsageChild, event.TypeCompleted}
 	for i, kind := range published {
-		h.publish(t, event("docs-bot", "run_1", uint64(i+1), kind))
+		h.publish(t, runEvent("docs-bot", "run_1", uint64(i+1), kind))
 	}
 	slack.waitFor(t, 2)
 	hook.waitFor(t, 3)
 	time.Sleep(waitIdle)
-	if got, want := kindsOf(slack.events()), []envelope.Kind{envelope.KindText, envelope.KindCompleted}; !equalKinds(got, want) {
+	if got, want := kindsOf(slack.events()), []string{event.TypeText, event.TypeCompleted}; !equalKinds(got, want) {
 		t.Errorf("the unfiltered route received %v, want %v", got, want)
 	}
-	if got, want := kindsOf(hook.events()), []envelope.Kind{envelope.KindUsageCall, envelope.KindUsageChild, envelope.KindCompleted}; !equalKinds(got, want) {
+	if got, want := kindsOf(hook.events()), []string{event.TypeUsageCall, event.TypeUsageChild, event.TypeCompleted}; !equalKinds(got, want) {
 		t.Errorf("the route that asked for usage received %v, want %v", got, want)
 	}
 }

@@ -470,7 +470,7 @@ func (a *App) principal(ctx context.Context, runID string) (author.Principal, er
 // accepts tags from callers must set both from the caller's credential,
 // never from a request body.
 func (a *App) Invoke(ctx context.Context, tag envelope.Tag) (runtime.Acceptance, error) {
-	if err := a.deliver.Register(runtime.RunID(tag.Tenant, tag.ID), tag.Routes()); err != nil {
+	if err := a.deliver.Register(runtime.RunID(tag.Tenant, tag.ID), runtime.TenantOf(tag), runtime.ChannelOf(tag), tag.Routes()); err != nil {
 		return runtime.Acceptance{}, fmt.Errorf("fiber: register routes: %w", err)
 	}
 	return a.rt.Accept(ctx, tag)

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/urmzd/fiber/pkg/agentrt"
@@ -45,8 +46,8 @@ func TestASubTaskOfASubTaskIsRelayedTwoLevelsDeepOnce(t *testing.T) {
 	if len(origin) != 1 || origin[0].Kind != envelope.KindUsageCall {
 		t.Fatalf("the origin received %d chunks, want the one usage.call", len(origin))
 	}
-	got, err := payload.Decode[payload.UsageCall](envelope.Event{Kind: origin[0].Kind, Payload: origin[0].Payload})
-	if err != nil {
+	var got payload.UsageCall
+	if err := json.Unmarshal(origin[0].Payload, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Depth != 2 || got.AccountingID != "r/a1/helper.sub-1/assistant.sub-2/1" || got.PromptTokens != 30 {

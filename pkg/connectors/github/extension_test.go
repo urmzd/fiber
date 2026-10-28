@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/urmzd/fiber/pkg/connectors/github"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 var commitSHA = strings.Repeat("a", 40)
@@ -36,7 +36,7 @@ func TestBaseConnectorHasNoProductMutationToolsOrReviewInterpretation(t *testing
 			t.Fatal("product command exposed by transport")
 		}
 	}
-	if err := c.Deliver(context.Background(), target, event(1, envelope.KindCompleted, `{"text":"ordinary answer"}`)); err != nil {
+	if err := c.Deliver(context.Background(), target, ev(1, event.TypeCompleted, `{"text":"ordinary answer"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(api.Comments()[0].Body, "ordinary answer") {

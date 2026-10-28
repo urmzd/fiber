@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,72 +13,83 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
-// pgSchema is everything the Postgres bus owns.
+// pgSchema is everything the Postgres bus owns. The tables of the agent-keyed
+// bus it replaced (fiber_bus_runs, fiber_bus_events) are not touched or read.
 //
-// fiber_bus_runs holds each run's high-water mark, the one fact a publish
-// must read before it writes, and the time of its last event, which is what
-// the sweep ages runs out by.
+// fiber_event_runs holds each run's high-water mark and the time of its last
+// event, which the sweep ages runs out by.
 //
-// fiber_bus_events is the retained window. id is the append order across
-// every run and the cursor every subscriber reads by. Publishes serialize on
-// one advisory lock per schema (see fiber_bus_publish), so an id is assigned
-// and committed before the next one is, and a reader scanning "id > cursor"
-// can never step over a row that commits late. That is the whole catch-up and
-// live-tail story: both are the same scan.
-//
-// fiber_bus_publish is a function so that a publish is one round trip and one
-// transaction: take the lock, read the mark, decide, insert, advance, trim
-// the run to its retention depth, and notify.
+// fiber_events is the retained window. id is the append order across every
+// stream and the cursor every subscriber reads by. Publishes serialize on one
+// advisory lock per schema (see fiber_event_publish), so an id is assigned and
+// committed before the next one is, and a reader scanning "id > cursor" can
+// never step over a row that commits late. A run event (seq > 0) is unique by
+// (tenant, run, seq); every other event (seq = 0) by (tenant, event_id).
 const pgSchema = `
-CREATE TABLE IF NOT EXISTS fiber_bus_runs (
-	topic      text        PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS fiber_event_runs (
+	tenant     text        NOT NULL,
+	run        text        NOT NULL,
 	top        bigint      NOT NULL,
-	updated_at timestamptz NOT NULL DEFAULT now()
+	updated_at timestamptz NOT NULL DEFAULT now(),
+	PRIMARY KEY (tenant, run)
 );
 
-CREATE TABLE IF NOT EXISTS fiber_bus_events (
-	id    bigserial   PRIMARY KEY,
-	topic text        NOT NULL,
-	agent text        NOT NULL,
-	seq   bigint      NOT NULL,
-	body  text        NOT NULL,
-	at    timestamptz NOT NULL DEFAULT now(),
-	UNIQUE (topic, seq)
+CREATE TABLE IF NOT EXISTS fiber_events (
+	id       bigserial   PRIMARY KEY,
+	tenant   text        NOT NULL,
+	channel  text        NOT NULL,
+	type     text        NOT NULL,
+	run      text        NOT NULL DEFAULT '',
+	seq      bigint      NOT NULL DEFAULT 0,
+	event_id text        NOT NULL,
+	body     text        NOT NULL,
+	at       timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS fiber_bus_events_agent ON fiber_bus_events (agent, id);
-CREATE INDEX IF NOT EXISTS fiber_bus_events_topic ON fiber_bus_events (topic, id);
-CREATE INDEX IF NOT EXISTS fiber_bus_events_at ON fiber_bus_events (at);
+CREATE UNIQUE INDEX IF NOT EXISTS fiber_events_run_seq ON fiber_events (tenant, run, seq) WHERE seq > 0;
+CREATE UNIQUE INDEX IF NOT EXISTS fiber_events_event_id ON fiber_events (tenant, event_id) WHERE seq = 0;
+CREATE INDEX IF NOT EXISTS fiber_events_channel ON fiber_events (tenant, channel, id);
+CREATE INDEX IF NOT EXISTS fiber_events_run ON fiber_events (tenant, run, id);
+CREATE INDEX IF NOT EXISTS fiber_events_at ON fiber_events (at);
 
-CREATE OR REPLACE FUNCTION fiber_bus_publish(p_topic text, p_agent text, p_seq bigint, p_body text, p_retention int)
-RETURNS bigint LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION fiber_event_publish(p_tenant text, p_channel text, p_type text, p_run text, p_seq bigint, p_event_id text, p_body text, p_retention int)
+RETURNS boolean LANGUAGE plpgsql AS $$
 DECLARE
 	v_top bigint;
-	v_seq bigint := p_seq;
 BEGIN
-	PERFORM pg_advisory_xact_lock(hashtextextended('fiber_bus:' || current_schema(), 0));
-	SELECT r.top INTO v_top FROM fiber_bus_runs r WHERE r.topic = p_topic;
-	IF v_top IS NULL THEN
-		v_top := 0;
+	PERFORM pg_advisory_xact_lock(hashtextextended('fiber_events:' || current_schema(), 0));
+	IF p_seq > 0 THEN
+		SELECT r.top INTO v_top FROM fiber_event_runs r WHERE r.tenant = p_tenant AND r.run = p_run;
+		IF v_top IS NOT NULL AND p_seq <= v_top THEN
+			RETURN false;
+		END IF;
+		INSERT INTO fiber_events (tenant, channel, type, run, seq, event_id, body)
+			VALUES (p_tenant, p_channel, p_type, p_run, p_seq, p_event_id, p_body);
+		INSERT INTO fiber_event_runs (tenant, run, top, updated_at) VALUES (p_tenant, p_run, p_seq, now())
+			ON CONFLICT (tenant, run) DO UPDATE SET top = EXCLUDED.top, updated_at = EXCLUDED.updated_at;
+		DELETE FROM fiber_events e
+			WHERE e.tenant = p_tenant AND e.run = p_run AND e.seq > 0
+			AND e.seq < (SELECT x.seq FROM fiber_events x
+				WHERE x.tenant = p_tenant AND x.run = p_run AND x.seq > 0
+				ORDER BY x.seq DESC OFFSET p_retention - 1 LIMIT 1);
+	ELSE
+		INSERT INTO fiber_events (tenant, channel, type, run, seq, event_id, body)
+			VALUES (p_tenant, p_channel, p_type, p_run, 0, p_event_id, p_body)
+			ON CONFLICT (tenant, event_id) WHERE seq = 0 DO NOTHING;
+		IF NOT FOUND THEN
+			RETURN false;
+		END IF;
+		DELETE FROM fiber_events e
+			WHERE e.tenant = p_tenant AND e.channel = p_channel AND e.seq = 0
+			AND e.id < (SELECT x.id FROM fiber_events x
+				WHERE x.tenant = p_tenant AND x.channel = p_channel AND x.seq = 0
+				ORDER BY x.id DESC OFFSET p_retention - 1 LIMIT 1);
 	END IF;
-	IF v_seq = 0 THEN
-		v_seq := v_top + 1;
-	ELSIF v_seq <= v_top THEN
-		RETURN v_seq;
-	END IF;
-	INSERT INTO fiber_bus_events (topic, agent, seq, body) VALUES (p_topic, p_agent, v_seq, p_body);
-	INSERT INTO fiber_bus_runs (topic, top, updated_at) VALUES (p_topic, v_seq, now())
-		ON CONFLICT (topic) DO UPDATE SET top = EXCLUDED.top, updated_at = EXCLUDED.updated_at;
-	DELETE FROM fiber_bus_events e
-		WHERE e.topic = p_topic
-		AND e.seq < (SELECT x.seq FROM fiber_bus_events x WHERE x.topic = p_topic
-			ORDER BY x.seq DESC OFFSET p_retention - 1 LIMIT 1);
-	PERFORM pg_notify('fiber_bus', p_topic);
-	RETURN v_seq;
+	PERFORM pg_notify('fiber_events', p_tenant);
+	RETURN true;
 END
 $$;
 `
@@ -87,44 +99,26 @@ $$;
 const pgMigrateLock = 0x6d616e64
 
 // pgChannel is the LISTEN/NOTIFY channel publishes wake readers on.
-const pgChannel = "fiber_bus"
+const pgChannel = "fiber_events"
 
 // listeningPollFactor stretches a reader's safety poll while the LISTEN
-// connection is healthy: notifications do the waking, and the poll only
-// covers one lost between reconnects.
+// connection is healthy.
 const listeningPollFactor = 20
 
-// Postgres is a bus on two tables in the database a deployment already has,
-// so a multi-process deployment can stream without Redis.
+// Postgres is a bus on two tables in the database a deployment already has.
 //
-// It keeps the contract bustest holds every backend to. Sequencing,
-// idempotent replay and per-run retention happen inside one publish
-// function, under one advisory lock per schema. That lock is the price of
-// the design: publishes are serialized across every run, so throughput is
-// bounded by one short Postgres transaction per event. It is the right
-// trade for a deployment that would rather not run Redis, and the wrong one
-// for a very chatty one.
+// Sequencing, idempotent replay, dedupe and retention happen inside one
+// publish function, under one advisory lock per schema, so publishes are
+// serialized across every stream.
 //
-// Readers are one goroutine per subscription, like Redis's. Each scans the
-// events table by id, from the start of what is retained, filtering on the
-// subscription's topic and From, then waits for a NOTIFY on its own topic
-// (one LISTEN connection per bus, held while anything is subscribed, which
-// wakes only the readers a publish concerns) or the poll interval. A reader holds a pooled connection only while it queries. A full
-// buffer stops the reader, which is backpressure onto the table: like Redis,
-// a consumer slow enough to fall behind retention loses events to the trim
-// rather than being terminated.
+// Readers are one goroutine per subscription. Each scans fiber_events by id,
+// narrowed in SQL to its tenant, channels and run, then waits for a NOTIFY on
+// its tenant (one LISTEN connection per bus, held while anything is
+// subscribed) or the poll interval.
 //
-// Runs are forgotten WithIndexTTL after their last event, by a sweep a
-// publish runs at most every quarter of that.
-//
-// Unlike Redis's window, this one is durable: every event the bus carries,
-// body included, is a row in fiber_bus_events in the database it is given,
-// until its run's retention trim drops it or a sweep finds it older than
-// WithIndexTTL (24 hours by default; with no publishes, nothing is swept).
-// Those rows reach that database's WAL, replicas and backups like any other,
-// and tool events carry their call's arguments (up to 8 KiB). Where those can
-// hold secrets, scrub them before they are published
-// (agentrt.WithToolArguments), shorten WithIndexTTL, or use Redis.
+// Events are durable rows until retention trims them or a sweep finds them
+// older than WithIndexTTL (24 hours by default). Those rows reach the
+// database's WAL, replicas and backups like any other.
 //
 // It does not own the pool. Call Migrate once before first use.
 type Postgres struct {
@@ -133,6 +127,7 @@ type Postgres struct {
 	backlog   int
 	poll      time.Duration
 	ttl       time.Duration
+	opts      options
 	hub       *pgHub
 
 	mu    sync.Mutex
@@ -142,7 +137,8 @@ type Postgres struct {
 var _ Bus = (*Postgres)(nil)
 
 // NewPostgres returns a bus on pool. It honours WithRetention, WithBacklog,
-// WithPollInterval and WithIndexTTL, and does not touch the database.
+// WithPollInterval, WithIndexTTL and WithMaxHops, and does not touch the
+// database.
 func NewPostgres(pool *pgxpool.Pool, opts ...Option) *Postgres {
 	o := newOptions(opts)
 	return &Postgres{
@@ -151,6 +147,7 @@ func NewPostgres(pool *pgxpool.Pool, opts ...Option) *Postgres {
 		backlog:   o.backlog,
 		poll:      o.poll,
 		ttl:       o.indexTTL,
+		opts:      o,
 		hub:       &pgHub{pool: pool, retry: o.poll},
 		swept:     time.Now(),
 	}
@@ -173,29 +170,29 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 }
 
 // Publish implements Bus.
-func (p *Postgres) Publish(ctx context.Context, e envelope.Event) error {
-	if err := normalize(&e); err != nil {
+func (p *Postgres) Publish(ctx context.Context, e event.Envelope) error {
+	if err := normalize(&e, p.opts); err != nil {
 		return err
 	}
 	if e.Seq > uint64(1<<63-1) {
 		return fmt.Errorf("%w: sequence %d does not fit in a bigint", ErrInvalid, e.Seq)
 	}
-	body, err := encodeEvent(e)
+	body, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("bus: encode event on %s: %w", e.Topic, err)
+		return fmt.Errorf("bus: encode %s %q: %w", e.Type, e.ID, err)
 	}
-	var seq int64
-	err = p.pool.QueryRow(ctx, `SELECT fiber_bus_publish($1, $2, $3, $4, $5)`,
-		e.Topic.String(), e.Topic.Name(), int64(e.Seq), body, p.retention).Scan(&seq)
+	var stored bool
+	err = p.pool.QueryRow(ctx, `SELECT fiber_event_publish($1, $2, $3, $4, $5, $6, $7, $8)`,
+		e.Tenant, e.Channel, e.Type, e.Run, int64(e.Seq), e.ID, string(body), p.retention).Scan(&stored)
 	if err != nil {
-		return fmt.Errorf("bus: publish to %s: %w", e.Topic, err)
+		return fmt.Errorf("bus: publish %s %q on %s: %w", e.Type, e.ID, e.Channel, err)
 	}
 	p.sweep(ctx)
 	return nil
 }
 
 // sweep forgets runs and events older than the TTL. A failure is ignored:
-// the next sweep tries again, and nothing correct depends on it.
+// the next sweep tries again.
 func (p *Postgres) sweep(ctx context.Context) {
 	p.mu.Lock()
 	due := time.Since(p.swept) >= p.ttl/4
@@ -207,12 +204,12 @@ func (p *Postgres) sweep(ctx context.Context) {
 		return
 	}
 	cutoff := time.Now().Add(-p.ttl)
-	_, _ = p.pool.Exec(ctx, `DELETE FROM fiber_bus_events WHERE at < $1`, cutoff)
-	_, _ = p.pool.Exec(ctx, `DELETE FROM fiber_bus_runs WHERE updated_at < $1`, cutoff)
+	_, _ = p.pool.Exec(ctx, `DELETE FROM fiber_events WHERE at < $1`, cutoff)
+	_, _ = p.pool.Exec(ctx, `DELETE FROM fiber_event_runs WHERE updated_at < $1`, cutoff)
 }
 
 // Subscribe implements Bus.
-func (p *Postgres) Subscribe(ctx context.Context, sub envelope.Subscription) (Stream, error) {
+func (p *Postgres) Subscribe(ctx context.Context, sub Subscription) (Stream, error) {
 	if err := validate(sub); err != nil {
 		return nil, err
 	}
@@ -226,13 +223,21 @@ func (p *Postgres) Subscribe(ctx context.Context, sub envelope.Subscription) (St
 	s := &pgStream{
 		p:      p,
 		sub:    sub,
-		ch:     make(chan envelope.Event, p.backlog),
+		ch:     make(chan event.Envelope, p.backlog),
 		cancel: cancel,
 		closed: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
-	wake, unsubscribe := p.hub.subscribe(sub.Topic.String())
-	go s.read(readCtx, wake, unsubscribe)
+	if sub.matchesNothing() {
+		go func() {
+			defer close(s.done)
+			<-readCtx.Done()
+			s.err = ErrClosed
+		}()
+	} else {
+		wake, unsubscribe := p.hub.subscribe(sub.Tenant)
+		go s.read(readCtx, wake, unsubscribe)
+	}
 	if done := ctx.Done(); done != nil {
 		go func() {
 			select {
@@ -246,11 +251,10 @@ func (p *Postgres) Subscribe(ctx context.Context, sub envelope.Subscription) (St
 }
 
 // pgStream is one subscription: a reader goroutine filling a bounded buffer.
-// Its Recv and Close are redisStream's, for the same reasons.
 type pgStream struct {
 	p   *Postgres
-	sub envelope.Subscription
-	ch  chan envelope.Event
+	sub Subscription
+	ch  chan event.Envelope
 
 	once   sync.Once
 	cancel context.CancelFunc
@@ -262,38 +266,8 @@ type pgStream struct {
 var _ Stream = (*pgStream)(nil)
 
 // Recv implements Stream.
-func (s *pgStream) Recv(ctx context.Context) (envelope.Event, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return envelope.Event{}, err
-		}
-		select {
-		case <-s.closed:
-			return envelope.Event{}, ErrClosed
-		default:
-		}
-		select {
-		case e := <-s.ch:
-			return e, nil
-		default:
-		}
-		select {
-		case <-s.done:
-			if s.err == nil {
-				return envelope.Event{}, ErrClosed
-			}
-			return envelope.Event{}, s.err
-		default:
-		}
-		select {
-		case e := <-s.ch:
-			return e, nil
-		case <-s.done:
-		case <-s.closed:
-		case <-ctx.Done():
-			return envelope.Event{}, ctx.Err()
-		}
-	}
+func (s *pgStream) Recv(ctx context.Context) (event.Envelope, error) {
+	return recv(ctx, s.ch, s.closed, s.done, func() error { return s.err })
 }
 
 // Close implements Stream. It waits for the reader, so nothing outlives it.
@@ -312,14 +286,13 @@ func (s *pgStream) read(ctx context.Context, wake <-chan struct{}, unsubscribe f
 	defer close(s.done)
 	defer unsubscribe()
 
-	query, arg := s.query()
 	var after int64
 	for {
 		if err := ctx.Err(); err != nil {
 			s.err = ErrClosed
 			return
 		}
-		n, err := s.batch(ctx, query, arg, &after)
+		n, err := s.batch(ctx, &after)
 		if err != nil {
 			if ctx.Err() != nil {
 				s.err = ErrClosed
@@ -346,53 +319,47 @@ func (s *pgStream) read(ctx context.Context, wake <-chan struct{}, unsubscribe f
 	}
 }
 
-// query narrows the scan as far as SQL can: one run, or one agent. The
-// root's scan is every row, and Covers keeps the control namespace out.
-func (s *pgStream) query() (string, string) {
-	const cols = `SELECT id, topic, seq, body FROM fiber_bus_events WHERE id > $1 AND seq > $2`
-	tail := ` ORDER BY id LIMIT ` + strconv.Itoa(readBatch)
-	switch {
-	case s.sub.Topic.RunID() != "":
-		return cols + ` AND topic = $3` + tail, s.sub.Topic.String()
-	case s.sub.Topic.Name() != "":
-		return cols + ` AND agent = $3` + tail, s.sub.Topic.Name()
-	default:
-		return cols + ` AND $3 = ''` + tail, ""
-	}
-}
+// pgQuery narrows the scan as far as SQL can: the tenant, a channel prefix,
+// the run, and the cursor over run sequences. Accepts decides the rest.
+var pgQuery = `SELECT id, body FROM fiber_events
+WHERE id > $1 AND tenant = $2
+AND (seq = 0 OR seq > $3)
+AND ($4 = '' OR run = $4)
+AND EXISTS (SELECT 1 FROM unnest($5::text[]) AS p(prefix) WHERE starts_with(channel, p.prefix))
+ORDER BY id LIMIT ` + strconv.Itoa(readBatch)
 
 // batch reads one page after the cursor and hands what the subscription
 // accepts to the consumer, advancing the cursor past every row it read.
-func (s *pgStream) batch(ctx context.Context, query, arg string, after *int64) (int, error) {
-	rows, err := s.p.pool.Query(ctx, query, *after, int64(s.sub.From), arg)
+func (s *pgStream) batch(ctx context.Context, after *int64) (int, error) {
+	rows, err := s.p.pool.Query(ctx, pgQuery, *after, s.sub.Tenant, int64(s.sub.From), s.sub.Run, s.sub.Channels)
 	if err != nil {
-		return 0, fmt.Errorf("bus: read %s: %w", s.sub.Topic, err)
+		return 0, fmt.Errorf("bus: read %s: %w", s.sub.Tenant, err)
 	}
 	type row struct {
 		id   int64
-		e    envelope.Event
+		e    event.Envelope
 		keep bool
 	}
 	var page []row
 	for rows.Next() {
 		var (
-			id, seq    int64
-			name, body string
+			id   int64
+			body string
 		)
-		if err := rows.Scan(&id, &name, &seq, &body); err != nil {
+		if err := rows.Scan(&id, &body); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("bus: read %s: %w", s.sub.Topic, err)
+			return 0, fmt.Errorf("bus: read %s: %w", s.sub.Tenant, err)
 		}
-		e, err := decodeRow(name, seq, body)
-		if err != nil {
+		var e event.Envelope
+		if err := json.Unmarshal([]byte(body), &e); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("bus: decode %s#%d: %w", name, seq, err)
+			return 0, fmt.Errorf("bus: decode row %d: %w", id, err)
 		}
 		page = append(page, row{id: id, e: e, keep: s.sub.Accepts(e)})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("bus: read %s: %w", s.sub.Topic, err)
+		return 0, fmt.Errorf("bus: read %s: %w", s.sub.Tenant, err)
 	}
 	for _, r := range page {
 		*after = r.id
@@ -408,27 +375,10 @@ func (s *pgStream) batch(ctx context.Context, query, arg string, after *int64) (
 	return len(page), nil
 }
 
-func decodeRow(name string, seq int64, body string) (envelope.Event, error) {
-	t, err := topic.Parse(name)
-	if err != nil {
-		return envelope.Event{}, err
-	}
-	var w wireEvent
-	if err := json.Unmarshal([]byte(body), &w); err != nil {
-		return envelope.Event{}, err
-	}
-	e := w.Event
-	e.Topic = t
-	e.Seq = uint64(seq)
-	return e, nil
-}
-
 // pgHub multiplexes one LISTEN connection across every live reader of a bus.
 // It listens only while something is subscribed. A notification's payload is
-// the run topic that was published to, so it wakes only the readers whose
-// subscription covers that run: the run's own, its agent's, and the root's.
-// Every (re)connect wakes every reader, so a notification lost in a gap costs
-// one extra query.
+// the tenant that was published to, so it wakes only that tenant's readers.
+// Every (re)connect wakes every reader.
 type pgHub struct {
 	pool  *pgxpool.Pool
 	retry time.Duration
@@ -441,18 +391,18 @@ type pgHub struct {
 	cancel context.CancelFunc
 }
 
-// subscribe registers a reader under key, the subscription's topic as a
-// string, and returns its wake channel and the function that removes it.
-func (h *pgHub) subscribe(key string) (<-chan struct{}, func()) {
+// subscribe registers a reader of tenant and returns its wake channel and the
+// function that removes it.
+func (h *pgHub) subscribe(tenant string) (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	h.mu.Lock()
 	if h.subs == nil {
 		h.subs = map[string]map[chan struct{}]struct{}{}
 	}
-	if h.subs[key] == nil {
-		h.subs[key] = map[chan struct{}]struct{}{}
+	if h.subs[tenant] == nil {
+		h.subs[tenant] = map[chan struct{}]struct{}{}
 	}
-	h.subs[key][ch] = struct{}{}
+	h.subs[tenant][ch] = struct{}{}
 	h.count++
 	if h.count == 1 {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -466,9 +416,9 @@ func (h *pgHub) subscribe(key string) (<-chan struct{}, func()) {
 		once.Do(func() {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			delete(h.subs[key], ch)
-			if len(h.subs[key]) == 0 {
-				delete(h.subs, key)
+			delete(h.subs[tenant], ch)
+			if len(h.subs[tenant]) == 0 {
+				delete(h.subs, tenant)
 			}
 			h.count--
 			if h.count == 0 && h.cancel != nil {
@@ -479,34 +429,17 @@ func (h *pgHub) subscribe(key string) (<-chan struct{}, func()) {
 	}
 }
 
-// wakeKeys returns the subscription keys a publish to payload concerns. A
-// payload that does not parse wakes everyone: correctness never rests on
-// the payload, only the number of queries does.
-func wakeKeys(payload string) []string {
-	t, err := topic.Parse(payload)
-	if err != nil || t.RunID() == "" {
-		return nil
-	}
-	keys := []string{t.String(), topic.All().String()}
-	if a, err := topic.Agent(t.Name()); err == nil {
-		keys = append(keys, a.String())
-	}
-	return keys
-}
-
-// wake signals the readers a publish to payload concerns.
-func (h *pgHub) wake(payload string) {
-	keys := wakeKeys(payload)
-	if keys == nil {
+// wake signals the readers of the tenant a publish concerns. An empty
+// payload wakes everyone.
+func (h *pgHub) wake(tenant string) {
+	if strings.TrimSpace(tenant) == "" {
 		h.wakeAll()
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, k := range keys {
-		for ch := range h.subs[k] {
-			signal(ch)
-		}
+	for ch := range h.subs[tenant] {
+		signal(ch)
 	}
 }
 
@@ -541,9 +474,7 @@ func (h *pgHub) listen(ctx context.Context) {
 	}
 }
 
-// session holds one LISTEN connection until it fails or ctx ends. The
-// connection is taken out of the pool, so a LISTEN never leaks into a
-// connection someone else borrows.
+// session holds one LISTEN connection until it fails or ctx ends.
 func (h *pgHub) session(ctx context.Context) {
 	pc, err := h.pool.Acquire(ctx)
 	if err != nil {

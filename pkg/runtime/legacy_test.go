@@ -15,7 +15,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/internal/pgrename"
 	"github.com/urmzd/fiber/pkg/runtime"
 )
@@ -78,7 +78,7 @@ func TestARunFromBeforeTheRenameFailsWithAReasonEverySurfaceSees(t *testing.T) {
 		strings.Contains(ended.Error, "unknown workflow") {
 		t.Errorf("ledger error = %q, want the rename named as the reason", ended.Error)
 	}
-	failed := lifecycleOf(t, w.bus.of(runID), envelope.KindFailed)
+	failed := lifecycleOf(t, w.bus.of(runID), event.TypeFailed)
 	if len(failed) != 1 {
 		t.Fatalf("published %v, want exactly one lifecycle.failed", kindsOf(w.bus.of(runID)))
 	}

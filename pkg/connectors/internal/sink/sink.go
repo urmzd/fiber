@@ -56,7 +56,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/internal/render"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Defaults for the engine.
@@ -171,11 +171,11 @@ type state struct {
 }
 
 // Deliver applies e and writes the run's message if it is due.
-func (eng *Engine) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (eng *Engine) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	if eng.render == nil || eng.surface == nil {
 		return fmt.Errorf("sink: engine is not configured with a surface and a renderer")
 	}
-	st := eng.state(key(e.RunID, target), target)
+	st := eng.state(key(e.Run, target), target)
 
 	st.mu.Lock()
 	defer st.mu.Unlock()

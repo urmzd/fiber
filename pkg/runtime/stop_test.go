@@ -34,6 +34,7 @@ import (
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/durable"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 )
@@ -77,7 +78,7 @@ type tap struct {
 	rec recorder
 }
 
-func (b *tap) Publish(ctx context.Context, e envelope.Event) error {
+func (b *tap) Publish(ctx context.Context, e event.Envelope) error {
 	if err := b.rec.Publish(ctx, e); err != nil {
 		return err
 	}
@@ -86,10 +87,10 @@ func (b *tap) Publish(ctx context.Context, e envelope.Event) error {
 
 // of returns what one run published, in order. Requests addressed to the run
 // are on another stream and are not among them.
-func (b *tap) of(runID string) []envelope.Event {
-	var out []envelope.Event
+func (b *tap) of(runID string) []event.Envelope {
+	var out []event.Envelope
 	for _, e := range b.rec.all() {
-		if e.RunID == runID {
+		if e.Run == runID && !event.IsControl(e.Channel) {
 			out = append(out, e)
 		}
 	}
@@ -458,11 +459,11 @@ func sandboxOf(t *testing.T, sp *specs, models map[string]saigetypes.Provider, o
 	return s
 }
 
-func stoppedBody(t *testing.T, e envelope.Event) payload.Stopped {
+func stoppedBody(t *testing.T, e event.Envelope) payload.Stopped {
 	t.Helper()
-	body, err := payload.Decode[payload.Stopped](e)
+	body, err := decode[payload.Stopped](e)
 	if err != nil {
-		t.Fatalf("decode %s: %v", e.Kind, err)
+		t.Fatalf("decode %s: %v", e.Type, err)
 	}
 	return body
 }
@@ -471,21 +472,21 @@ func stoppedBody(t *testing.T, e envelope.Event) payload.Stopped {
 // it carries no completed event and no terminal failure anywhere, and returns
 // the stopped event. A failure that was retried may precede the stop: a stop
 // between two attempts follows exactly that.
-func ended(t *testing.T, events []envelope.Event) envelope.Event {
+func ended(t *testing.T, events []event.Envelope) event.Envelope {
 	t.Helper()
 	kinds := kindsOf(events)
-	if len(events) == 0 || events[len(events)-1].Kind != envelope.KindStopped {
+	if len(events) == 0 || events[len(events)-1].Type != event.TypeStopped {
 		t.Fatalf("the run's last event is not lifecycle.stopped: %v", kinds)
 	}
 	stopped := 0
 	for _, e := range events {
-		switch e.Kind {
-		case envelope.KindStopped:
+		switch e.Type {
+		case event.TypeStopped:
 			stopped++
-		case envelope.KindCompleted:
+		case event.TypeCompleted:
 			t.Fatalf("a stopped run published lifecycle.completed: %v", kinds)
-		case envelope.KindFailed:
-			body, err := payload.Decode[payload.Lifecycle](e)
+		case event.TypeFailed:
+			body, err := decode[payload.Lifecycle](e)
 			if err != nil || body.Terminal {
 				t.Fatalf("a stopped run published a terminal lifecycle.failed: %v", kinds)
 			}
@@ -525,7 +526,7 @@ func TestAStoppedRunKeepsItsPartialAnswerAndTheNextTurnIsShownIt(t *testing.T) {
 	// demonstrably mid-stream, not about to start.
 	waitFor(t, func() bool {
 		for _, e := range w.bus.of(runID) {
-			if e.Kind == envelope.KindText {
+			if e.Type == event.TypeText {
 				return true
 			}
 		}
@@ -558,7 +559,7 @@ func TestAStoppedRunKeepsItsPartialAnswerAndTheNextTurnIsShownIt(t *testing.T) {
 		t.Errorf("lifecycle.stopped = %+v, want %+v", body, want)
 	}
 	for _, e := range events {
-		if e.Kind == envelope.KindFailed {
+		if e.Type == event.TypeFailed {
 			t.Fatalf("a stopped run published lifecycle.failed: %v", kindsOf(events))
 		}
 	}
@@ -638,7 +639,7 @@ func TestAStoppedRunIsRecordedAsEndedAndIsNeverRetried(t *testing.T) {
 	if n := exec.count(); n != 1 {
 		t.Errorf("the executor ran %d times, want 1", n)
 	}
-	wantKinds := []envelope.Kind{envelope.KindAccepted, envelope.KindStarted, envelope.KindText, envelope.KindStopped}
+	wantKinds := []string{event.TypeAccepted, event.TypeStarted, event.TypeText, event.TypeStopped}
 	if got := kindsOf(w.bus.of(runID)); !sameKinds(got, wantKinds) {
 		t.Errorf("events = %v, want %v", got, wantKinds)
 	}
@@ -835,9 +836,9 @@ func TestReplayingAStoppedRunOffersTheJournalTheSameBytesAndRunsNothingTwice(t *
 	rt := w.runtime(t, exec)
 
 	var once sync.Once
-	w.bus.rec.failWhen(func(e envelope.Event) error {
+	w.bus.rec.failWhen(func(e event.Envelope) error {
 		var err error
-		if e.Kind == envelope.KindStopped {
+		if e.Type == event.TypeStopped {
 			once.Do(func() { err = errors.New("broker outage") })
 		}
 		return err
@@ -873,9 +874,9 @@ func TestReplayingAStoppedRunOffersTheJournalTheSameBytesAndRunsNothingTwice(t *
 
 	events := w.bus.of(runID)
 	ended(t, events)
-	wantKinds := []envelope.Kind{
-		envelope.KindAccepted, envelope.KindStarted, envelope.KindText, envelope.KindText,
-		envelope.KindResumed, envelope.KindStopped,
+	wantKinds := []string{
+		event.TypeAccepted, event.TypeStarted, event.TypeText, event.TypeText,
+		event.TypeResumed, event.TypeStopped,
 	}
 	if got := kindsOf(events); !sameKinds(got, wantKinds) {
 		t.Errorf("events = %v, want %v", got, wantKinds)
@@ -910,15 +911,15 @@ func TestAStopBetweenTwoAttemptsStopsTheNextOne(t *testing.T) {
 	if out.Stopped == nil || out.Stopped.Reason != "between attempts" || out.Attempt != 2 {
 		t.Fatalf("Output = %+v, want the second attempt stopped", out)
 	}
-	wantKinds := []envelope.Kind{
-		envelope.KindAccepted, envelope.KindStarted, envelope.KindFailed,
-		envelope.KindResumed, envelope.KindStopped,
+	wantKinds := []string{
+		event.TypeAccepted, event.TypeStarted, event.TypeFailed,
+		event.TypeResumed, event.TypeStopped,
 	}
 	events := w.bus.of(runID)
 	if got := kindsOf(events); !sameKinds(got, wantKinds) {
 		t.Fatalf("events = %v, want %v", got, wantKinds)
 	}
-	if events[len(events)-1].Kind != envelope.KindStopped {
+	if events[len(events)-1].Type != event.TypeStopped {
 		t.Fatalf("something followed the stop: %v", kindsOf(events))
 	}
 }
@@ -947,7 +948,7 @@ func TestATurnThatIgnoresAStopIsCancelledAndTheRunStillEndsStopped(t *testing.T)
 	}
 	ended(t, w.bus.of(runID))
 	for _, e := range w.bus.of(runID) {
-		if e.Kind == envelope.KindFailed {
+		if e.Type == event.TypeFailed {
 			t.Fatalf("a cancelled stop was reported as a failure: %v", kindsOf(w.bus.of(runID)))
 		}
 	}
@@ -1048,23 +1049,23 @@ func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testin
 		t.Fatalf("published %d events, want the request alone", len(events))
 	}
 	e := events[0]
-	want, err := runtime.StopTopic("acme", "r0123")
+	want, err := runtime.StopChannel("acme", "r0123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.Topic.String() != want.String() || !strings.HasPrefix(e.Topic.String(), "agent:_control:stop-") {
-		t.Errorf("topic = %q, want %q", e.Topic, want)
+	if e.Channel != want || !strings.HasPrefix(e.Channel, "control://acme/stop/") {
+		t.Errorf("channel = %q, want %q", e.Channel, want)
 	}
-	if other, _ := runtime.StopTopic("globex", "r0123"); other.String() == want.String() {
+	if other, _ := runtime.StopChannel("globex", "r0123"); other == want {
 		t.Error("two tenants' requests for one run id share a stream")
 	}
-	if !e.Topic.IsControl() || e.Kind != envelope.KindStop || e.Tenant != "acme" {
-		t.Errorf("event = topic %s kind %s tenant %q", e.Topic, e.Kind, e.Tenant)
+	if !event.IsControl(e.Channel) || e.Type != event.TypeStop || e.Tenant != "acme" {
+		t.Errorf("event = channel %s type %s tenant %q", e.Channel, e.Type, e.Tenant)
 	}
-	if e.RunID == "r0123" {
-		t.Error("the request is numbered under the run's own id; a consumer tracking sequences per run would confuse the two streams")
+	if e.Seq != 0 {
+		t.Error("the request is sequenced; a consumer tracking sequences per run would confuse it with the run's own events")
 	}
-	body, err := payload.Decode[payload.StopRequest](e)
+	body, err := decode[payload.StopRequest](e)
 	if err != nil {
 		t.Fatal(err)
 	}

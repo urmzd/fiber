@@ -8,33 +8,32 @@ import (
 	"io"
 	"slices"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // renderer prints a run's events as they arrive.
 type renderer interface {
-	event(e envelope.Event)
+	event(e event.Envelope)
 	// close ends the output, once no more events will be printed.
 	close()
 }
 
 // textRenderer prints events for a person. The answer and the reasoning
 // stream inline as their fragments arrive; every other event is one line,
-// "[kind] what happened", under the kind's own name, which is what a route's
-// kind filter selects.
+// "[type] what happened", under the event's own type, which is what a
+// subscription's type prefix selects.
 type textRenderer struct {
 	w io.Writer
-	// inline is the delta kind whose fragments the current line holds, if
+	// inline is the delta type whose fragments the current line holds, if
 	// any, and mid is whether that line has not been ended.
-	inline envelope.Kind
+	inline string
 	mid    bool
 	// said is whether any of the answer was streamed, so a run whose answer
 	// arrives only on its terminal event (a replayed attempt streams none)
@@ -46,91 +45,30 @@ type textRenderer struct {
 // full text is in the -json output.
 const summaryLen = 160
 
-func (t *textRenderer) event(e envelope.Event) {
-	switch e.Kind {
-	case envelope.KindText, envelope.KindThinking:
-		frag, err := payload.Decode[payload.Text](e)
-		if err != nil {
-			t.line(e.Kind, err.Error())
-			return
-		}
-		if t.inline != e.Kind {
-			t.endLine()
-			t.inline = e.Kind
-			if e.Kind == envelope.KindThinking {
-				fmt.Fprintf(t.w, "[%s] ", e.Kind)
-				t.mid = true
-			}
-		}
-		if frag.Text == "" {
-			return
-		}
-		fmt.Fprint(t.w, frag.Text)
-		t.mid = !strings.HasSuffix(frag.Text, "\n")
-		if e.Kind == envelope.KindText {
-			t.said = true
-		}
+func (t *textRenderer) event(e event.Envelope) {
+	switch b := e.Data.(type) {
+	case event.Text:
+		t.inlineText(e.Type, b.Text, false)
+		return
+	case event.Thinking:
+		t.inlineText(e.Type, b.Text, true)
 		return
 	}
 	t.endLine()
-	body, known, err := payload.Of(e)
-	if err != nil {
-		t.line(e.Kind, err.Error())
-		return
-	}
-	if !known {
-		t.line(e.Kind, compact(e.Payload))
-		return
-	}
-	switch b := body.(type) {
-	case payload.Lifecycle:
-		t.lifecycle(e, b)
-	case payload.Stopped:
-		t.line(e.Kind, join(fmt.Sprintf("attempt %d", b.Attempt), b.Reason))
-		t.answer(b.Text)
-	case payload.ToolCall:
-		if b.Phase == payload.PhaseRequested {
-			t.line(e.Kind, b.Name+" (requested)")
-			return
-		}
-		t.line(e.Kind, join(b.Name, clip(compact(b.Arguments))))
-	case payload.ToolDone:
-		if b.Error != "" {
-			t.line(e.Kind, b.Name+" failed: "+clip(b.Error))
-			return
-		}
-		t.line(e.Kind, b.Name+": "+clip(b.Result))
-	case payload.Citation:
-		where := b.Source.SourceURI
-		if where == "" {
-			where = join(b.Source.DocumentTitle, b.Source.SectionHeading)
-		}
-		t.line(e.Kind, join(b.Label, where))
-	case payload.Action:
-		if b.Error != "" {
-			t.line(e.Kind, join(b.Name, b.Target)+" failed: "+clip(b.Error))
-			return
-		}
-		t.line(e.Kind, join(join(b.Name, b.Target), clip(b.Summary)))
-	case payload.UsageCall:
-		t.line(e.Kind, fmt.Sprintf("%s: %d tokens in (%d cached), %d out",
-			orNone(b.Model), b.PromptTokens, b.CachedPromptTokens, b.CompletionTokens))
-	default:
-		t.line(e.Kind, clip(compact(e.Payload)))
-	}
-}
-
-func (t *textRenderer) lifecycle(e envelope.Event, b payload.Lifecycle) {
-	switch e.Kind {
-	case envelope.KindAccepted:
-		t.line(e.Kind, fmt.Sprintf("%s revision %d, run %s", e.Agent, e.Rev, e.RunID))
-	case envelope.KindFailed:
+	switch b := e.Data.(type) {
+	case event.Accepted:
+		t.line(e.Type, fmt.Sprintf("%s version %s, run %s", e.Agent, e.Version, e.Run))
+	case event.Started:
+		t.line(e.Type, fmt.Sprintf("attempt %d", b.Attempt))
+	case event.Resumed:
+		t.line(e.Type, fmt.Sprintf("attempt %d", b.Attempt))
+	case event.Failed:
 		then := "the run may be attempted again"
 		if b.Terminal {
 			then = "the run will not be attempted again"
 		}
-		t.line(e.Kind, fmt.Sprintf("attempt %d: %s; %s", b.Attempt, b.Error, then))
-	case envelope.KindParked:
+		t.line(e.Type, fmt.Sprintf("attempt %d: %s; %s", b.Attempt, b.Error, then))
+	case event.Parked:
 		what := b.Reason
 		if q := b.Question; q != nil {
 			what = q.Kind + ": " + q.Prompt
@@ -141,17 +79,68 @@ func (t *textRenderer) lifecycle(e envelope.Event, b payload.Lifecycle) {
 				what = join(what, "["+strings.Join(q.Options, ", ")+"]")
 			}
 		}
-		t.line(e.Kind, what)
-	case envelope.KindCompleted:
+		t.line(e.Type, what)
+	case event.Completed:
 		if u := b.Usage; u != nil && !u.Total.IsZero() {
-			t.line(e.Kind, fmt.Sprintf("attempt %d, %d model calls, %d tokens in, %d out",
+			t.line(e.Type, fmt.Sprintf("attempt %d, %d model calls, %d tokens in, %d out",
 				b.Attempt, u.Total.ModelCalls, u.Total.PromptTokens, u.Total.CompletionTokens))
 		} else {
-			t.line(e.Kind, fmt.Sprintf("attempt %d", b.Attempt))
+			t.line(e.Type, fmt.Sprintf("attempt %d", b.Attempt))
 		}
 		t.answer(b.Text)
+	case event.Stopped:
+		t.line(e.Type, join(fmt.Sprintf("attempt %d", b.Attempt), b.Reason))
+		t.answer(b.Text)
+	case event.ToolCall:
+		if b.Phase == event.PhaseRequested {
+			t.line(e.Type, b.Name+" (requested)")
+			return
+		}
+		t.line(e.Type, join(b.Name, clip(compact(b.Arguments))))
+	case event.ToolDone:
+		if b.Error != "" {
+			t.line(e.Type, b.Name+" failed: "+clip(b.Error))
+			return
+		}
+		t.line(e.Type, b.Name+": "+clip(b.Result))
+	case event.Citation:
+		where := b.Source.SourceURI
+		if where == "" {
+			where = join(b.Source.DocumentTitle, b.Source.SectionHeading)
+		}
+		t.line(e.Type, join(b.Label, where))
+	case event.Action:
+		if b.Error != "" {
+			t.line(e.Type, join(b.Name, b.Target)+" failed: "+clip(b.Error))
+			return
+		}
+		t.line(e.Type, join(join(b.Name, b.Target), clip(b.Summary)))
+	case event.UsageCall:
+		t.line(e.Type, fmt.Sprintf("%s: %d tokens in (%d cached), %d out",
+			orNone(b.Model), b.PromptTokens, b.CachedPromptTokens, b.CompletionTokens))
 	default:
-		t.line(e.Kind, fmt.Sprintf("attempt %d", b.Attempt))
+		raw, _ := json.Marshal(e.Data)
+		t.line(e.Type, clip(compact(raw)))
+	}
+}
+
+// inlineText streams one fragment of the answer or the reasoning.
+func (t *textRenderer) inlineText(typ, text string, thinking bool) {
+	if t.inline != typ {
+		t.endLine()
+		t.inline = typ
+		if thinking {
+			fmt.Fprintf(t.w, "[%s] ", typ)
+			t.mid = true
+		}
+	}
+	if text == "" {
+		return
+	}
+	fmt.Fprint(t.w, text)
+	t.mid = !strings.HasSuffix(text, "\n")
+	if !thinking {
+		t.said = true
 	}
 }
 
@@ -164,12 +153,12 @@ func (t *textRenderer) answer(text string) {
 	t.said = true
 }
 
-func (t *textRenderer) line(k envelope.Kind, what string) {
+func (t *textRenderer) line(typ, what string) {
 	if what == "" {
-		fmt.Fprintf(t.w, "[%s]\n", k)
+		fmt.Fprintf(t.w, "[%s]\n", typ)
 		return
 	}
-	fmt.Fprintf(t.w, "[%s] %s\n", k, what)
+	fmt.Fprintf(t.w, "[%s] %s\n", typ, what)
 }
 
 func (t *textRenderer) endLine() {
@@ -181,36 +170,11 @@ func (t *textRenderer) endLine() {
 
 func (t *textRenderer) close() { t.endLine() }
 
-// jsonRenderer prints one JSON object per event, per line. It is the event
-// as the bus carries it, with its payload as the JSON it is rather than as
-// encoded bytes.
+// jsonRenderer prints one JSON object per event, per line: the envelope as
+// the bus carries it, its data inline.
 type jsonRenderer struct{ enc *json.Encoder }
 
-type jsonEvent struct {
-	Seq     uint64          `json:"seq"`
-	Kind    envelope.Kind   `json:"kind"`
-	Topic   string          `json:"topic"`
-	RunID   string          `json:"run_id"`
-	Tenant  string          `json:"tenant"`
-	Agent   string          `json:"agent"`
-	Rev     int             `json:"rev"`
-	Origin  string          `json:"origin"`
-	At      time.Time       `json:"at"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-}
-
-func (j *jsonRenderer) event(e envelope.Event) {
-	body := json.RawMessage(e.Payload)
-	if len(body) > 0 && !json.Valid(body) {
-		// Every built-in kind's body is JSON. One that is not is carried
-		// as a string rather than dropped.
-		body, _ = json.Marshal(string(e.Payload))
-	}
-	_ = j.enc.Encode(jsonEvent{
-		Seq: e.Seq, Kind: e.Kind, Topic: e.Topic.String(), RunID: e.RunID, Tenant: e.Tenant,
-		Agent: e.Agent, Rev: e.Rev, Origin: e.Origin, At: e.At, Payload: body,
-	})
-}
+func (j *jsonRenderer) event(e event.Envelope) { _ = j.enc.Encode(e) }
 
 func (j *jsonRenderer) close() {}
 

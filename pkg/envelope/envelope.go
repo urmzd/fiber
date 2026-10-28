@@ -31,6 +31,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/event/legacy"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -165,18 +166,30 @@ func (k Kind) OptIn() bool {
 	return false
 }
 
-// Wants reports whether an event of kind k should be delivered on this route.
-// An opt-in kind is delivered only to a route that names it or its family.
-func (r Route) Wants(k Kind) bool {
+// Wants reports whether an event of type typ should be delivered on this
+// route. A selector is an old kind or kind family ("delta", "usage.call"),
+// read through the legacy table, or a type prefix ("run.delta"). An opt-in
+// type (event.Entry.OptIn) is delivered only to a route that names its family.
+// An empty Kinds selects every run type that is not opt-in.
+func (r Route) Wants(typ string) bool {
 	if len(r.Kinds) == 0 {
-		return !k.OptIn()
+		return event.Selects("run", typ)
 	}
 	for _, sel := range r.Kinds {
-		if sel == "" && k.OptIn() {
+		if sel == "" {
+			if event.Selects("run", typ) {
+				return true
+			}
 			continue
 		}
-		if k.Matches(sel) {
-			return true
+		prefixes, err := legacy.KindSelector(sel)
+		if err != nil {
+			prefixes = []string{sel}
+		}
+		for _, p := range prefixes {
+			if event.Selects(p, typ) {
+				return true
+			}
 		}
 	}
 	return false

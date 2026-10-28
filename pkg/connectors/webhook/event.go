@@ -2,24 +2,17 @@ package webhook
 
 import (
 	"encoding/json"
+	"net/url"
 	"strconv"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/event/legacy"
 )
 
-// Body is the JSON an outbound POST carries: one envelope.Event, as a program
-// wants to read it.
-//
-// It is a hand-written struct rather than json.Marshal of the Event itself, and
-// the reason is Payload. Event.Payload is []byte, so marshalling the Event
-// directly would base64-encode it — including the overwhelmingly common case
-// where it is already JSON, which would make every receiver decode a string to
-// find an object. Splitting the two encodings into two fields means a receiver
-// reads body.payload.text and never has to guess.
-//
-// There is exactly one JSON shape for a fiber event leaving the mesh, and a
-// host that streams events over its own transport can reuse it.
+// Body is the JSON an outbound POST carries: one event, in the v1 wire shape
+// receivers already read (a kind, a topic and an inline payload). The v2 body,
+// the envelope itself, replaces it with the adapter rework.
 type Body struct {
 	Seq    uint64 `json:"seq"`
 	Topic  string `json:"topic"`
@@ -40,27 +33,41 @@ type Body struct {
 	At time.Time `json:"at"`
 }
 
-// BodyOf renders an event for the wire.
-func BodyOf(e envelope.Event) Body {
+// BodyOf renders an event in the v1 wire shape. The kind is the old kind the
+// type replaced, the topic is the old run topic, the revision is the pinned
+// version read as a number, and the origin is the channel's scheme.
+func BodyOf(e event.Envelope) Body {
+	kind, ok := legacy.KindOf(e.Type)
+	if !ok {
+		kind = e.Type
+	}
+	rev, _ := strconv.Atoi(e.Version)
 	b := Body{
 		Seq:    e.Seq,
-		Topic:  e.Topic.String(),
-		RunID:  e.RunID,
+		Topic:  legacy.Topic(e.Agent, e.Run),
+		RunID:  e.Run,
 		Tenant: e.Tenant,
 		Agent:  e.Agent,
-		Rev:    e.Rev,
-		Origin: e.Origin,
-		Kind:   string(e.Kind),
-		At:     e.At.UTC(),
+		Rev:    rev,
+		Origin: originOf(e.Channel),
+		Kind:   kind,
+		At:     e.Time.UTC(),
 	}
-	switch {
-	case len(e.Payload) == 0:
-	case json.Valid(e.Payload):
-		b.Payload = json.RawMessage(e.Payload)
-	default:
-		b.PayloadB64 = e.Payload
+	if e.Data != nil {
+		if p, err := json.Marshal(e.Data); err == nil && string(p) != "null" {
+			b.Payload = p
+		}
 	}
 	return b
+}
+
+// originOf is the scheme of a channel: the surface the run was raised on.
+func originOf(channel string) string {
+	u, err := url.Parse(channel)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme
 }
 
 // DeliveryID identifies one event exactly, and is what a receiver dedupes on.
@@ -68,6 +75,9 @@ func BodyOf(e envelope.Event) Body {
 // Run plus sequence number rather than a fresh uuid per attempt: the whole point
 // is that a retry carries the SAME id as the attempt it repeats, so the receiver
 // can recognise it. A uuid would be unique and useless.
-func DeliveryID(e envelope.Event) string {
-	return e.RunID + "/" + strconv.FormatUint(e.Seq, 10)
+func DeliveryID(e event.Envelope) string {
+	if e.Run == "" || e.Seq == 0 {
+		return e.ID
+	}
+	return e.Run + "/" + strconv.FormatUint(e.Seq, 10)
 }

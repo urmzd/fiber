@@ -65,7 +65,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Name is the address scheme this connector owns.
@@ -229,14 +229,14 @@ func (c *Connector) Name() string { return Name }
 // the signature covers them. Only the timestamp and the digest are recomputed
 // per attempt, so a retry that goes out minutes later still lands inside the
 // receiver's replay window.
-func (c *Connector) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (c *Connector) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	endpoint, uri, err := c.resolve(target)
 	if err != nil {
 		return err
 	}
 	body, err := json.Marshal(BodyOf(e))
 	if err != nil {
-		return fmt.Errorf("webhook: encode event %d of run %s: %w", e.Seq, e.RunID, err)
+		return fmt.Errorf("webhook: encode event %d of run %s: %w", e.Seq, e.Run, err)
 	}
 
 	for attempt := 1; ; attempt++ {
@@ -263,7 +263,7 @@ func (c *Connector) Deliver(ctx context.Context, target address.Address, e envel
 }
 
 // post performs one attempt.
-func (c *Connector) post(ctx context.Context, endpoint Endpoint, uri string, e envelope.Event, body []byte) error {
+func (c *Connector) post(ctx context.Context, endpoint Endpoint, uri string, e event.Envelope, body []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
@@ -282,8 +282,9 @@ func (c *Connector) post(ctx context.Context, endpoint Endpoint, uri string, e e
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set(HeaderDelivery, DeliveryID(e))
-	req.Header.Set(HeaderEvent, string(e.Kind))
-	req.Header.Set(HeaderTopic, e.Topic.String())
+	wire := BodyOf(e)
+	req.Header.Set(HeaderEvent, wire.Kind)
+	req.Header.Set(HeaderTopic, wire.Topic)
 	sign(req.Header, endpoint.Secret, c.now(), body)
 
 	resp, err := c.http.Do(req)

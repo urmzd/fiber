@@ -205,8 +205,8 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	for _, a := range people3 {
 		for _, e := range box.at("inbox://" + tenant + "/" + a.User) {
 			for _, secret := range []string{anaToken, bobToken, shared} {
-				if strings.Contains(string(e.Payload), secret) {
-					t.Errorf("event %s of %s's run carries a credential", e.Kind, a.User)
+				if strings.Contains(bodyJSON(e), secret) {
+					t.Errorf("event %s of %s's run carries a credential", e.Type, a.User)
 				}
 			}
 		}

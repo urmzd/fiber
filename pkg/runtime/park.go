@@ -17,6 +17,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
@@ -224,8 +225,8 @@ func (r *Runtime) awaitAnswer(ctx context.Context, at *attemptLog, out Outcome) 
 	fresh := false
 	if _, err := anchor.Step(ctx, questionStepPrefix+q.ID, func(ctx context.Context) (payload.Question, error) {
 		fresh = true
-		if err := at.publish(ctx, envelope.KindParked, payload.Lifecycle{
-			Attempt: at.attempt, Rev: at.in.Rev, Reason: "waiting on a person", Question: &q,
+		if err := at.publish(ctx, event.Parked{
+			Attempt: at.attempt, Rev: at.in.Rev, Reason: "waiting on a person", Question: eventQuestion(&q),
 		}); err != nil {
 			return payload.Question{}, err
 		}
@@ -359,11 +360,11 @@ func (r *Runtime) stoppedWhileParked(ctx context.Context, at *attemptLog, out Ou
 	}
 	final := Outcome{Text: out.Text, Prompt: out.Prompt, Stopped: &stop, Usage: out.Usage}
 	if err := r.remember(ctx, at.in, final); err != nil {
-		at.report(ctx, envelope.KindFailed, payload.Lifecycle{Attempt: at.attempt, Rev: at.in.Rev, Error: err.Error()})
+		at.report(ctx, event.Failed{Attempt: at.attempt, Rev: at.in.Rev, Error: err.Error()})
 		return Output{}, err
 	}
-	if err := at.publish(ctx, envelope.KindStopped, payload.Stopped{
-		Attempt: at.attempt, Rev: at.in.Rev, Reason: stop.Reason, By: stop.By, Text: out.Text, Usage: out.Usage,
+	if err := at.publish(ctx, event.Stopped{
+		Attempt: at.attempt, Rev: at.in.Rev, Reason: stop.Reason, By: stop.By, Text: out.Text, Usage: eventUsage(out.Usage),
 	}); err != nil {
 		return Output{}, err
 	}

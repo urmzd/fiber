@@ -20,7 +20,6 @@ import (
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/event/legacy"
-	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -150,7 +149,7 @@ func TestKindSelectorSelectsWhatItDid(t *testing.T) {
 		if err != nil || event.Family(typ) != "run" {
 			continue
 		}
-		was := envelope.Route{}.Wants(envelope.Kind(k))
+		was := envelope.Route{}.Wants(typ)
 		now := slices.ContainsFunc(all, func(p string) bool { return event.Selects(p, typ) })
 		if was != now {
 			t.Errorf("empty route on %q: was %v, now %v", k, was, now)
@@ -271,9 +270,31 @@ func TestDecodeBusRow(t *testing.T) {
 	}
 }
 
+// oldEntry is a journal entry as the runtime wrote it before the union.
+type oldEntry struct {
+	Seq     uint64          `json:"seq"`
+	Topic   string          `json:"topic"`
+	RunID   string          `json:"run_id"`
+	Tenant  string          `json:"tenant,omitempty"`
+	Agent   string          `json:"agent"`
+	Rev     int             `json:"rev"`
+	Origin  string          `json:"origin,omitempty"`
+	Kind    envelope.Kind   `json:"kind"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	At      time.Time       `json:"at"`
+}
+
+func oldEntryOf(e envelope.Event) oldEntry {
+	return oldEntry{
+		Seq: e.Seq, Topic: e.Topic.String(), RunID: e.RunID, Tenant: e.Tenant,
+		Agent: e.Agent, Rev: e.Rev, Origin: e.Origin, Kind: e.Kind,
+		Payload: json.RawMessage(e.Payload), At: e.At,
+	}
+}
+
 func TestDecodeEntry(t *testing.T) {
 	for _, c := range oldCases() {
-		raw, err := json.Marshal(runtime.EntryOf(oldEvent(t, c.kind, c.in)))
+		raw, err := json.Marshal(oldEntryOf(oldEvent(t, c.kind, c.in)))
 		if err != nil {
 			t.Fatal(err)
 		}

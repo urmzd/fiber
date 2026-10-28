@@ -2,9 +2,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,8 +14,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 	turnrt "github.com/urmzd/fiber/pkg/turn"
 )
 
@@ -36,11 +32,11 @@ import (
 // the bus every process shares (the fast path), where the attempt executing
 // the run listens for as long as its turn lasts.
 //
-// The request does not travel on the run's own topic. That topic has one
+// The request does not travel on the run's own stream. That stream has one
 // writer, the attempt, which chooses its own sequence numbers (see seq.go),
 // and the bus keeps the first write of a sequence: a second writer would land
 // on numbers the attempt is about to use and displace its events. The request
-// goes to a stop stream of its own instead (StopTopic), keyed by the asker's
+// goes to a control channel of its own instead (StopChannel), keyed by the asker's
 // tenant and the run id, so that one tenant's requests never share a stream
 // with another's.
 //
@@ -76,7 +72,7 @@ import (
 //
 // # How long the bus keeps a request
 //
-// A request is retained under its own stream, the topic StopTopic returns. It
+// A request is retained on its own channel, the one StopChannel returns. It
 // does not share the run's stream, so a chatty run cannot push it out. That
 // stream is bounded like any other:
 //
@@ -233,7 +229,7 @@ var ErrStopUnavailable = errors.New("runtime: stop is not available")
 // implements it can stop its runs; one whose Bus does not, cannot, and says so
 // with ErrStopUnavailable. Every backend in pkg/bus implements it.
 type Subscriber interface {
-	Subscribe(ctx context.Context, sub envelope.Subscription) (bus.Stream, error)
+	Subscribe(ctx context.Context, sub bus.Subscription) (bus.Stream, error)
 }
 
 // StopRequest asks one run to stop.
@@ -264,28 +260,16 @@ func WithStopGrace(d time.Duration) Option {
 	}
 }
 
-// StopTopic is where a tenant's requests to stop a run are published and where
-// the attempt executing that run, if it is the tenant's, listens:
-// agent:_control:stop-<key>, the key a hash of the tenant and the run id.
+// StopChannel is where a tenant's requests to stop a run are published and
+// where the attempt executing that run, if it is the tenant's, listens:
+// control://<tenant>/stop/<key>, the key a hash of the tenant and the run id.
 //
 // The tenant is part of the address so that one tenant's requests can never
-// land in the stream another tenant's run listens on. A run id is a hash of a
-// tenant and a tag id anyone can compute; without the tenant here, a tenant
-// could publish enough requests for another tenant's run to push that tenant's
-// own request out of the stream before the run read it. The tenant a request
-// is published under is the caller's credential's, never something the caller
-// chooses, so the stream a request lands in is fixed by who asked.
-func StopTopic(tenant, runID string) (topic.Topic, error) {
-	if _, err := topic.Run("probe", runID); err != nil {
-		return topic.Topic{}, err
-	}
-	h := sha256.New()
-	var n [binary.MaxVarintLen64]byte
-	for _, field := range []string{tenant, runID} {
-		h.Write(n[:binary.PutUvarint(n[:], uint64(len(field)))])
-		h.Write([]byte(field))
-	}
-	return topic.Control(stopVerb, hex.EncodeToString(h.Sum(nil)[:16]))
+// land in the stream another tenant's run listens on. The tenant a request is
+// published under is the caller's credential's, never something the caller
+// chooses.
+func StopChannel(tenant, runID string) (string, error) {
+	return controlChannel(stopVerb, tenant, runID)
 }
 
 // Stop asks a run to stop.
@@ -346,7 +330,7 @@ func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
 		return fmt.Errorf("%w: the bus this runtime was built with cannot be subscribed to", ErrStopUnavailable)
 	}
 	req.RunID = strings.TrimSpace(req.RunID)
-	tp, err := StopTopic(req.Tenant, req.RunID)
+	ch, err := StopChannel(req.Tenant, req.RunID)
 	if err != nil {
 		return fmt.Errorf("%w: stop: %w", ErrInvalid, err)
 	}
@@ -372,16 +356,17 @@ func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
 			return err
 		}
 	}
-	// Seq is left for the bus to assign: this stream has many writers and
-	// none of them replays.
-	e := envelope.Event{
-		Topic:   tp,
-		RunID:   tp.RunID(),
-		Tenant:  req.Tenant,
-		Agent:   topic.ControlName,
-		Kind:    envelope.KindStop,
-		Payload: body,
-		At:      at,
+	// A request is not a run event: it has no sequence, and the bus keeps
+	// it once by its id.
+	e := event.Envelope{
+		ID:      requestID(stopVerb, req.RunID, at),
+		Source:  "fiber://control",
+		Type:    event.TypeStop,
+		Channel: ch,
+		Time:    at,
+		Tenant:  busTenant(req.Tenant),
+		Run:     req.RunID,
+		Data:    event.StopRequest{RunID: req.RunID, Reason: reason, By: clip(req.By), At: at},
 	}
 	if err := r.bus.Publish(ctx, e); err != nil {
 		return fmt.Errorf("runtime: stop %s: %w", req.RunID, err)
@@ -644,8 +629,8 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 		mu.Lock()
 		defer mu.Unlock()
 		chunks++
-		if c.Kind == envelope.KindText {
-			if txt, derr := payload.Decode[payload.Text](envelope.Event{Kind: c.Kind, Payload: c.Payload}); derr == nil {
+		if b, derr := agentrt.BodyOf(c); derr == nil {
+			if txt, ok := b.(event.Text); ok {
 				said.WriteString(txt.Text)
 			}
 		}
@@ -706,19 +691,18 @@ func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan ag
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	if r.control != nil {
-		tp, err := StopTopic(in.Tag.Tenant, runID)
+		ch, err := StopChannel(in.Tag.Tenant, runID)
 		if err != nil {
-			// Accept built this run's own topic from the same id, so this
-			// cannot happen; a run that cannot be stopped is better than one
-			// that cannot start.
-			r.logger.Error("fiber/runtime: stop topic is invalid", "run_id", runID, "error", err)
+			// Accept checked this run's id, so this cannot happen; a run
+			// that cannot be stopped is better than one that cannot start.
+			r.logger.Error("fiber/runtime: stop channel is invalid", "run_id", runID, "error", err)
 		} else {
-			sub := envelope.Subscription{Topic: tp, Filter: envelope.Filter{Kinds: []string{string(envelope.KindStop)}}}
+			sub := bus.Subscription{Tenant: busTenant(in.Tag.Tenant), Channels: []string{ch}, Types: []string{event.TypeStop}}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for ctx.Err() == nil {
-					stop, ok, err := r.firstStop(ctx, sub, in.Tag.Tenant, runID)
+					stop, ok, err := r.firstStop(ctx, sub, runID)
 					if ok {
 						deliver(stop)
 						return
@@ -764,7 +748,7 @@ func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan ag
 
 // firstStop reads one subscription until it yields a request this run should
 // honour, or ends.
-func (r *Runtime) firstStop(ctx context.Context, sub envelope.Subscription, tenant, runID string) (agentrt.Stop, bool, error) {
+func (r *Runtime) firstStop(ctx context.Context, sub bus.Subscription, runID string) (agentrt.Stop, bool, error) {
 	stream, err := r.control.Subscribe(ctx, sub)
 	if err != nil {
 		return agentrt.Stop{}, false, err
@@ -775,13 +759,10 @@ func (r *Runtime) firstStop(ctx context.Context, sub envelope.Subscription, tena
 		if err != nil {
 			return agentrt.Stop{}, false, err
 		}
-		if e.Kind != envelope.KindStop || e.Tenant != tenant {
-			continue
-		}
-		body, err := payload.Decode[payload.StopRequest](e)
-		if err != nil || body.RunID != runID {
-			// The topic already names the run. A body that disagrees with
-			// it was not written by Stop, and is not obeyed.
+		body, ok := e.Data.(event.StopRequest)
+		if !ok || e.Tenant != sub.Tenant || body.RunID != runID {
+			// The channel already names the run. A body that disagrees
+			// with it was not written by Stop, and is not obeyed.
 			continue
 		}
 		return agentrt.Stop{Reason: body.Reason, By: body.By}, true, nil

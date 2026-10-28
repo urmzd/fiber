@@ -20,6 +20,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 )
@@ -148,10 +149,10 @@ func (w *world) parkedOn(t *testing.T, rt *runtime.Runtime, runID string) payloa
 			t.Fatalf("PendingQuestion: %v", err)
 		} else if ok {
 			for _, e := range w.bus.of(runID) {
-				if e.Kind != envelope.KindParked {
+				if e.Type != event.TypeParked {
 					continue
 				}
-				body, err := payload.Decode[payload.Lifecycle](e)
+				body, err := decode[payload.Lifecycle](e)
 				if err == nil && body.Question != nil && body.Question.ID == q.ID {
 					return q
 				}
@@ -172,14 +173,14 @@ func (w *world) answer(t *testing.T, rt *runtime.Runtime, runID, qid string, a p
 	return got, first
 }
 
-func lifecycleOf(t *testing.T, events []envelope.Event, kind envelope.Kind) []payload.Lifecycle {
+func lifecycleOf(t *testing.T, events []event.Envelope, kind string) []payload.Lifecycle {
 	t.Helper()
 	var out []payload.Lifecycle
 	for _, e := range events {
-		if e.Kind != kind {
+		if e.Type != kind {
 			continue
 		}
-		body, err := payload.Decode[payload.Lifecycle](e)
+		body, err := decode[payload.Lifecycle](e)
 		if err != nil {
 			t.Fatalf("decode %s: %v", kind, err)
 		}
@@ -252,7 +253,7 @@ func TestEachQuestionKindParksPublishesItsQuestionReleasesItsWorkerAndResumesWit
 			if out.Stopped != nil || !strings.HasSuffix(out.Text, "Done.") {
 				t.Fatalf("Output = %+v, want the turn finished", out)
 			}
-			resumed := lifecycleOf(t, p.bus.of(runID), envelope.KindResumed)
+			resumed := lifecycleOf(t, p.bus.of(runID), event.TypeResumed)
 			if len(resumed) == 0 || resumed[len(resumed)-1].Answer == nil || resumed[len(resumed)-1].Answer.QuestionID != q.ID {
 				t.Fatalf("resumed events %+v, want the answer on one", resumed)
 			}
@@ -379,7 +380,7 @@ func TestConcurrentAnswersResumeTheRunExactlyOnce(t *testing.T) {
 	if calls := p.model.CallCount(); calls != 2 {
 		t.Errorf("the model was called %d times, want 2", calls)
 	}
-	if n := len(lifecycleOf(t, p.bus.of(runID), envelope.KindCompleted)); n != 1 {
+	if n := len(lifecycleOf(t, p.bus.of(runID), event.TypeCompleted)); n != 1 {
 		t.Errorf("the run completed %d times", n)
 	}
 }
@@ -478,7 +479,7 @@ func TestAnUnansweredQuestionTakesItsDefaultWhenItExpires(t *testing.T) {
 	if out.Text != "Not deployed." || len(p.deploy.calls()) != 0 {
 		t.Fatalf("Output = %+v with %d deploys, want the run finished without the tool", out, len(p.deploy.calls()))
 	}
-	resumed := lifecycleOf(t, p.bus.of(runID), envelope.KindResumed)
+	resumed := lifecycleOf(t, p.bus.of(runID), event.TypeResumed)
 	if len(resumed) == 0 || resumed[len(resumed)-1].Answer == nil || !resumed[len(resumed)-1].Answer.Expired {
 		t.Fatalf("resumed = %+v, want the expired default on it", resumed)
 	}
@@ -608,9 +609,9 @@ func TestReplayingAParkedThenResumedRunIsDeterministic(t *testing.T) {
 	w := newWorld(t)
 	p := newParking(t, w, sayThenCall("Deploying.", "c1", "deploy", map[string]any{"env": "prod"}), agenttest.TextResponse("Done."))
 	var once sync.Once
-	w.bus.rec.failWhen(func(e envelope.Event) error {
+	w.bus.rec.failWhen(func(e event.Envelope) error {
 		var err error
-		if e.Kind == envelope.KindCompleted {
+		if e.Type == event.TypeCompleted {
 			once.Do(func() { err = errors.New("broker outage") })
 		}
 		return err
@@ -636,7 +637,7 @@ func TestReplayingAParkedThenResumedRunIsDeterministic(t *testing.T) {
 	if !reflect.DeepEqual(offered[0], offered[1]) {
 		t.Errorf("a replay offered the journal different bytes:\n %q\n %q", offered[0], offered[1])
 	}
-	if parked := lifecycleOf(t, p.bus.of(runID), envelope.KindParked); len(parked) != 1 {
+	if parked := lifecycleOf(t, p.bus.of(runID), event.TypeParked); len(parked) != 1 {
 		t.Errorf("the question was announced %d times, want once", len(parked))
 	}
 	_, records, err := w.ledger.Load(context.Background(), runID)
@@ -725,8 +726,8 @@ func TestAChildRunParksAndItsParentShowsItsQuestion(t *testing.T) {
 	var waiting *payload.ChildQuestion
 	for waiting == nil && time.Now().Before(deadline) {
 		for _, e := range p.bus.of(parentID) {
-			if e.Kind == envelope.KindChildParked {
-				body, err := payload.Decode[payload.ChildQuestion](e)
+			if e.Type == event.TypeChildParked {
+				body, err := decode[payload.ChildQuestion](e)
 				if err == nil {
 					waiting = &body
 				}
@@ -1027,12 +1028,12 @@ func TestDelegatingParentsParkSoTheirChildrenRunAtAnyConcurrency(t *testing.T) {
 				if !strings.Contains(out.Text, "Child chose staging") {
 					t.Errorf("parent answered %q, want the child's answer", out.Text)
 				}
-				if out.Usage == nil || len(lifecycleOf(t, p.bus.of(parent), envelope.KindResumed)) == 0 {
-					t.Errorf("parent %s: usage %v, resumed events %d", parent, out.Usage, len(lifecycleOf(t, p.bus.of(parent), envelope.KindResumed)))
+				if out.Usage == nil || len(lifecycleOf(t, p.bus.of(parent), event.TypeResumed)) == 0 {
+					t.Errorf("parent %s: usage %v, resumed events %d", parent, out.Usage, len(lifecycleOf(t, p.bus.of(parent), event.TypeResumed)))
 				}
 				var children int
 				for _, e := range p.bus.of(parent) {
-					if e.Kind == envelope.KindUsageChild {
+					if e.Type == event.TypeUsageChild {
 						children++
 					}
 				}

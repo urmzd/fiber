@@ -12,7 +12,6 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // ErrNotFound reports a run that does not exist or belongs to another
@@ -44,12 +43,13 @@ func (s Status) Terminal() bool {
 // Run is the durable record of one invocation. It is a projection of the
 // ledger, so reading one never touches a worker and polling it is cheap.
 type Run struct {
-	ID      string
-	Tenant  string
-	Agent   string
-	Rev     int
-	Origin  string
-	Topic   topic.Topic
+	ID     string
+	Tenant string
+	Agent  string
+	Rev    int
+	Origin string
+	// Channel is where the run's events are published.
+	Channel string
 	Status  Status
 	Tag     envelope.Tag
 	LastSeq uint64
@@ -105,9 +105,7 @@ func (a *App) Status(ctx context.Context, tenant, runID string) (Run, error) {
 		CreatedAt: rec.CreatedAt,
 		EndedAt:   rec.CompletedAt,
 	}
-	if t, err := topic.Run(in.Tag.Agent, rec.ID); err == nil {
-		out.Topic = t
-	}
+	out.Channel = runtime.ChannelOf(in.Tag)
 	// LastSeq is the run's own answer: the sequence of its final event,
 	// which only a finished run has.
 	if rec.Status == drun.StatusSucceeded && len(rec.Output) > 0 {

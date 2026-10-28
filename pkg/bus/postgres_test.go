@@ -13,8 +13,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/bus/bustest"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // postgresEnv names the Postgres the conformance suite runs against. Without
@@ -84,12 +82,12 @@ func TestPostgresIsSharedAcrossBusesOnOneDatabase(t *testing.T) {
 	if err := b.Migrate(t.Context()); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	s, err := b.Subscribe(t.Context(), envelope.Subscription{Topic: topic.MustParse("agent:docs-bot")})
+	s, err := b.Subscribe(t.Context(), all)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	if err := a.Publish(t.Context(), event("run_1", 0)); err != nil {
+	if err := a.Publish(t.Context(), runEvent("run_1", 1)); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -98,7 +96,7 @@ func TestPostgresIsSharedAcrossBusesOnOneDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.Seq != 1 || e.RunID != "run_1" {
-		t.Fatalf("got %s#%d, want run_1#1", e.RunID, e.Seq)
+	if e.Seq != 1 || e.Run != "run_1" {
+		t.Fatalf("got %s#%d, want run_1#1", e.Run, e.Seq)
 	}
 }

@@ -10,7 +10,10 @@
 // once. They share a run id and nothing else.
 //
 // The router owns exactly one piece of state, the map from a run to the routes
-// it was accepted with, and it is deliberately not durable. The bus owns
+// it was accepted with and the channel its events are published on, and it is
+// deliberately not durable. It subscribes once per (tenant, channel) that a
+// registered run publishes on, and drops the subscription when the last run on
+// it is released. The bus owns
 // sequencing and retention, the connector owns how a surface is written, and
 // anchor's ledger owns what happened. Losing a router loses in-flight
 // renders, not runs: the runtime registers a run's routes at accept time and
@@ -53,9 +56,8 @@
 // silently dropped delivery is the worst failure this package could have: the
 // agent did the work, the ledger says so, and the human waiting on the surface
 // sees nothing. Events for runs this router has no routes for are the one
-// exception and are logged at debug level — on a multi-node deployment every
-// router sees every other node's runs, and treating that as an error would
-// bury the real ones.
+// exception and are logged at debug level: several runs share a channel, and
+// another node's runs on it are not this router's to deliver.
 package router
 
 import (
@@ -70,7 +72,7 @@ import (
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Errors reported by the router. Callers match with errors.Is.
@@ -118,17 +120,6 @@ var _ Resolver = (*connector.Registry)(nil)
 // Option configures a Router. Non-positive and nil values are ignored, so a
 // caller can pass a zero-valued config through without erasing the defaults.
 type Option func(*Router)
-
-// WithTopic scopes the subscription the router serves (default the root topic,
-// every agent). A deployment that shards runs across nodes gives each node the
-// topic it owns, and the runs it does not own never reach its dispatch loop.
-func WithTopic(t topic.Topic) Option {
-	return func(r *Router) {
-		if !t.IsZero() {
-			r.topic = t
-		}
-	}
-}
 
 // WithBacklog sets the per-lane queue depth (default 256). It is the only
 // back-pressure a sink gets: when a lane's queue is full the event is dropped
@@ -205,7 +196,6 @@ type Router struct {
 	sinks Resolver
 	log   *slog.Logger
 
-	topic       topic.Topic
 	backlog     int
 	concurrency int
 	attempts    int
@@ -216,11 +206,18 @@ type Router struct {
 	// sem bounds Deliver calls in flight across every lane.
 	sem chan struct{}
 
-	// mu guards runs, live, running and every lane's queue. Offers are made
-	// under it so that a lane cannot be closed by Release between the lookup
-	// and the send.
+	// mu guards runs, channels, live, running and every lane's queue. Offers
+	// are made under it so that a lane cannot be closed by Release between
+	// the lookup and the send.
 	mu   sync.Mutex
 	runs map[string]*run
+	// channels is every (tenant, channel) a registered run publishes on,
+	// with how many runs do and, while Run is active, its subscriber.
+	channels map[channelKey]*listener
+	// runCtx is the context of the active Run, which every listener runs
+	// under. failed reports a listener whose subscription cannot recover.
+	runCtx context.Context
+	failed chan error
 	// live is every surface a lane goroutine is still working on, keyed by
 	// (run, target), and it outlives r.runs: a released or re-registered run
 	// drops its lanes from st.lanes immediately, while the goroutines drain on.
@@ -244,7 +241,6 @@ func New(b bus.Bus, sinks Resolver, opts ...Option) *Router {
 		bus:         b,
 		sinks:       sinks,
 		log:         slog.Default(),
-		topic:       topic.All(),
 		backlog:     DefaultBacklog,
 		concurrency: DefaultConcurrency,
 		attempts:    DefaultAttempts,
@@ -252,6 +248,7 @@ func New(b bus.Bus, sinks Resolver, opts ...Option) *Router {
 		maxBackoff:  DefaultMaxBackoff,
 		timeout:     DefaultTimeout,
 		runs:        make(map[string]*run),
+		channels:    make(map[channelKey]*listener),
 		live:        make(map[string]*lane),
 	}
 	for _, opt := range opts {
@@ -264,6 +261,7 @@ func New(b bus.Bus, sinks Resolver, opts ...Option) *Router {
 // run is one run's delivery state: the routes it was accepted with, the lanes
 // serving them, and how far its stream has been dispatched.
 type run struct {
+	at    channelKey
 	bound []binding
 	lanes map[string]*lane
 	// seq is the highest sequence dispatched for this run. The bus is
@@ -281,9 +279,10 @@ type binding struct {
 	sink  connector.Sink
 }
 
-// Register records the routes a run delivers on. The runtime calls it at accept
-// time, before it publishes the run's first event: an event that arrives for a
-// run with no routes has nowhere to go and is dropped.
+// Register records the routes a run delivers on, and the tenant and channel its
+// events are published on. The runtime calls it at accept time, before it
+// publishes the run's first event: an event that arrives for a run with no
+// routes has nowhere to go and is dropped.
 //
 // Registering a run again replaces its routes and keeps its cursor, which is
 // what replay needs — anchor re-runs a workflow from the top, and the routes
@@ -294,11 +293,18 @@ type binding struct {
 // returned as an error: it is permanent and knowable now (a cron schedule has
 // no surface), and a run whose events cannot be rendered anywhere still runs
 // and still publishes to the bus. Register reports ErrInvalid only for input
-// the router could never make sense of: no run id, or a route with no target.
-func (r *Router) Register(runID string, routes []envelope.Route) error {
-	if runID == "" {
+// the router could never make sense of: no run id, tenant or channel, or a
+// route with no target.
+func (r *Router) Register(runID, tenant, channel string, routes []envelope.Route) error {
+	switch {
+	case runID == "":
 		return fmt.Errorf("%w: register with no run id", ErrInvalid)
+	case tenant == "":
+		return fmt.Errorf("%w: run %q names no tenant", ErrInvalid, runID)
+	case channel == "" || event.IsControl(channel):
+		return fmt.Errorf("%w: run %q is not on a channel the router can listen to: %q", ErrInvalid, runID, channel)
 	}
+	at := channelKey{tenant: tenant, channel: channel}
 	bound := make([]binding, 0, len(routes))
 	for i, route := range routes {
 		if err := route.Validate(); err != nil {
@@ -320,8 +326,13 @@ func (r *Router) Register(runID string, routes []envelope.Route) error {
 	defer r.mu.Unlock()
 	st := r.runs[runID]
 	if st == nil {
-		st = &run{lanes: make(map[string]*lane)}
+		st = &run{at: at, lanes: make(map[string]*lane)}
 		r.runs[runID] = st
+		r.joinLocked(at)
+	} else if st.at != at {
+		r.leaveLocked(st.at)
+		st.at = at
+		r.joinLocked(at)
 	}
 	st.bound = bound
 	for key, ln := range st.lanes {
@@ -349,41 +360,53 @@ func (r *Router) Release(runID string) {
 		return
 	}
 	delete(r.runs, runID)
+	r.leaveLocked(st.at)
 	for _, ln := range st.lanes {
 		ln.close()
 	}
 }
 
-// Run subscribes to the bus and dispatches until ctx is cancelled. It returns
-// nil on a clean stop and an error only if the subscription itself failed in a
-// way resubscribing cannot fix.
+// Run subscribes to the bus and dispatches until ctx is cancelled. It holds
+// one subscription per (tenant, channel) a registered run publishes on,
+// starting one when a run registers on a new channel and ending it when the
+// last run on it is released. It returns nil on a clean stop and an error only
+// if a subscription failed in a way resubscribing cannot fix.
 //
 // Falling behind the bus is not such a failure: ErrSlowConsumer is answered by
 // resubscribing, and the per-run cursor the router keeps means the replay that
-// follows costs duplicates the bus already asked consumers to tolerate rather
-// than double deliveries.
+// follows costs duplicates rather than double deliveries.
 //
 // Only one Run may be active per router; a second returns ErrRunning. When Run
-// returns, every lane goroutine it started has exited.
+// returns, every goroutine it started has exited.
 func (r *Router) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
 		return ErrRunning
 	}
 	r.running = true
+	r.runCtx = ctx
+	r.failed = make(chan error, 1)
+	for key, l := range r.channels {
+		r.listenLocked(key, l)
+	}
+	failed := r.failed
 	r.mu.Unlock()
 
 	defer func() {
-		// Cancellation abandons what is queued rather than draining it: the
-		// context the lanes deliver under is this one, so a drain would only
-		// produce failed attempts. Each lane says what it dropped.
-		//
-		// The lanes are forgotten as well as closed. A run stays registered
-		// across a restart — its routes are still pinned and its cursor is
-		// still valid — but its lanes belong to the Run that started them, and
-		// a later Run must build its own rather than reuse a closed queue.
+		cancel()
 		r.mu.Lock()
+		r.runCtx = nil
+		for _, l := range r.channels {
+			l.stop = nil
+		}
+		// Cancellation abandons what is queued rather than draining it, and
+		// the lanes are forgotten as well as closed: a run stays registered
+		// across a restart, but its lanes belong to the Run that started
+		// them.
 		for _, st := range r.runs {
 			for key, ln := range st.lanes {
 				ln.close()
@@ -392,29 +415,108 @@ func (r *Router) Run(ctx context.Context) error {
 		}
 		r.mu.Unlock()
 
-		// The router stays claimed until every lane has exited. Clearing it
-		// before the wait would let a second Run start dispatching — and so
-		// call r.wg.Add — while this one is inside r.wg.Wait, which is a
-		// WaitGroup misuse and would leave this Run waiting on lanes it never
-		// started.
+		// The router stays claimed until every goroutine has exited, so a
+		// second Run cannot call wg.Add while this one waits.
 		r.wg.Wait()
 		r.mu.Lock()
 		r.running = false
 		r.mu.Unlock()
 	}()
 
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-failed:
+		return err
+	}
+}
+
+// channelKey is one channel of one tenant.
+type channelKey struct{ tenant, channel string }
+
+// listener is the subscription to one channel: how many registered runs
+// publish on it, and the function that ends its subscriber while Run is
+// active.
+type listener struct {
+	runs int
+	stop context.CancelFunc
+}
+
+// joinLocked counts a run on a channel, subscribing to it if it is new and
+// Run is active. Callers hold r.mu.
+func (r *Router) joinLocked(key channelKey) {
+	l := r.channels[key]
+	if l == nil {
+		l = &listener{}
+		r.channels[key] = l
+	}
+	l.runs++
+	if r.runCtx != nil && l.stop == nil {
+		r.listenLocked(key, l)
+	}
+}
+
+// leaveLocked uncounts a run on a channel, ending its subscription once no
+// registered run publishes on it. Callers hold r.mu.
+func (r *Router) leaveLocked(key channelKey) {
+	l := r.channels[key]
+	if l == nil {
+		return
+	}
+	l.runs--
+	if l.runs > 0 {
+		return
+	}
+	if l.stop != nil {
+		l.stop()
+	}
+	delete(r.channels, key)
+}
+
+// listenLocked starts the subscriber of one channel under the active Run.
+// Callers hold r.mu.
+func (r *Router) listenLocked(key channelKey, l *listener) {
+	ctx, stop := context.WithCancel(r.runCtx)
+	l.stop = stop
+	failed := r.failed
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		defer stop()
+		if err := r.listen(ctx, key); err != nil {
+			select {
+			case failed <- err:
+			default:
+			}
+		}
+	}()
+}
+
+// subscriptionFor is what the router listens to on one channel: every run
+// event, the opt-in families included, since a route may select them.
+func subscriptionFor(key channelKey) bus.Subscription {
+	return bus.Subscription{
+		Tenant:   key.tenant,
+		Channels: []string{key.channel},
+		Types:    []string{"run", "run.usage", "run.context"},
+	}
+}
+
+// listen reads one channel until ctx ends, resubscribing after falling
+// behind. It returns an error only for a subscription that cannot recover.
+func (r *Router) listen(ctx context.Context, key channelKey) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		stream, err := r.bus.Subscribe(ctx, envelope.Subscription{Topic: r.topic})
+		stream, err := r.bus.Subscribe(ctx, subscriptionFor(key))
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("router: subscribe %s: %w", r.topic, err)
+			return fmt.Errorf("router: subscribe %s: %w", key.channel, err)
 		}
-		err = r.consume(ctx, stream)
+		err = r.consume(ctx, key, stream)
 		_ = stream.Close()
 
 		switch {
@@ -425,24 +527,30 @@ func (r *Router) Run(ctx context.Context) error {
 			// over. Say so: a router that stops quietly looks exactly like an
 			// agent with nothing to say.
 			r.log.Warn("router: bus stream ended, delivery has stopped",
-				"topic", r.topic.String(), "error", err)
+				"channel", key.channel, "error", err)
 			return nil
 		case errors.Is(err, bus.ErrSlowConsumer):
 			r.log.Warn("router: fell behind the bus, resubscribing",
-				"topic", r.topic.String(), "error", err)
+				"channel", key.channel, "error", err)
 		default:
-			return fmt.Errorf("router: recv on %s: %w", r.topic, err)
+			return fmt.Errorf("router: recv on %s: %w", key.channel, err)
 		}
 	}
 }
 
 // consume reads one subscription to exhaustion. It returns the error that ended
 // it, which is always non-nil: a stream ends by failing.
-func (r *Router) consume(ctx context.Context, stream bus.Stream) error {
+func (r *Router) consume(ctx context.Context, key channelKey, stream bus.Stream) error {
 	for {
 		e, err := stream.Recv(ctx)
 		if err != nil {
 			return err
+		}
+		// A prefix subscription also sees a channel beneath this one, which
+		// has a listener of its own; each event is dispatched once, by the
+		// listener of its own channel.
+		if e.Channel != key.channel || e.Tenant != key.tenant {
+			continue
 		}
 		r.dispatch(ctx, e)
 	}
@@ -452,25 +560,22 @@ func (r *Router) consume(ctx context.Context, stream bus.Stream) error {
 // whole fan-out: the offers are non-blocking sends, and doing them under the
 // same lock that Release closes lanes with is what makes "deliver to a lane
 // that was just released" impossible rather than merely unlikely.
-func (r *Router) dispatch(ctx context.Context, e envelope.Event) {
-	if e.Topic.IsControl() {
+func (r *Router) dispatch(ctx context.Context, e event.Envelope) {
+	if event.IsControl(e.Channel) || event.Family(e.Type) != "run" {
 		// A request addressed to a run, not something a run produced. It is
 		// for the worker executing the run and is never delivered to a
 		// surface.
 		return
 	}
-	runID := e.RunID
-	if runID == "" {
-		runID = e.Topic.RunID() // the bus fills this in, but do not depend on it
-	}
+	runID := e.Run
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	st := r.runs[runID]
-	if st == nil {
+	if st == nil || st.at.tenant != e.Tenant {
 		r.log.Debug("router: event for a run this router has no routes for, dropped",
-			"run", runID, "agent", e.Agent, "seq", e.Seq, "kind", string(e.Kind))
+			"run", runID, "agent", e.Agent, "seq", e.Seq, "type", e.Type)
 		return
 	}
 	if e.Seq != 0 && e.Seq <= st.seq {
@@ -480,7 +585,7 @@ func (r *Router) dispatch(ctx context.Context, e envelope.Event) {
 
 	var offered []*lane
 	for _, b := range st.bound {
-		if !b.route.Wants(e.Kind) {
+		if !b.route.Wants(e.Type) {
 			continue
 		}
 		ln := r.laneFor(ctx, st, runID, b)
@@ -507,7 +612,7 @@ func (r *Router) laneFor(ctx context.Context, st *run, runID string, b binding) 
 		runID:  runID,
 		target: b.route.Target,
 		sink:   b.sink,
-		queue:  make(chan envelope.Event, r.backlog),
+		queue:  make(chan event.Envelope, r.backlog),
 		done:   make(chan struct{}),
 	}
 	if prev := r.live[ln.key]; prev != nil {

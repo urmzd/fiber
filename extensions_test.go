@@ -21,6 +21,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -70,11 +71,11 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	var text string
 	var toolDone bool
 	for _, e := range box.at(target.String()) {
-		switch e.Kind {
-		case envelope.KindText:
-			text += string(e.Payload)
-		case envelope.KindToolDone:
-			toolDone = strings.Contains(string(e.Payload), "restart it")
+		switch b := e.Data.(type) {
+		case event.Text:
+			text += b.Text
+		case event.ToolDone:
+			toolDone = strings.Contains(b.Result, "restart it")
 		}
 	}
 	if !strings.Contains(text, "house says") {

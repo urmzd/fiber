@@ -20,6 +20,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 )
@@ -49,14 +50,14 @@ func spending(deltas []saigetypes.Delta, in, out int) []saigetypes.Delta {
 }
 
 // usageOf returns the usage.call bodies a run published, in order.
-func usageOf(t *testing.T, events []envelope.Event) []payload.UsageCall {
+func usageOf(t *testing.T, events []event.Envelope) []payload.UsageCall {
 	t.Helper()
 	var out []payload.UsageCall
 	for _, e := range events {
-		if e.Kind != envelope.KindUsageCall {
+		if e.Type != event.TypeUsageCall {
 			continue
 		}
-		c, err := payload.Decode[payload.UsageCall](e)
+		c, err := decode[payload.UsageCall](e)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,19 +67,19 @@ func usageOf(t *testing.T, events []envelope.Event) []payload.UsageCall {
 }
 
 // tallied is what a subscriber rebuilds from a run's usage events.
-func tallied(t *testing.T, events []envelope.Event) payload.RunUsage {
+func tallied(t *testing.T, events []event.Envelope) payload.RunUsage {
 	t.Helper()
 	var tally payload.Tally
 	for _, e := range events {
-		switch e.Kind {
-		case envelope.KindUsageCall:
-			c, err := payload.Decode[payload.UsageCall](e)
+		switch e.Type {
+		case event.TypeUsageCall:
+			c, err := decode[payload.UsageCall](e)
 			if err != nil {
 				t.Fatal(err)
 			}
 			tally.Call(c)
-		case envelope.KindUsageChild:
-			c, err := payload.Decode[payload.UsageChild](e)
+		case event.TypeUsageChild:
+			c, err := decode[payload.UsageChild](e)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,9 +215,9 @@ func TestTheRunsTotalIsTheSumOfItsCallEvents(t *testing.T) {
 	if ctx := out.Usage.Context; ctx == nil || ctx.Window != 200_000 || ctx.Tokens != 12_000 {
 		t.Errorf("Output.Usage.Context = %+v, want 12000 of 200000", ctx)
 	}
-	completed, err := payload.Decode[payload.Lifecycle](events[len(events)-1])
-	if err != nil || events[len(events)-1].Kind != envelope.KindCompleted {
-		t.Fatalf("the last event is %s (%v), want completed", events[len(events)-1].Kind, err)
+	completed, err := decode[payload.Lifecycle](events[len(events)-1])
+	if err != nil || events[len(events)-1].Type != event.TypeCompleted {
+		t.Fatalf("the last event is %s (%v), want completed", events[len(events)-1].Type, err)
 	}
 	if completed.Usage == nil || !sameUsage(completed.Usage.Total, out.Usage.Total) {
 		t.Errorf("lifecycle.completed usage = %+v, want the run's total", completed.Usage)
@@ -468,7 +469,7 @@ func TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting(t *testing.T) {
 	}
 	children := 0
 	for _, e := range w.bus.of(lead) {
-		if e.Kind == envelope.KindUsageChild {
+		if e.Type == event.TypeUsageChild {
 			children++
 		}
 	}
@@ -669,8 +670,8 @@ func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
 		t.Errorf("Output.Usage = %+v, want the lead's own calls and no children", out.Usage)
 	}
 	for _, e := range w.bus.of(lead) {
-		if e.Kind == envelope.KindUsageChild {
-			t.Fatalf("a refused report reached the parent's stream: %s", e.Payload)
+		if e.Type == event.TypeUsageChild {
+			t.Fatalf("a refused report reached the parent's stream: %s", raw(e))
 		}
 	}
 }

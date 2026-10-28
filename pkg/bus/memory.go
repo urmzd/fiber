@@ -1,48 +1,36 @@
 package bus
 
 import (
-	"bytes"
 	"container/list"
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sync"
 
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
-// Memory is a complete single-process bus, not a stub: it is what the
-// zero-infrastructure deployment runs on and what every test in this repo runs
-// against, and it holds the same contract as the Redis backend down to the
-// error values.
+// Memory is a complete single-process bus: it is what the zero-infrastructure
+// deployment runs on and what every test in this repo runs against, and it
+// holds the same contract as the shared backends.
 //
-// One mutex guards everything. Publish takes it to append to the run's ring
-// and hand the event to each subscriber's buffer with a non-blocking send, so
-// the critical section is bounded by the number of subscribers and never by
-// how fast any of them reads. Subscribe takes it to snapshot the retained
-// history and join the fan-out in the same step, which is what closes the
-// catch-up/live seam: an event is either in the snapshot or in the buffer,
-// never both and never neither.
+// One mutex guards everything. Publish takes it to append to a ring and hand
+// the event to each subscriber's buffer with a non-blocking send. Subscribe
+// takes it to snapshot what is retained and join the fan-out in the same
+// step, which closes the catch-up/live seam.
 //
-// Events are value-semantic. Payloads are copied in on Publish and copied out
-// on Recv, so one consumer cannot see another's mutation and neither can reach
-// the retained copy.
-//
-// The snapshot is taken eagerly and is not bounded by the backlog: subscribing
-// to a broad topic from the beginning costs one slice of everything currently
-// retained beneath it, at most WithRetention events per run in scope. It is the
-// backlog that bounds the live tail, and the retention and run bounds that keep
-// the snapshot finite.
+// Events are stored as JSON and decoded for each delivery, so one consumer
+// cannot see another's mutation, and Envelope.Private never crosses the bus.
 type Memory struct {
 	retention int
 	backlog   int
 	maxRuns   int
+	opts      options
 
-	mu   sync.Mutex
-	runs map[string]*memRun
-	// lru orders runs by last publish, most recent at the front, so that
-	// evicting the coldest run is O(1) rather than a scan.
+	mu    sync.Mutex
+	rings map[string]*memRing
+	// lru orders rings by last publish, most recent at the front.
 	lru  *list.List
 	subs map[*memStream]struct{}
 }
@@ -50,96 +38,127 @@ type Memory struct {
 var _ Bus = (*Memory)(nil)
 
 // NewMemory returns an empty in-process bus. It honours WithRetention,
-// WithBacklog and WithMaxRuns.
+// WithBacklog, WithMaxRuns and WithMaxHops.
 func NewMemory(opts ...Option) *Memory {
 	o := newOptions(opts)
 	return &Memory{
 		retention: o.retention,
 		backlog:   o.backlog,
 		maxRuns:   o.maxRuns,
-		runs:      make(map[string]*memRun),
+		opts:      o,
+		rings:     make(map[string]*memRing),
 		lru:       list.New(),
 		subs:      make(map[*memStream]struct{}),
 	}
 }
 
-// memRun is one run's retention ring plus its sequence high-water mark. The
+// stored is one retained event: its envelope, for matching, and its JSON, for
+// delivery.
+type stored struct {
+	e   event.Envelope
+	raw []byte
+}
+
+// memRing is one run's ring, or one channel's ring of non-run events. The
 // ring is fixed-length: push overwrites the oldest slot once it is full.
-type memRun struct {
-	topic   topic.Topic
-	buf     []envelope.Event
-	head    int    // index of the oldest retained event
-	n       int    // events currently retained
-	highest uint64 // highest sequence ever published, retained or evicted
+type memRing struct {
+	key     string
+	buf     []stored
+	head    int
+	n       int
+	highest uint64              // a run's highest sequence, retained or evicted
+	ids     map[string]struct{} // a channel ring's retained event ids
 	elem    *list.Element
 }
 
-func (r *memRun) push(e envelope.Event) {
-	r.buf[(r.head+r.n)%len(r.buf)] = e
+func (r *memRing) push(s stored) {
+	slot := (r.head + r.n) % len(r.buf)
 	if r.n == len(r.buf) {
-		r.head = (r.head + 1) % len(r.buf) // the ring wrapped: drop the oldest
+		if r.ids != nil {
+			delete(r.ids, r.buf[slot].e.ID)
+		}
+		r.buf[slot] = s
+		r.head = (r.head + 1) % len(r.buf)
 		return
 	}
+	r.buf[slot] = s
 	r.n++
 }
 
-// retained appends the run's retained events to dst, oldest first.
-func (r *memRun) retained(dst []envelope.Event) []envelope.Event {
+func (r *memRing) retained(dst []stored) []stored {
 	for i := range r.n {
 		dst = append(dst, r.buf[(r.head+i)%len(r.buf)])
 	}
 	return dst
 }
 
-// Publish implements Bus. A caller-supplied Seq at or below the run's
-// high-water mark is a replay and returns nil without publishing anything.
-func (m *Memory) Publish(ctx context.Context, e envelope.Event) error {
+// ringKey names the ring an event is retained in.
+func ringKey(e event.Envelope) string {
+	if isRunEvent(e.Type) {
+		return "r\x00" + e.Tenant + "\x00" + e.Run
+	}
+	return "c\x00" + e.Tenant + "\x00" + e.Channel
+}
+
+// Publish implements Bus.
+func (m *Memory) Publish(ctx context.Context, e event.Envelope) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := normalize(&e); err != nil {
+	if err := normalize(&e, m.opts); err != nil {
 		return err
 	}
-	e.Payload = bytes.Clone(e.Payload)
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("bus: encode %s %q: %w", e.Type, e.ID, err)
+	}
+	e.Data, e.Private = nil, nil // matching reads the header only
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	r := m.runLocked(e.Topic)
-	switch {
-	case e.Seq == 0:
-		e.Seq = r.highest + 1
-	case e.Seq <= r.highest:
-		return nil // already published: replay is not a duplicate
+	r := m.ringLocked(ringKey(e), !isRunEvent(e.Type))
+	if isRunEvent(e.Type) {
+		if e.Seq <= r.highest {
+			return nil // already published: replay is not a duplicate
+		}
+		r.highest = e.Seq
+	} else {
+		if _, dup := r.ids[e.ID]; dup {
+			return nil
+		}
+		r.ids[e.ID] = struct{}{}
 	}
-	r.highest = e.Seq
-	r.push(e)
-	for s := range m.subs {
-		s.offer(e)
+	s := stored{e: e, raw: raw}
+	r.push(s)
+	for sub := range m.subs {
+		sub.offer(s)
 	}
 	return nil
 }
 
-// runLocked returns the run's ring, creating it and evicting the coldest run
-// if that takes the bus over its run bound. Callers hold m.mu.
-func (m *Memory) runLocked(t topic.Topic) *memRun {
-	key := t.String()
-	if r := m.runs[key]; r != nil {
+// ringLocked returns the ring for key, creating it and evicting the coldest
+// ring if that takes the bus over its bound. Callers hold m.mu.
+func (m *Memory) ringLocked(key string, ids bool) *memRing {
+	if r := m.rings[key]; r != nil {
 		m.lru.MoveToFront(r.elem)
 		return r
 	}
-	r := &memRun{topic: t, buf: make([]envelope.Event, m.retention)}
-	m.runs[key] = r
+	r := &memRing{key: key, buf: make([]stored, m.retention)}
+	if ids {
+		r.ids = make(map[string]struct{})
+	}
+	m.rings[key] = r
 	r.elem = m.lru.PushFront(r)
 	for m.lru.Len() > m.maxRuns {
-		cold := m.lru.Remove(m.lru.Back()).(*memRun)
-		delete(m.runs, cold.topic.String())
+		cold := m.lru.Remove(m.lru.Back()).(*memRing)
+		delete(m.rings, cold.key)
 	}
 	return r
 }
 
 // Subscribe implements Bus.
-func (m *Memory) Subscribe(ctx context.Context, sub envelope.Subscription) (Stream, error) {
+func (m *Memory) Subscribe(ctx context.Context, sub Subscription) (Stream, error) {
 	if err := validate(sub); err != nil {
 		return nil, err
 	}
@@ -149,40 +168,35 @@ func (m *Memory) Subscribe(ctx context.Context, sub envelope.Subscription) (Stre
 	s := &memStream{
 		m:      m,
 		sub:    sub,
-		ch:     make(chan envelope.Event, m.backlog),
+		ch:     make(chan stored, m.backlog),
 		closed: make(chan struct{}),
 		hup:    make(chan struct{}),
 	}
 
 	m.mu.Lock()
-	// Snapshot and join in one critical section. Anything published before
-	// this point is in catchup; anything after is offered to ch. There is no
-	// window in between, which is the only way the seam holds under
-	// concurrent publishing.
-	keys := make([]string, 0, len(m.runs))
-	for key, r := range m.runs {
-		if sub.Topic.Covers(r.topic) {
+	// Snapshot and join in one critical section.
+	if !sub.matchesNothing() {
+		keys := make([]string, 0, len(m.rings))
+		for key := range m.rings {
 			keys = append(keys, key)
 		}
-	}
-	slices.Sort(keys) // deterministic interleaving across runs
-	for _, key := range keys {
-		for _, e := range m.runs[key].retained(nil) {
-			if sub.Accepts(e) {
-				s.catchup = append(s.catchup, e)
+		slices.Sort(keys) // deterministic interleaving across rings
+		for _, key := range keys {
+			for _, e := range m.rings[key].retained(nil) {
+				if sub.Accepts(e.e) {
+					s.catchup = append(s.catchup, e)
+				}
 			}
 		}
 	}
 	m.subs[s] = struct{}{}
 	m.mu.Unlock()
 
-	// One watcher per subscription, and only when the context can actually
-	// be cancelled. It exits on cancel or on Close, whichever comes first.
 	if ctx.Done() != nil {
 		go func() {
 			select {
 			case <-ctx.Done():
-				_ = s.Close() // Memory's Close cannot fail
+				_ = s.Close()
 			case <-s.closed:
 			}
 		}()
@@ -194,17 +208,17 @@ func (m *Memory) Subscribe(ctx context.Context, sub envelope.Subscription) (Stre
 // by publishers.
 type memStream struct {
 	m   *Memory
-	sub envelope.Subscription
+	sub Subscription
 
-	// catchup is owned by Recv alone and needs no lock: it is written once,
-	// under m.mu, before the stream is handed to the caller.
-	catchup []envelope.Event
-	ch      chan envelope.Event
+	// catchup is owned by Recv alone: it is written once, under m.mu,
+	// before the stream is handed to the caller.
+	catchup []stored
+	ch      chan stored
 
 	once   sync.Once
 	closed chan struct{}
 	// hup is closed when this subscriber overflows. over guards against
-	// closing it twice and stops further offers; both are held under m.mu.
+	// closing it twice; both are held under m.mu.
 	hup  chan struct{}
 	over bool
 }
@@ -212,10 +226,9 @@ type memStream struct {
 var _ Stream = (*memStream)(nil)
 
 // offer hands e to this subscriber without ever blocking. A full buffer
-// terminates the subscriber instead of stalling the publisher. Callers hold
-// m.mu.
-func (s *memStream) offer(e envelope.Event) {
-	if s.over || !s.sub.Accepts(e) {
+// terminates the subscriber. Callers hold m.mu.
+func (s *memStream) offer(e stored) {
+	if s.over || !s.sub.Accepts(e.e) {
 		return
 	}
 	select {
@@ -226,49 +239,46 @@ func (s *memStream) offer(e envelope.Event) {
 	}
 }
 
-// Recv implements Stream. It drains the catch-up snapshot, then the live
-// buffer, and only reports overflow once the buffer it already holds is empty:
-// those events are a contiguous prefix, and handing them over first carries
-// the consumer's cursor as far forward as possible before it has to resubscribe.
-func (s *memStream) Recv(ctx context.Context) (envelope.Event, error) {
+// Recv implements Stream. It drains the snapshot, then the live buffer, and
+// reports overflow only once the buffer it already holds is empty.
+func (s *memStream) Recv(ctx context.Context) (event.Envelope, error) {
 	for {
 		if err := ctx.Err(); err != nil {
-			return envelope.Event{}, err
+			return event.Envelope{}, err
 		}
 		select {
 		case <-s.closed:
-			return envelope.Event{}, ErrClosed
+			return event.Envelope{}, ErrClosed
 		default:
 		}
 		if len(s.catchup) > 0 {
 			e := s.catchup[0]
-			s.catchup[0] = envelope.Event{} // drop the reference as we go
+			s.catchup[0] = stored{}
 			s.catchup = s.catchup[1:]
-			return copyEvent(e), nil
+			return decodeStored(e)
 		}
 		select {
 		case e := <-s.ch:
-			return copyEvent(e), nil
+			return decodeStored(e)
 		default:
 		}
 		select {
 		case <-s.hup:
-			return envelope.Event{}, fmt.Errorf("bus: subscription to %s fell more than %d events behind: %w", s.sub.Topic, s.m.backlog, ErrSlowConsumer)
+			return event.Envelope{}, fmt.Errorf("bus: subscription fell more than %d events behind: %w", s.m.backlog, ErrSlowConsumer)
 		default:
 		}
 		select {
 		case e := <-s.ch:
-			return copyEvent(e), nil
-		case <-s.hup: // loop: report only after the buffer is drained
+			return decodeStored(e)
+		case <-s.hup:
 		case <-s.closed:
 		case <-ctx.Done():
-			return envelope.Event{}, ctx.Err()
+			return event.Envelope{}, ctx.Err()
 		}
 	}
 }
 
-// Close implements Stream. It leaves the fan-out set, so a publisher stops
-// seeing this subscriber, and unblocks Recv.
+// Close implements Stream.
 func (s *memStream) Close() error {
 	s.once.Do(func() {
 		s.m.mu.Lock()
@@ -279,8 +289,11 @@ func (s *memStream) Close() error {
 	return nil
 }
 
-// copyEvent detaches an event's payload from the copy the bus retains.
-func copyEvent(e envelope.Event) envelope.Event {
-	e.Payload = bytes.Clone(e.Payload)
-	return e
+// decodeStored decodes a fresh copy of a retained event.
+func decodeStored(s stored) (event.Envelope, error) {
+	var e event.Envelope
+	if err := json.Unmarshal(s.raw, &e); err != nil {
+		return event.Envelope{}, fmt.Errorf("bus: decode %s %q: %w", s.e.Type, s.e.ID, err)
+	}
+	return e, nil
 }

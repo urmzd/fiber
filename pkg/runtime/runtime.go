@@ -123,6 +123,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,6 +133,8 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/event/legacy"
 	"github.com/urmzd/fiber/pkg/internal/pgrename"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/topic"
@@ -164,7 +167,7 @@ var ErrInvalid = errors.New("runtime: invalid")
 // of pkg/bus.Bus, narrowed to what a run needs: a run produces events and never
 // subscribes to them.
 type Bus interface {
-	Publish(ctx context.Context, e envelope.Event) error
+	Publish(ctx context.Context, e event.Envelope) error
 }
 
 // Specs resolves agent definitions. The control plane implements it.
@@ -379,7 +382,7 @@ type Outcome struct {
 }
 
 // Acceptance is what a caller learns when a tag is accepted. It carries the
-// topic, so the caller never builds one itself.
+// tenant and channel the run publishes on, so the caller never derives them.
 type Acceptance struct {
 	RunID string
 	// Rev is the revision this call resolved. For the delivery that created
@@ -389,51 +392,32 @@ type Acceptance struct {
 	// resolves it cannot yet know the run already exists. The run's own events
 	// always carry the pinned revision — read Rev off the stream, or off the
 	// run record, if the distinction matters.
-	Rev        int
-	Topic      topic.Topic
+	Rev int
+	// Tenant and Channel are where the run's events are published.
+	Tenant     string
+	Channel    string
 	AcceptedAt time.Time
 }
 
-// Entry is one event in a run's durable journal, as anchor.Emit records it.
-//
-// It exists because envelope.Event does not survive JSON: topic.Topic keeps its
-// segments unexported so a malformed topic cannot be constructed, which is the
-// right trade for the wire contract and the wrong shape for a journal. Entry
-// carries the topic as its string form and converts both ways, so anything
-// reading the journal — a resuming attempt, an operator, a bridge onto another
-// transport — gets events back rather than a shape it has to guess at.
-type Entry struct {
-	Seq     uint64          `json:"seq"`
-	Topic   string          `json:"topic"`
-	RunID   string          `json:"run_id"`
-	Tenant  string          `json:"tenant,omitempty"`
-	Agent   string          `json:"agent"`
-	Rev     int             `json:"rev"`
-	Origin  string          `json:"origin,omitempty"`
-	Kind    envelope.Kind   `json:"kind"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-	At      time.Time       `json:"at"`
-}
-
-// EntryOf projects an event into a journal entry.
-func EntryOf(e envelope.Event) Entry {
-	return Entry{
-		Seq: e.Seq, Topic: e.Topic.String(), RunID: e.RunID, Tenant: e.Tenant,
-		Agent: e.Agent, Rev: e.Rev, Origin: e.Origin, Kind: e.Kind,
-		Payload: json.RawMessage(e.Payload), At: e.At,
+// DecodeEntry reads one entry of a run's durable journal, as anchor.Emit
+// recorded it: an event envelope, or an entry written before the event union,
+// which carries a kind and is read through the legacy table.
+func DecodeEntry(raw []byte) (event.Envelope, error) {
+	var probe struct {
+		Type string `json:"type"`
+		Kind string `json:"kind"`
 	}
-}
-
-// Event rebuilds an event from a journal entry.
-func (n Entry) Event() (envelope.Event, error) {
-	t, err := topic.Parse(n.Topic)
-	if err != nil {
-		return envelope.Event{}, fmt.Errorf("runtime: journal entry seq %d: %w", n.Seq, err)
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return event.Envelope{}, fmt.Errorf("runtime: journal entry: %w", err)
 	}
-	return envelope.Event{
-		Seq: n.Seq, Topic: t, RunID: n.RunID, Tenant: n.Tenant, Agent: n.Agent,
-		Rev: n.Rev, Origin: n.Origin, Kind: n.Kind, Payload: n.Payload, At: n.At,
-	}, nil
+	if probe.Type == "" && probe.Kind != "" {
+		return legacy.DecodeEntry(raw)
+	}
+	var e event.Envelope
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return event.Envelope{}, fmt.Errorf("runtime: journal entry: %w", err)
+	}
+	return e, nil
 }
 
 // Runtime accepts tags and runs them durably.
@@ -639,8 +623,7 @@ func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRe
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", tag.ID, ErrInvalid, tag.Agent)
 	}
 	runID := RunID(tag.Tenant, tag.ID)
-	tp, err := topic.Run(tag.Agent, runID)
-	if err != nil {
+	if _, err := topic.Run(tag.Agent, runID); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
 	}
 	rev, err := r.specs.Latest(ctx, tag.Tenant, tag.Agent)
@@ -659,14 +642,9 @@ func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRe
 	}
 
 	in := Input{Tag: tag, Rev: rev.Rev, Hash: rev.Hash, HistorySeq: seq, Parent: parent}
-	acc := Acceptance{RunID: runID, Rev: rev.Rev, Topic: tp, AcceptedAt: r.now().UTC()}
+	acc := Acceptance{RunID: runID, Rev: rev.Rev, Tenant: TenantOf(tag), Channel: ChannelOf(tag), AcceptedAt: r.now().UTC()}
 
-	e := r.event(in, SeqAccepted, envelope.KindAccepted)
-	body, err := payload.Encode(payload.Lifecycle{Rev: rev.Rev})
-	if err != nil {
-		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
-	}
-	e.Payload = body
+	e := r.event(in, SeqAccepted, event.Accepted{Rev: rev.Rev})
 	if err := r.bus.Publish(ctx, e); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", tag.ID, err)
 	}
@@ -743,9 +721,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	case errors.Is(err, run.ErrParked):
 		// The run stopped at an event that has no record yet. It is not
 		// failed and it has not consumed retry budget; it waits.
-		at.report(ctx, envelope.KindParked, payload.Lifecycle{
-			Attempt: attempt, Rev: in.Rev, Reason: err.Error(),
-		})
+		at.report(ctx, event.Parked{Attempt: attempt, Rev: in.Rev, Reason: err.Error()})
 		return Output{}, err
 
 	case err != nil:
@@ -755,9 +731,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// later exhausts its budget has its last failure on the bus marked
 		// non-terminal; the ledger stays the authority on run status.
 		terminal := run.IsNonRetryable(err) || errors.Is(err, run.ErrNonDeterministic)
-		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
-			Attempt: attempt, Rev: in.Rev, Error: err.Error(), Terminal: terminal,
-		})
+		at.report(ctx, event.Failed{Attempt: attempt, Rev: in.Rev, Error: err.Error(), Terminal: terminal})
 		if terminal {
 			r.answerParent(ctx, in, "", nil, err)
 		}
@@ -773,9 +747,7 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 	// run. A stopped run is remembered the same way, for the same reason: the
 	// reply to a stopped answer is the whole point of stopping gently.
 	if err := r.remember(ctx, in, out); err != nil {
-		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
-			Attempt: attempt, Rev: in.Rev, Error: err.Error(),
-		})
+		at.report(ctx, event.Failed{Attempt: attempt, Rev: in.Rev, Error: err.Error()})
 		return Output{}, err
 	}
 
@@ -791,9 +763,9 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		// an error is what tells the ledger so: it records the run as ended
 		// and never retries it. Everything here comes from the agent's
 		// recorded outcome, so a replay announces the same stop.
-		if err := at.publish(ctx, envelope.KindStopped, payload.Stopped{
+		if err := at.publish(ctx, event.Stopped{
 			Attempt: attempt, Rev: in.Rev, Reason: out.Stopped.Reason, By: out.Stopped.By, Text: out.Text,
-			Usage: out.Usage,
+			Usage: eventUsage(out.Usage),
 		}); err != nil {
 			return Output{}, err
 		}
@@ -804,8 +776,8 @@ func (r *Runtime) runTurn(ctx context.Context, in Input) (Output, error) {
 		}, nil
 	}
 
-	if err := at.publish(ctx, envelope.KindCompleted, payload.Lifecycle{
-		Attempt: attempt, Rev: in.Rev, Text: out.Text, Usage: out.Usage,
+	if err := at.publish(ctx, event.Completed{
+		Attempt: attempt, Rev: in.Rev, Text: out.Text, Usage: eventUsage(out.Usage),
 	}); err != nil {
 		return Output{}, err
 	}
@@ -859,16 +831,14 @@ func (a *attemptLog) open(ctx context.Context) error {
 	if a.opened {
 		return nil
 	}
-	kind := envelope.KindStarted
+	var body event.Body = event.Started{Attempt: a.attempt, Rev: a.in.Rev}
 	if a.attempt > 1 {
 		// Attempt 1 started the work; every later attempt resumed it, whether
 		// it was parked on a question or interrupted by a crash. The answer,
 		// when there is one, says which.
-		kind = envelope.KindResumed
+		body = event.Resumed{Attempt: a.attempt, Rev: a.in.Rev, Answer: eventAnswer(a.answer)}
 	}
-	if err := a.r.publish(ctx, a.in, a.band.open, kind, payload.Lifecycle{
-		Attempt: a.attempt, Rev: a.in.Rev, Answer: a.answer,
-	}); err != nil {
+	if err := a.r.publish(ctx, a.in, a.band.open, body); err != nil {
 		return err
 	}
 	a.opened = true
@@ -877,20 +847,20 @@ func (a *attemptLog) open(ctx context.Context) error {
 
 // publish opens the attempt if it has not been, then publishes the attempt's
 // last event: it takes the band's closing sequence.
-func (a *attemptLog) publish(ctx context.Context, kind envelope.Kind, body any) error {
+func (a *attemptLog) publish(ctx context.Context, body event.Body) error {
 	if err := a.open(ctx); err != nil {
 		return err
 	}
-	return a.r.publish(ctx, a.in, a.band.close, kind, body)
+	return a.r.publish(ctx, a.in, a.band.close, body)
 }
 
 // report publishes an event whose failure must not mask the failure it reports.
 // A parked or failed turn already has an error on its way up; losing the
 // announcement of it is worth a log line, not a different error.
-func (a *attemptLog) report(ctx context.Context, kind envelope.Kind, body any) {
-	if err := a.publish(ctx, kind, body); err != nil {
+func (a *attemptLog) report(ctx context.Context, body event.Body) {
+	if err := a.publish(ctx, body); err != nil {
 		a.r.logger.Warn("fiber/runtime: could not publish lifecycle event",
-			"run_id", RunID(a.in.Tag.Tenant, a.in.Tag.ID), "kind", string(kind), "seq", a.band.close, "error", err)
+			"run_id", RunID(a.in.Tag.Tenant, a.in.Tag.ID), "type", body.Type(), "seq", a.band.close, "error", err)
 	}
 }
 
@@ -972,16 +942,20 @@ func (r *Runtime) executeAgent(ctx context.Context, in Input, resume *agentrt.Pa
 	// which a sandbox serializes into its task, never carries it.
 	execCtx = envelope.WithActor(execCtx, in.Tag.Actor)
 	out, err := r.execute(execCtx, in, req, func(ctx context.Context, c agentrt.Chunk) error {
+		body, err := agentrt.BodyOf(c)
+		if err != nil {
+			return fmt.Errorf("runtime: run %s: %w", req.RunID, err)
+		}
 		// A call is counted when it is reported, before it is published:
 		// the tokens were spent whether or not the bus takes the event.
-		meter.observe(c)
+		meter.observe(body)
 		seq, err := b.delta()
 		if err != nil {
 			// The band is spent. Retrying would produce the same flood, so
 			// this is terminal rather than another paid attempt.
 			return anchor.NonRetryable(err)
 		}
-		return r.publishRaw(ctx, in, seq, c.Kind, c.Payload)
+		return r.publish(ctx, in, seq, body)
 	})
 	if resume != nil {
 		// The request is the parked turn's, whatever path this turn took.
@@ -1202,61 +1176,48 @@ func firstNonEmpty(values ...string) string {
 }
 
 // publish sends one event to both the live bus and the run's durable journal.
-func (r *Runtime) publish(ctx context.Context, in Input, seq uint64, kind envelope.Kind, body any) error {
-	b, err := payload.Encode(body)
-	if err != nil {
-		return fmt.Errorf("runtime: publish %s: %w", kind, err)
-	}
-	return r.publishRaw(ctx, in, seq, kind, b)
-}
-
-// publishRaw is publish for a body that is already marshalled: the agent's
-// chunks arrive that way and re-encoding them would be a round trip for nothing.
 //
 // The bus comes first and its failure fails the turn. The journal is written
 // after and best-effort: anchor.Emit is a no-op outside a run and when the
-// queue has no delta log, and a journal that lost an entry costs observability,
-// never correctness — the ledger holds the truth. The one Emit error that is not
-// advisory is ErrSuperseded: it means another attempt owns this run now, and a
-// zombie that keeps publishing would interleave two attempts' output.
-func (r *Runtime) publishRaw(ctx context.Context, in Input, seq uint64, kind envelope.Kind, body []byte) error {
-	e := r.event(in, seq, kind)
-	e.Payload = body
+// queue has no delta log, and a journal that lost an entry costs
+// observability, never correctness. The one Emit error that is not advisory
+// is ErrSuperseded: another attempt owns this run now, and a zombie that keeps
+// publishing would interleave two attempts' output.
+func (r *Runtime) publish(ctx context.Context, in Input, seq uint64, body event.Body) error {
+	e := r.event(in, seq, body)
 	if err := r.bus.Publish(ctx, e); err != nil {
-		return fmt.Errorf("runtime: publish %s seq %d on %s: %w", kind, seq, e.Topic, err)
+		return fmt.Errorf("runtime: publish %s seq %d on %s: %w", e.Type, seq, e.Channel, err)
 	}
-	if err := anchor.Emit(ctx, EntryOf(e)); err != nil {
+	if err := anchor.Emit(ctx, e); err != nil {
 		if errors.Is(err, run.ErrSuperseded) {
-			return fmt.Errorf("runtime: journal %s seq %d: %w", kind, seq, err)
+			return fmt.Errorf("runtime: journal %s seq %d: %w", e.Type, seq, err)
 		}
 		r.logger.Warn("fiber/runtime: journal append failed; the bus has the event",
-			"run_id", e.RunID, "seq", seq, "kind", string(kind), "error", err)
+			"run_id", e.Run, "seq", seq, "type", e.Type, "error", err)
 	}
 	return nil
 }
 
-// event builds the identity every event of a run shares. The topic is the most
-// specific form, always: publishing to agent:<name>:<run> is what lets a
-// subscriber on any prefix of it receive the event.
-func (r *Runtime) event(in Input, seq uint64, kind envelope.Kind) envelope.Event {
+// event builds one event of a run. Its channel is the channel of the tag that
+// triggered the run, its id is the run and sequence, and it carries the
+// pinned revision as the definition version and its hash as the digest. It is
+// one hop from the trigger.
+func (r *Runtime) event(in Input, seq uint64, body event.Body) event.Envelope {
 	runID := RunID(in.Tag.Tenant, in.Tag.ID)
-	tp, err := topic.Run(in.Tag.Agent, runID)
-	if err != nil {
-		// Accept validated this topic before the run existed, so a failure
-		// here is impossible; the zero topic makes the bus reject the event
-		// rather than publishing it somewhere unintended.
-		r.logger.Error("fiber/runtime: run topic is invalid", "agent", in.Tag.Agent, "run_id", runID, "error", err)
-	}
-	return envelope.Event{
-		Seq:    seq,
-		Topic:  tp,
-		RunID:  runID,
-		Tenant: in.Tag.Tenant,
-		Agent:  in.Tag.Agent,
-		Rev:    in.Rev,
-		Origin: in.Tag.Origin,
-		Kind:   kind,
-		At:     r.now().UTC(),
+	return event.Envelope{
+		ID:      runID + ":" + strconv.FormatUint(seq, 10),
+		Source:  "fiber://run/" + runID,
+		Type:    body.Type(),
+		Channel: ChannelOf(in.Tag),
+		Time:    r.now().UTC(),
+		Hops:    1,
+		Tenant:  TenantOf(in.Tag),
+		Run:     runID,
+		Seq:     seq,
+		Agent:   in.Tag.Agent,
+		Version: version(in.Rev),
+		Digest:  in.Hash,
+		Data:    body,
 	}
 }
 

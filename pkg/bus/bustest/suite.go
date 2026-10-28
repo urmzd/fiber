@@ -1,17 +1,12 @@
 // Package bustest is the conformance suite every bus backend must pass. Run
-// exercises the whole contract — sequence assignment, idempotent replay, prefix
-// routing, filter narrowing, the catch-up/live seam under concurrent publish,
-// slow-consumer isolation, resource release, and retention — so that a backend
-// is held to the same promises whichever process it runs in.
+// exercises the whole contract: channel and type prefixes, default deny,
+// control and tenant isolation, opt-in types, sequence dedupe and id dedupe,
+// the hop limit, resume, the catch-up/live seam under concurrent publish,
+// slow-consumer isolation, resource release and retention.
 //
 // Two properties are deliberately not asserted, because the bus does not
-// promise them: ordering between different runs, and which events survive
-// retention beyond "the newest ones". Tests that depended on either would
-// encode a guarantee consumers must not rely on.
-//
-// Timings are event-driven where possible: subtests wait on channels with
-// generous deadlines rather than sleeping fixed amounts, so the suite stays
-// reliable under -race on a loaded machine.
+// promise them: ordering between different runs or channels, and which events
+// survive retention beyond "the newest ones".
 package bustest
 
 import (
@@ -25,27 +20,27 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 const (
-	// waitLong bounds things that must happen: an event that was published
-	// must arrive. Generous for loaded -race machines and for a backend that
-	// polls.
+	// waitLong bounds things that must happen.
 	waitLong = 10 * time.Second
 	// waitIdle bounds a probe that must find nothing. It has to outlast a
-	// backend's poll interval, or an event that is merely late would look
-	// like an event that was correctly filtered out.
+	// backend's poll interval.
 	waitIdle = 500 * time.Millisecond
-	// waitPublish bounds one Publish call. It is the slow-consumer property:
-	// a publisher is never made to wait for a consumer.
+	// waitPublish bounds one Publish call.
 	waitPublish = 2 * time.Second
 )
 
-// Config is the configuration a factory must apply to the bus it returns. Both
-// fields are part of the contract, and several subtests are only meaningful if
-// they are honoured exactly.
+// Tenant is the tenant every event in the suite belongs to, unless a test
+// says otherwise.
+const Tenant = "acme"
+
+// Channel is the channel the suite's run events are published on.
+const Channel = "slack://T01/C02"
+
+// Config is the configuration a factory must apply to the bus it returns.
 type Config struct {
 	// Retention is how many events each run keeps.
 	Retention int
@@ -53,9 +48,8 @@ type Config struct {
 	Backlog int
 }
 
-// Factory returns a fresh, empty bus configured per cfg. It must isolate each
-// call: no bus may see another's events, or the suite's subtests will see each
-// other's.
+// Factory returns a fresh, empty bus configured per cfg. No bus may see
+// another's events.
 type Factory func(t *testing.T, cfg Config) bus.Bus
 
 // Run exercises a Bus implementation against the full contract.
@@ -63,136 +57,79 @@ func Run(t *testing.T, newBus Factory) {
 	t.Run("EveryConsumerReceivesEveryEventInSequenceOrder", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
 
-		// One subscriber at each level of the namespace: all three cover the
-		// run the events are published to.
+		// One subscriber at each level of the channel, and one on the run.
 		streams := map[string]bus.Stream{}
-		for _, at := range []string{"agent", "agent:docs-bot", "agent:docs-bot:run_1"} {
+		for _, at := range []string{"slack://", "slack://T01", Channel} {
 			streams[at] = subscribe(t, b, on(at))
 		}
+		byRun := on("slack://")
+		byRun.Run = "run_1"
+		streams["run"] = subscribe(t, b, byRun)
 
-		payload := []byte("hello")
-		first := text("docs-bot", "run_1", 1)
-		first.Payload = payload
-		publish(t, b, first)
-		publish(t, b, text("docs-bot", "run_1", 2), text("docs-bot", "run_1", 3))
-		// The bus owns its copy: mutating the caller's slice afterwards must
-		// not reach a consumer.
-		payload[0] = 'X'
+		publish(t, b, text(Channel, "run_1", 1), text(Channel, "run_1", 2), text(Channel, "run_1", 3))
 
 		for at, s := range streams {
 			got := recvN(t, s, 3)
 			if diff := seqsOf(got); !slices.Equal(diff, []uint64{1, 2, 3}) {
 				t.Errorf("subscriber on %s got sequences %v, want [1 2 3]", at, diff)
 			}
-			if string(got[0].Payload) != "hello" {
-				t.Errorf("subscriber on %s got payload %q, want %q", at, got[0].Payload, "hello")
+			if body, ok := got[0].Data.(event.Text); !ok || body.Text != "run_1#1" {
+				t.Errorf("subscriber on %s got data %#v, want the text run_1#1", at, got[0].Data)
 			}
-			if got[0].At.IsZero() {
-				t.Errorf("subscriber on %s got an event with no timestamp", at)
+			if got[0].Time.IsZero() {
+				t.Errorf("subscriber on %s got an event with no time", at)
 			}
 		}
 	})
 
-	t.Run("SequenceIsAssignedFromOneWithinEachRun", func(t *testing.T) {
+	t.Run("ChannelPrefixIsSegmentAware", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
-
-		// Seq 0 means "assign": each run numbers from 1 independently.
-		for range 3 {
-			publish(t, b, text("docs-bot", "run_1", 0))
-		}
-		for range 2 {
-			publish(t, b, text("docs-bot", "run_2", 0))
-		}
-
-		s := subscribe(t, b, on("agent:docs-bot"))
-		byRun := map[string][]uint64{}
-		for _, e := range recvN(t, s, 5) {
-			byRun[e.RunID] = append(byRun[e.RunID], e.Seq)
-		}
-		if want := []uint64{1, 2, 3}; !slices.Equal(byRun["run_1"], want) {
-			t.Errorf("run_1 sequences = %v, want %v", byRun["run_1"], want)
-		}
-		if want := []uint64{1, 2}; !slices.Equal(byRun["run_2"], want) {
-			t.Errorf("run_2 sequences = %v, want %v", byRun["run_2"], want)
-		}
-	})
-
-	t.Run("PrefixSubscriptionCoversEveryRunBeneathItAndNothingElse", func(t *testing.T) {
-		b := newBus(t, Config{Retention: 64, Backlog: 64})
-		s := subscribe(t, b, on("agent:docs-bot"))
+		s := subscribe(t, b, on("slack://T01/C02"))
 
 		publish(t, b,
-			text("docs-bot", "run_1", 1),
-			text("docs-bot", "run_2", 1),
-			text("triage-bot", "run_3", 1),
+			text("slack://T01/C02", "run_1", 1),
+			text("slack://T01/C02?thread=1699.001", "run_2", 1),
+			text("slack://T01/C023", "run_3", 1),
+			text("github://acme/handbook", "run_4", 1),
 		)
 
-		var runs []string
-		for _, e := range recvN(t, s, 2) {
-			runs = append(runs, e.RunID)
+		got := labelsOf(recvN(t, s, 2))
+		slices.Sort(got)
+		if want := []string{"run_1#1", "run_2#1"}; !slices.Equal(got, want) {
+			t.Errorf("received %v, want %v", got, want)
 		}
-		slices.Sort(runs)
-		if want := []string{"run_1", "run_2"}; !slices.Equal(runs, want) {
-			t.Errorf("received runs %v, want %v", runs, want)
-		}
-		// A sibling agent's run is not beneath this topic, however similar
-		// its name.
 		recvIdle(t, s)
 	})
 
-	t.Run("TheRootDoesNotCoverTheControlNamespace", func(t *testing.T) {
-		b := newBus(t, Config{Retention: 64, Backlog: 64})
-		everything := subscribe(t, b, on("agent"))
-		requests := subscribe(t, b, on("agent:_control"))
-
-		publish(t, b, ev("_control", "stop-k1", 0, envelope.KindStop), text("docs-bot", "run_1", 1))
-
-		// A consumer of everything gets agent output and nothing addressed to
-		// a run; the control namespace is subscribed to by name.
-		if got := recvN(t, everything, 1); got[0].RunID != "run_1" {
-			t.Errorf("the root delivered %s on %s", got[0].Kind, got[0].Topic)
+	t.Run("TypePrefixNarrows", func(t *testing.T) {
+		corpus := []event.Envelope{
+			text(Channel, "run_a", 1),
+			ev(Channel, "run_a", 2, event.Citation{Label: "run_a#2"}),
+			ev(Channel, "run_a", 3, event.Completed{Text: "run_a#3"}),
+			text(Channel, "run_b", 1),
+			ev(Channel, "run_b", 2, event.Citation{Label: "run_b#2"}),
 		}
-		recvIdle(t, everything)
-		if got := recvN(t, requests, 1); got[0].Kind != envelope.KindStop {
-			t.Errorf("the control namespace delivered %s", got[0].Kind)
-		}
-	})
-
-	t.Run("FilterNarrowsWithoutChangingTopic", func(t *testing.T) {
-		// The corpus is published first, so every case reads it out of
-		// retention: the filter is the only variable.
-		corpus := []envelope.Event{
-			revised(text("docs-bot", "run_a", 1), 1, "slack"),
-			revised(ev("docs-bot", "run_a", 2, envelope.KindCitation), 1, "slack"),
-			revised(ev("docs-bot", "run_a", 3, envelope.KindCompleted), 1, "slack"),
-			revised(text("docs-bot", "run_b", 1), 2, "github"),
-			revised(ev("docs-bot", "run_b", 2, envelope.KindCitation), 2, "github"),
-		}
-
 		cases := []struct {
-			name string
-			sub  envelope.Subscription
-			want []string
+			name  string
+			types []string
+			want  []string
 		}{
-			{"everything", on("agent:docs-bot"), []string{"run_a#1", "run_a#2", "run_a#3", "run_b#1", "run_b#2"}},
-			{"kind family", filtered("agent:docs-bot", envelope.Filter{Kinds: []string{"delta"}}), []string{"run_a#1", "run_a#2", "run_b#1", "run_b#2"}},
-			{"exact kind", filtered("agent:docs-bot", envelope.Filter{Kinds: []string{"delta.citation"}}), []string{"run_a#2", "run_b#2"}},
-			{"two kinds", filtered("agent:docs-bot", envelope.Filter{Kinds: []string{"delta.text", "lifecycle.completed"}}), []string{"run_a#1", "run_a#3", "run_b#1"}},
-			{"revision", filtered("agent:docs-bot", envelope.Filter{Rev: 2}), []string{"run_b#1", "run_b#2"}},
-			{"origin", filtered("agent:docs-bot", envelope.Filter{Origin: "slack"}), []string{"run_a#1", "run_a#2", "run_a#3"}},
-			{"run", filtered("agent:docs-bot", envelope.Filter{RunID: "run_b"}), []string{"run_b#1", "run_b#2"}},
-			{"run and kind", filtered("agent:docs-bot", envelope.Filter{RunID: "run_a", Kinds: []string{"lifecycle"}}), []string{"run_a#3"}},
+			{"every run event", []string{"run"}, []string{"run_a#1", "run_a#2", "run_a#3", "run_b#1", "run_b#2"}},
+			{"family", []string{"run.delta"}, []string{"run_a#1", "run_a#2", "run_b#1", "run_b#2"}},
+			{"exact type", []string{event.TypeCitation}, []string{"run_a#2", "run_b#2"}},
+			{"two types", []string{event.TypeText, event.TypeCompleted}, []string{"run_a#1", "run_a#3", "run_b#1"}},
+			{"segment aware", []string{"run.delta.tex"}, nil},
 		}
-
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				b := newBus(t, Config{Retention: 64, Backlog: 64})
 				publish(t, b, corpus...)
-
-				s := subscribe(t, b, tc.sub)
+				sub := on(Channel)
+				sub.Types = tc.types
+				s := subscribe(t, b, sub)
 				got := labelsOf(recvN(t, s, len(tc.want)))
 				slices.Sort(got)
-				if !slices.Equal(got, tc.want) {
+				if !slices.Equal(got, tc.want) && (len(got) != 0 || len(tc.want) != 0) {
 					t.Errorf("received %v, want %v", got, tc.want)
 				}
 				recvIdle(t, s)
@@ -200,16 +137,64 @@ func Run(t *testing.T, newBus Factory) {
 		}
 	})
 
+	t.Run("EmptySubscriptionMatchesNothing", func(t *testing.T) { EmptySubscriptionMatchesNothing(t, newBus) })
+	t.Run("RootDoesNotSeeControl", func(t *testing.T) { RootDoesNotSeeControl(t, newBus) })
+
+	t.Run("TenantsAreIsolated", func(t *testing.T) {
+		b := newBus(t, Config{Retention: 64, Backlog: 64})
+		mine := subscribe(t, b, on("slack://"))
+		theirs := on("slack://")
+		theirs.Tenant = "globex"
+		other := subscribe(t, b, theirs)
+
+		foreign := text(Channel, "run_2", 1)
+		foreign.Tenant = "globex"
+		publish(t, b, text(Channel, "run_1", 1), foreign)
+
+		if got := labelsOf(recvN(t, mine, 1)); got[0] != "run_1#1" {
+			t.Errorf("acme received %v", got)
+		}
+		recvIdle(t, mine)
+		if got := labelsOf(recvN(t, other, 1)); got[0] != "run_2#1" {
+			t.Errorf("globex received %v", got)
+		}
+		recvIdle(t, other)
+	})
+
+	t.Run("OptInTypesNeedTheirFamilyNamed", func(t *testing.T) {
+		b := newBus(t, Config{Retention: 64, Backlog: 64})
+		publish(t, b,
+			text(Channel, "run_1", 1),
+			ev(Channel, "run_1", 2, event.UsageCall{AccountingID: "run_1#2"}),
+			ev(Channel, "run_1", 3, event.Compaction{By: "run_1#3"}),
+		)
+
+		everything := subscribe(t, b, on(Channel))
+		if got := labelsOf(recvN(t, everything, 1)); got[0] != "run_1#1" {
+			t.Errorf("a run subscription received %v", got)
+		}
+		recvIdle(t, everything)
+
+		usage := on(Channel)
+		usage.Types = []string{"run.usage"}
+		s := subscribe(t, b, usage)
+		if got := recvN(t, s, 1); got[0].Type != event.TypeUsageCall {
+			t.Errorf("a usage subscription received %s", got[0].Type)
+		}
+		recvIdle(t, s)
+	})
+
 	t.Run("FromResumesAfterASequenceWithinEachRun", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
 		publish(t, b,
-			text("docs-bot", "run_a", 1),
-			text("docs-bot", "run_a", 2),
-			text("docs-bot", "run_b", 1),
-			text("docs-bot", "run_b", 2),
+			text(Channel, "run_a", 1),
+			text(Channel, "run_a", 2),
+			text(Channel, "run_b", 1),
+			text(Channel, "run_b", 2),
 		)
-
-		s := subscribe(t, b, envelope.Subscription{Topic: topic.MustParse("agent:docs-bot"), From: 1})
+		sub := on(Channel)
+		sub.From = 1
+		s := subscribe(t, b, sub)
 		got := labelsOf(recvN(t, s, 2))
 		slices.Sort(got)
 		if want := []string{"run_a#2", "run_b#2"}; !slices.Equal(got, want) {
@@ -219,36 +204,27 @@ func Run(t *testing.T, newBus Factory) {
 	})
 
 	t.Run("CatchUpJoinsTheLiveTailWithoutGapOrDuplicate", func(t *testing.T) {
-		// The seam between retained history and the live tail is the classic
-		// place to lose or double an event, so it is exercised with
-		// publishing in flight and with subscribers that join at different
-		// points.
 		const (
 			history = 100
 			last    = 300
 		)
 		b := newBus(t, Config{Retention: 2048, Backlog: 2048})
 
-		early := subscribe(t, b, on("agent:docs-bot")) // before anything exists
-		if err := publishRange(t.Context(), b, "docs-bot", "run_1", 1, history); err != nil {
+		early := subscribe(t, b, on(Channel))
+		if err := publishRange(t.Context(), b, "run_1", 1, history); err != nil {
 			t.Fatal(err)
 		}
-
 		publishErr := make(chan error, 1)
 		go func() {
-			publishErr <- publishRange(context.WithoutCancel(t.Context()), b, "docs-bot", "run_1", history+1, last)
+			publishErr <- publishRange(context.WithoutCancel(t.Context()), b, "run_1", history+1, last)
 		}()
-
-		// Joining mid-flight, at cursors that fall before, at, and after the
-		// history that existed when publishing resumed: the events at or
-		// before From must not arrive, the ones after must all arrive exactly
-		// once.
 		froms := []uint64{50, history, history + 40}
 		mids := make([]bus.Stream, len(froms))
 		for i, from := range froms {
-			mids[i] = subscribe(t, b, envelope.Subscription{Topic: topic.MustParse("agent:docs-bot"), From: from})
+			sub := on(Channel)
+			sub.From = from
+			mids[i] = subscribe(t, b, sub)
 		}
-
 		if err := <-publishErr; err != nil {
 			t.Fatal(err)
 		}
@@ -260,40 +236,60 @@ func Run(t *testing.T, newBus Factory) {
 
 	t.Run("ReplayingASequenceIsNotADuplicate", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
-		publish(t, b, text("docs-bot", "run_1", 1), text("docs-bot", "run_1", 2), text("docs-bot", "run_1", 3))
+		publish(t, b, text(Channel, "run_1", 1), text(Channel, "run_1", 2), text(Channel, "run_1", 3))
 
-		// A replaying producer re-publishes what the run already emitted.
-		// The stream must not grow, and the retained event must not change.
-		tampered := text("docs-bot", "run_1", 2)
-		tampered.Payload = []byte("tampered")
-		publish(t, b, text("docs-bot", "run_1", 1), tampered, text("docs-bot", "run_1", 3))
+		tampered := text(Channel, "run_1", 2)
+		tampered.Data = event.Text{Text: "tampered"}
+		publish(t, b, text(Channel, "run_1", 1), tampered, text(Channel, "run_1", 3), text(Channel, "run_1", 4))
 
-		// Assignment continues from the high-water mark, not from the number
-		// of events accepted.
-		publish(t, b, text("docs-bot", "run_1", 0))
-
-		s := subscribe(t, b, on("agent:docs-bot:run_1"))
+		sub := on(Channel)
+		sub.Run = "run_1"
+		s := subscribe(t, b, sub)
 		got := recvN(t, s, 4)
 		wantContiguous(t, seqsOf(got), 1, 4)
-		if string(got[1].Payload) != "run_1#2" {
-			t.Errorf("sequence 2 payload = %q, want the original %q", got[1].Payload, "run_1#2")
+		if body, _ := got[1].Data.(event.Text); body.Text != "run_1#2" {
+			t.Errorf("sequence 2 text = %q, want the original %q", body.Text, "run_1#2")
 		}
+		recvIdle(t, s)
+	})
+
+	t.Run("OtherEventsAreDeduplicatedByID", func(t *testing.T) {
+		b := newBus(t, Config{Retention: 64, Backlog: 64})
+		sub := on(Channel)
+		sub.Types = []string{"message"}
+		s := subscribe(t, b, sub)
+
+		first := message(Channel, "Ev1", "hello")
+		again := message(Channel, "Ev1", "hello again")
+		publish(t, b, first, again, message(Channel, "Ev2", "second"))
+
+		got := recvN(t, s, 2)
+		if got[0].ID != "Ev1" || got[1].ID != "Ev2" {
+			t.Fatalf("received %s, %s; want Ev1, Ev2", got[0].ID, got[1].ID)
+		}
+		if body := got[0].Data.(event.MessagePosted); body.Text != "hello" {
+			t.Errorf("Ev1 text = %q, want the first publish", body.Text)
+		}
+		recvIdle(t, s)
+
+		// The same id in another tenant is another event.
+		foreign := message(Channel, "Ev1", "theirs")
+		foreign.Tenant = "globex"
+		publish(t, b, foreign)
 		recvIdle(t, s)
 	})
 
 	t.Run("SlowConsumerWedgesNeitherThePublisherNorItsPeers", func(t *testing.T) {
 		const total = 500
-		// A backlog far smaller than the burst, and retention far larger, so
-		// a consumer that is terminated for falling behind can always resume.
 		b := newBus(t, Config{Retention: 4096, Backlog: 32})
 
-		stalled := subscribe(t, b, on("agent:docs-bot")) // never read from
-		healthy := newTracker(t, b, on("agent:docs-bot"))
+		stalled := subscribe(t, b, on(Channel))
+		healthy := newTracker(t, b, on(Channel))
 
 		slowest := time.Duration(0)
 		for seq := uint64(1); seq <= total; seq++ {
 			started := time.Now()
-			if err := b.Publish(t.Context(), text("docs-bot", "run_1", seq)); err != nil {
+			if err := b.Publish(t.Context(), text(Channel, "run_1", seq)); err != nil {
 				t.Fatalf("Publish %d: %v", seq, err)
 			}
 			if took := time.Since(started); took > slowest {
@@ -303,14 +299,8 @@ func Run(t *testing.T, newBus Factory) {
 		if slowest > waitPublish {
 			t.Errorf("slowest Publish took %v: a stalled consumer must not slow the publisher", slowest)
 		}
-
-		// The healthy consumer sees every event, resubscribing from its own
-		// cursor if the bus terminated it for falling behind — the documented
-		// recovery, and the reason termination is safe.
 		wantContiguous(t, healthy.wait(t, total), 1, total)
 
-		// The stalled consumer is allowed to be terminated, but never to be
-		// handed a stream with a hole in it.
 		got, err := drain(stalled, total)
 		if err != nil && !errors.Is(err, bus.ErrSlowConsumer) {
 			t.Fatalf("stalled consumer Recv error = %v, want nil or bus.ErrSlowConsumer", err)
@@ -326,19 +316,16 @@ func Run(t *testing.T, newBus Factory) {
 			published = 20
 		)
 		b := newBus(t, Config{Retention: retention, Backlog: 64})
-		if err := publishRange(t.Context(), b, "docs-bot", "run_wraps", 1, published); err != nil {
+		if err := publishRange(t.Context(), b, "run_wraps", 1, published); err != nil {
 			t.Fatal(err)
 		}
-		if err := publishRange(t.Context(), b, "docs-bot", "run_small", 1, 3); err != nil {
+		if err := publishRange(t.Context(), b, "run_small", 1, 3); err != nil {
 			t.Fatal(err)
 		}
-
-		// Retention is per run: wrapping one run's ring does not touch
-		// another's, and what survives is the newest.
-		s := subscribe(t, b, on("agent:docs-bot"))
+		s := subscribe(t, b, on(Channel))
 		byRun := map[string][]uint64{}
 		for _, e := range recvN(t, s, retention+3) {
-			byRun[e.RunID] = append(byRun[e.RunID], e.Seq)
+			byRun[e.Run] = append(byRun[e.Run], e.Seq)
 		}
 		wantContiguous(t, byRun["run_wraps"], published-retention+1, published)
 		wantContiguous(t, byRun["run_small"], 1, 3)
@@ -347,8 +334,8 @@ func Run(t *testing.T, newBus Factory) {
 
 	t.Run("ClosedStreamReportsClosed", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
-		s := subscribe(t, b, on("agent:docs-bot"))
-		publish(t, b, text("docs-bot", "run_1", 1))
+		s := subscribe(t, b, on(Channel))
+		publish(t, b, text(Channel, "run_1", 1))
 		recvN(t, s, 1)
 
 		if err := s.Close(); err != nil {
@@ -361,16 +348,13 @@ func Run(t *testing.T, newBus Factory) {
 			t.Fatalf("Recv after Close = %v, want bus.ErrClosed", err)
 		}
 
-		// A Recv already blocked when Close lands must come back too. It
-		// subscribes to an agent with no history, so that it really is
-		// blocked and not draining a snapshot.
-		blocked := subscribe(t, b, on("agent:quiet-bot"))
+		blocked := subscribe(t, b, on("slack://T01/quiet"))
 		errc := make(chan error, 1)
 		go func() {
 			_, err := blocked.Recv(context.WithoutCancel(t.Context()))
 			errc <- err
 		}()
-		time.Sleep(50 * time.Millisecond) // let Recv block first
+		time.Sleep(50 * time.Millisecond)
 		if err := blocked.Close(); err != nil {
 			t.Fatalf("Close while Recv blocked: %v", err)
 		}
@@ -387,7 +371,7 @@ func Run(t *testing.T, newBus Factory) {
 	t.Run("CancellingTheSubscriptionClosesTheStream", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
 		ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
-		s, err := b.Subscribe(ctx, on("agent:docs-bot"))
+		s, err := b.Subscribe(ctx, on(Channel))
 		if err != nil {
 			cancel()
 			t.Fatalf("Subscribe: %v", err)
@@ -399,9 +383,8 @@ func Run(t *testing.T, newBus Factory) {
 			_, err := s.Recv(context.WithoutCancel(t.Context()))
 			errc <- err
 		}()
-		time.Sleep(50 * time.Millisecond) // let Recv block first
+		time.Sleep(50 * time.Millisecond)
 		cancel()
-
 		select {
 		case err := <-errc:
 			if !errors.Is(err, bus.ErrClosed) {
@@ -414,7 +397,7 @@ func Run(t *testing.T, newBus Factory) {
 
 	t.Run("RecvHonoursItsOwnContext", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
-		s := subscribe(t, b, on("agent:docs-bot"))
+		s := subscribe(t, b, on(Channel))
 
 		ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 		errc := make(chan error, 1)
@@ -422,9 +405,8 @@ func Run(t *testing.T, newBus Factory) {
 			_, err := s.Recv(ctx)
 			errc <- err
 		}()
-		time.Sleep(50 * time.Millisecond) // let Recv block first
+		time.Sleep(50 * time.Millisecond)
 		cancel()
-
 		select {
 		case err := <-errc:
 			if !errors.Is(err, context.Canceled) {
@@ -433,26 +415,20 @@ func Run(t *testing.T, newBus Factory) {
 		case <-time.After(waitLong):
 			t.Fatal("cancelling Recv's context did not unblock it")
 		}
-		// The stream itself is still usable: only that Recv was cancelled.
-		publish(t, b, text("docs-bot", "run_1", 1))
+		publish(t, b, text(Channel, "run_1", 1))
 		recvN(t, s, 1)
 	})
 
 	t.Run("SubscriptionsLeaveNoGoroutinesBehind", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
-
-		// One warm-up cycle first: whatever the backend starts lazily (a
-		// connection pool, a reaper) must not be counted as a leak.
 		cycle(t, b, false)
 		cycle(t, b, true)
 		runtime.GC()
 		baseline := runtime.NumGoroutine()
-
 		for range 20 {
-			cycle(t, b, false) // released by Close
-			cycle(t, b, true)  // released by cancelling the context
+			cycle(t, b, false)
+			cycle(t, b, true)
 		}
-
 		deadline := time.Now().Add(waitLong)
 		for {
 			runtime.GC()
@@ -470,34 +446,86 @@ func Run(t *testing.T, newBus Factory) {
 	t.Run("UnpublishableEventIsRejected", func(t *testing.T) {
 		b := newBus(t, Config{Retention: 64, Backlog: 64})
 
-		noRunID := text("docs-bot", "run_1", 1)
-		noRunID.Topic = topic.MustParse("agent:docs-bot")
-		wrongRun := text("docs-bot", "run_1", 1)
-		wrongRun.RunID = "run_2"
-		wrongAgent := text("docs-bot", "run_1", 1)
-		wrongAgent.Agent = "triage-bot"
-		noKind := text("docs-bot", "run_1", 1)
-		noKind.Kind = ""
-
+		mutate := func(f func(*event.Envelope)) event.Envelope {
+			e := text(Channel, "run_1", 1)
+			f(&e)
+			return e
+		}
 		cases := []struct {
 			name string
-			e    envelope.Event
+			e    event.Envelope
 		}{
-			{"no topic", envelope.Event{Kind: envelope.KindText}},
-			{"topic is not run-scoped", noRunID},
-			{"run id disagrees with topic", wrongRun},
-			{"agent disagrees with topic", wrongAgent},
-			{"no kind", noKind},
+			{"zero", event.Envelope{}},
+			{"no tenant", mutate(func(e *event.Envelope) { e.Tenant = "" })},
+			{"no id", mutate(func(e *event.Envelope) { e.ID = "" })},
+			{"no type", mutate(func(e *event.Envelope) { e.Type = "" })},
+			{"no channel", mutate(func(e *event.Envelope) { e.Channel = "" })},
+			{"run event with no run", mutate(func(e *event.Envelope) { e.Run = "" })},
+			{"run event with no sequence", mutate(func(e *event.Envelope) { e.Seq = 0 })},
+			{"type and data disagree", mutate(func(e *event.Envelope) { e.Type = event.TypeThinking })},
+			{"over the hop limit", mutate(func(e *event.Envelope) { e.Hops = bus.DefaultMaxHops + 1 })},
+			{"sequenced message", func() event.Envelope { e := message(Channel, "Ev1", "hi"); e.Seq = 3; return e }()},
 		}
 		for _, tc := range cases {
 			if err := b.Publish(t.Context(), tc.e); !errors.Is(err, bus.ErrInvalid) {
 				t.Errorf("Publish(%s) = %v, want bus.ErrInvalid", tc.name, err)
 			}
 		}
-		if _, err := b.Subscribe(t.Context(), envelope.Subscription{}); !errors.Is(err, bus.ErrInvalid) {
-			t.Errorf("Subscribe with no topic = %v, want bus.ErrInvalid", err)
+		atLimit := mutate(func(e *event.Envelope) { e.Hops = bus.DefaultMaxHops })
+		if err := b.Publish(t.Context(), atLimit); err != nil {
+			t.Errorf("Publish at the hop limit = %v, want nil", err)
+		}
+		if _, err := b.Subscribe(t.Context(), bus.Subscription{Tenant: Tenant, Channels: []string{""}, Types: []string{"run"}}); !errors.Is(err, bus.ErrInvalid) {
+			t.Errorf("Subscribe with an empty channel prefix = %v, want bus.ErrInvalid", err)
 		}
 	})
+}
+
+// EmptySubscriptionMatchesNothing holds a backend to default deny: a
+// subscription missing its tenant, its channels or its types receives
+// nothing.
+func EmptySubscriptionMatchesNothing(t *testing.T, newBus Factory) {
+	b := newBus(t, Config{Retention: 64, Backlog: 64})
+	noTenant := on(Channel)
+	noTenant.Tenant = ""
+	noChannels := on(Channel)
+	noChannels.Channels = nil
+	noTypes := on(Channel)
+	noTypes.Types = nil
+	subs := map[string]bus.Stream{
+		"zero":        subscribe(t, b, bus.Subscription{}),
+		"no tenant":   subscribe(t, b, noTenant),
+		"no channels": subscribe(t, b, noChannels),
+		"no types":    subscribe(t, b, noTypes),
+	}
+	publish(t, b, text(Channel, "run_1", 1), message(Channel, "Ev1", "hi"))
+	for name, s := range subs {
+		t.Run(name, func(t *testing.T) { recvIdle(t, s) })
+	}
+}
+
+// RootDoesNotSeeControl holds a backend to control isolation: no prefix
+// reaches a control channel; only the channel named exactly does.
+func RootDoesNotSeeControl(t *testing.T, newBus Factory) {
+	b := newBus(t, Config{Retention: 64, Backlog: 64})
+	ctl := event.ControlChannel(Tenant, "stop", "run_1")
+	broad := bus.Subscription{
+		Tenant:   Tenant,
+		Channels: []string{"control:", "control://", "control://" + Tenant, "control://" + Tenant + "/stop", "slack://"},
+		Types:    []string{"control", "run"},
+	}
+	everything := subscribe(t, b, broad)
+	exact := subscribe(t, b, bus.Subscription{Tenant: Tenant, Channels: []string{ctl}, Types: []string{"control"}})
+
+	publish(t, b, stop(ctl, "run_1", "k1"), text(Channel, "run_1", 1))
+
+	if got := recvN(t, everything, 1); got[0].Type != event.TypeText {
+		t.Errorf("a broad subscription delivered %s on %s", got[0].Type, got[0].Channel)
+	}
+	recvIdle(t, everything)
+	if got := recvN(t, exact, 1); got[0].Type != event.TypeStop {
+		t.Errorf("the control channel delivered %s", got[0].Type)
+	}
 }
 
 // tracker is a consumer that keeps up: it reads as fast as it can and, if the
@@ -513,7 +541,7 @@ type tracker struct {
 	done chan struct{}
 }
 
-func newTracker(t *testing.T, b bus.Bus, sub envelope.Subscription) *tracker {
+func newTracker(t *testing.T, b bus.Bus, sub bus.Subscription) *tracker {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	tr := &tracker{
@@ -579,6 +607,9 @@ func (tr *tracker) wait(t *testing.T, n int) []uint64 {
 	return got
 }
 
+// cycles numbers the events cycle publishes, so each is new to the run.
+var cycles uint64
+
 // cycle subscribes, moves one event through the stream, and releases it either
 // by cancelling its context or by closing it.
 func cycle(t *testing.T, b bus.Bus, byCancel bool) {
@@ -586,11 +617,12 @@ func cycle(t *testing.T, b bus.Bus, byCancel bool) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	defer cancel()
 
-	s, err := b.Subscribe(ctx, on("agent:docs-bot"))
+	s, err := b.Subscribe(ctx, on(Channel))
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
-	publish(t, b, text("docs-bot", "run_cycle", 0))
+	cycles++
+	publish(t, b, text(Channel, "run_cycle", cycles))
 	recvN(t, s, 1)
 	if byCancel {
 		cancel()
@@ -601,43 +633,57 @@ func cycle(t *testing.T, b bus.Bus, byCancel bool) {
 	}
 }
 
-// on is a subscription to a topic, unfiltered, from the beginning of what the
-// bus holds.
-func on(t string) envelope.Subscription {
-	return envelope.Subscription{Topic: topic.MustParse(t)}
+// on is a subscription to every run event under a channel prefix, in the
+// suite's tenant, from the beginning of what the bus holds.
+func on(channel string) bus.Subscription {
+	return bus.Subscription{Tenant: Tenant, Channels: []string{channel}, Types: []string{"run"}}
 }
 
-// filtered is a subscription to a topic, narrowed.
-func filtered(t string, f envelope.Filter) envelope.Subscription {
-	return envelope.Subscription{Topic: topic.MustParse(t), Filter: f}
-}
-
-// ev builds an event whose payload identifies it, so a test can tell which
-// event it received and not merely how many. A seq of 0 asks the bus to assign
-// one.
-func ev(agent, runID string, seq uint64, kind envelope.Kind) envelope.Event {
-	return envelope.Event{
+// ev builds a run event whose identity is its label, so a test can tell which
+// event it received and not merely how many.
+func ev(channel, run string, seq uint64, body event.Body) event.Envelope {
+	return event.Envelope{
+		ID:      label(run, seq),
+		Source:  "fiber://run/" + run,
+		Type:    body.Type(),
+		Channel: channel,
+		Tenant:  Tenant,
+		Run:     run,
 		Seq:     seq,
-		Topic:   topic.MustParse("agent:" + agent + ":" + runID),
-		RunID:   runID,
-		Tenant:  "acme",
-		Agent:   agent,
-		Rev:     1,
-		Origin:  "slack",
-		Kind:    kind,
-		Payload: []byte(label(runID, seq)),
+		Agent:   "docs-bot",
+		Version: "1",
+		Data:    body,
 	}
 }
 
-// text is a streaming-output event, the common case.
-func text(agent, runID string, seq uint64) envelope.Event {
-	return ev(agent, runID, seq, envelope.KindText)
+// text is a streaming-output event, the common case. Its text is its label.
+func text(channel, run string, seq uint64) event.Envelope {
+	return ev(channel, run, seq, event.Text{Text: label(run, seq)})
 }
 
-// revised pins an event to an agent revision and an origin.
-func revised(e envelope.Event, rev int, origin string) envelope.Event {
-	e.Rev, e.Origin = rev, origin
-	return e
+// message is an ingress event.
+func message(channel, id, text string) event.Envelope {
+	return event.Envelope{
+		ID:      id,
+		Source:  "slack://T01",
+		Type:    event.TypeMessagePosted,
+		Channel: channel,
+		Tenant:  Tenant,
+		Data:    event.MessagePosted{Request: event.Request{Text: text}},
+	}
+}
+
+// stop is a stop request on a control channel.
+func stop(channel, run, id string) event.Envelope {
+	return event.Envelope{
+		ID:      id,
+		Source:  "fiber://control",
+		Type:    event.TypeStop,
+		Channel: channel,
+		Tenant:  Tenant,
+		Run:     run,
+		Data:    event.StopRequest{RunID: run},
+	}
 }
 
 func label(runID string, seq uint64) string {
@@ -645,20 +691,20 @@ func label(runID string, seq uint64) string {
 }
 
 // publish publishes each event or fails the test.
-func publish(t *testing.T, b bus.Bus, events ...envelope.Event) {
+func publish(t *testing.T, b bus.Bus, events ...event.Envelope) {
 	t.Helper()
 	for _, e := range events {
 		if err := b.Publish(t.Context(), e); err != nil {
-			t.Fatalf("Publish(%s, seq %d): %v", e.Topic, e.Seq, err)
+			t.Fatalf("Publish(%s %s): %v", e.Type, e.ID, err)
 		}
 	}
 }
 
 // publishRange publishes one event per sequence in [from, to]. It returns an
 // error rather than failing the test, so it can be called from a goroutine.
-func publishRange(ctx context.Context, b bus.Bus, agent, runID string, from, to uint64) error {
+func publishRange(ctx context.Context, b bus.Bus, runID string, from, to uint64) error {
 	for seq := from; seq <= to; seq++ {
-		if err := b.Publish(ctx, text(agent, runID, seq)); err != nil {
+		if err := b.Publish(ctx, text(Channel, runID, seq)); err != nil {
 			return fmt.Errorf("publish %s: %w", label(runID, seq), err)
 		}
 	}
@@ -666,23 +712,23 @@ func publishRange(ctx context.Context, b bus.Bus, agent, runID string, from, to 
 }
 
 // subscribe subscribes or fails the test, and closes the stream afterwards.
-func subscribe(t *testing.T, b bus.Bus, sub envelope.Subscription) bus.Stream {
+func subscribe(t *testing.T, b bus.Bus, sub bus.Subscription) bus.Stream {
 	t.Helper()
 	s, err := b.Subscribe(context.WithoutCancel(t.Context()), sub)
 	if err != nil {
-		t.Fatalf("Subscribe(%s): %v", sub.Topic, err)
+		t.Fatalf("Subscribe(%v): %v", sub.Channels, err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
 // recvN receives exactly n events or fails the test.
-func recvN(t *testing.T, s bus.Stream, n int) []envelope.Event {
+func recvN(t *testing.T, s bus.Stream, n int) []event.Envelope {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), waitLong)
 	defer cancel()
 
-	got := make([]envelope.Event, 0, n)
+	got := make([]event.Envelope, 0, n)
 	for range n {
 		e, err := s.Recv(ctx)
 		if err != nil {
@@ -702,7 +748,7 @@ func recvIdle(t *testing.T, s bus.Stream) {
 
 	e, err := s.Recv(ctx)
 	if err == nil {
-		t.Fatalf("Recv returned %s, want nothing", label(e.RunID, e.Seq))
+		t.Fatalf("Recv returned %s %s, want nothing", e.Type, e.ID)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Recv error = %v, want context.DeadlineExceeded", err)
@@ -725,7 +771,7 @@ func drain(s bus.Stream, n int) ([]uint64, error) {
 	return got, nil
 }
 
-func seqsOf(events []envelope.Event) []uint64 {
+func seqsOf(events []event.Envelope) []uint64 {
 	out := make([]uint64, len(events))
 	for i, e := range events {
 		out[i] = e.Seq
@@ -733,10 +779,10 @@ func seqsOf(events []envelope.Event) []uint64 {
 	return out
 }
 
-func labelsOf(events []envelope.Event) []string {
+func labelsOf(events []event.Envelope) []string {
 	out := make([]string, len(events))
 	for i, e := range events {
-		out[i] = label(e.RunID, e.Seq)
+		out[i] = e.ID
 	}
 	return out
 }

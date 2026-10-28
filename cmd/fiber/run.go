@@ -17,6 +17,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/topic"
 )
@@ -221,8 +222,7 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 		defer cancel()
 	}
 	runID := runtime.RunID(tag.Tenant, tag.ID)
-	tp, err := topic.Run(tag.Agent, runID)
-	if err != nil {
+	if _, err := topic.Run(tag.Agent, runID); err != nil {
 		fmt.Fprintf(stderr, "fiber run: %v\n", err)
 		return exitBadInput
 	}
@@ -235,7 +235,12 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 		}
 		return exitFailed
 	}
-	events := stream(wait, app.Bus(), tp, stderr)
+	events := stream(wait, app.Bus(), bus.Subscription{
+		Tenant:   runtime.TenantOf(tag),
+		Channels: []string{runtime.ChannelOf(tag)},
+		Types:    []string{"run", "run.usage", "run.context"},
+		Run:      runID,
+	}, stderr)
 	if _, err := app.Invoke(wait, tag); err != nil {
 		if wait.Err() != nil {
 			return gaveUp()
@@ -253,7 +258,7 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 		ended <- ending{o, err}
 	}()
 	var seen uint64 // the highest sequence printed
-	show := func(e envelope.Event) {
+	show := func(e event.Envelope) {
 		out.event(e)
 		seen = max(seen, e.Seq)
 	}
@@ -265,7 +270,7 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 				continue
 			}
 			show(e)
-			if e.Kind == envelope.KindParked {
+			if e.Type == event.TypeParked {
 				// Nothing here can answer it, and the run waits for an
 				// answer however long this command does.
 				out.close()
@@ -295,16 +300,16 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 	}
 }
 
-// stream delivers the events published to tp, in order, until ctx ends. A
+// stream delivers the events of one run, in order, until ctx ends. A
 // subscription that falls behind the bus's backlog resumes after the last
 // event it delivered, which is what an event's Seq is for; any other error
 // ends the stream, and the ledger still says how the run ended.
-func stream(ctx context.Context, b bus.Bus, tp topic.Topic, stderr io.Writer) <-chan envelope.Event {
-	sub, err := b.Subscribe(ctx, envelope.Subscription{Topic: tp})
-	events := make(chan envelope.Event)
+func stream(ctx context.Context, b bus.Bus, want bus.Subscription, stderr io.Writer) <-chan event.Envelope {
+	sub, err := b.Subscribe(ctx, want)
+	events := make(chan event.Envelope)
 	if err != nil {
 		if ctx.Err() == nil {
-			fmt.Fprintf(stderr, "fiber run: subscribe to %s: %v\n", tp, err)
+			fmt.Fprintf(stderr, "fiber run: subscribe to run %s: %v\n", want.Run, err)
 		}
 		close(events)
 		return events
@@ -316,14 +321,15 @@ func stream(ctx context.Context, b bus.Bus, tp topic.Topic, stderr io.Writer) <-
 			e, err := sub.Recv(ctx)
 			if errors.Is(err, bus.ErrSlowConsumer) {
 				_ = sub.Close()
-				if sub, err = b.Subscribe(ctx, envelope.Subscription{Topic: tp, From: last}); err == nil {
+				want.From = last
+				if sub, err = b.Subscribe(ctx, want); err == nil {
 					continue
 				}
 			}
 			if err != nil {
 				_ = sub.Close()
 				if ctx.Err() == nil {
-					fmt.Fprintf(stderr, "fiber run: read %s: %v\n", tp, err)
+					fmt.Fprintf(stderr, "fiber run: read run %s: %v\n", want.Run, err)
 				}
 				return
 			}
@@ -341,7 +347,7 @@ func stream(ctx context.Context, b bus.Bus, tp topic.Topic, stderr io.Writer) <-
 
 // drain prints what is left on events once the run has ended: until done
 // holds, until nothing arrives for quiet, or until the stream ends.
-func drain(events <-chan envelope.Event, show func(envelope.Event), quiet time.Duration, done func() bool) {
+func drain(events <-chan event.Envelope, show func(event.Envelope), quiet time.Duration, done func() bool) {
 	if events == nil || done() {
 		return
 	}

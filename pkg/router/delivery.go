@@ -1,7 +1,6 @@
 package router
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // lane is the delivery path for one (run, target) pair: a bounded FIFO queue
@@ -40,7 +40,7 @@ type lane struct {
 	target address.Address
 	sink   connector.Sink
 
-	queue chan envelope.Event
+	queue chan event.Envelope
 	// closed guards the queue against a second close: Release and the shutdown
 	// path can both reach a lane, and both are cheap enough to be idempotent.
 	closed sync.Once
@@ -56,10 +56,7 @@ type lane struct {
 // letting one unresponsive surface stall every other surface and every other
 // run. The drop is logged at error level, because a delivery nobody knows was
 // lost is worse than one that was. Callers hold r.mu.
-func (l *lane) offer(e envelope.Event) {
-	// One copy per lane: a sink that mutates the payload it was handed cannot
-	// reach what another sink sees.
-	e.Payload = bytes.Clone(e.Payload)
+func (l *lane) offer(e event.Envelope) {
 	select {
 	case l.queue <- e:
 	default:
@@ -138,7 +135,7 @@ func (l *lane) abandon() {
 // deliver renders one event, retrying transient failures with bounded
 // exponential backoff. It returns when the event has been delivered or when
 // retrying it is pointless, never before.
-func (l *lane) deliver(ctx context.Context, e envelope.Event) {
+func (l *lane) deliver(ctx context.Context, e event.Envelope) {
 	for attempt := 1; ; attempt++ {
 		err := l.attempt(ctx, e)
 		switch {
@@ -180,7 +177,7 @@ func (l *lane) deliver(ctx context.Context, e envelope.Event) {
 // the call, and converts a panicking sink into a failed delivery instead of a
 // dead router. The slot is released before any backoff wait, so a retrying sink
 // does not hold budget while it waits.
-func (l *lane) attempt(ctx context.Context, e envelope.Event) (err error) {
+func (l *lane) attempt(ctx context.Context, e event.Envelope) (err error) {
 	if err := l.r.acquire(ctx); err != nil {
 		return err
 	}
@@ -204,7 +201,7 @@ func (l *lane) attempt(ctx context.Context, e envelope.Event) (err error) {
 // retire logs a delivery the router is giving up on. This is the log line that
 // matters: the agent did the work, the ledger says so, and the surface will
 // never show it, so everything needed to find out why is on one line.
-func (l *lane) retire(e envelope.Event, err error, attempts int, reason string) {
+func (l *lane) retire(e event.Envelope, err error, attempts int, reason string) {
 	attrs := l.attrs(e, "attempts", attempts, "reason", reason, "error", err)
 	var p *panicError
 	if errors.As(err, &p) {
@@ -215,13 +212,13 @@ func (l *lane) retire(e envelope.Event, err error, attempts int, reason string) 
 
 // attrs is the identity of one delivery: enough to find the run in the ledger,
 // the event on the bus, and the surface it was meant for.
-func (l *lane) attrs(e envelope.Event, extra ...any) []any {
+func (l *lane) attrs(e event.Envelope, extra ...any) []any {
 	attrs := []any{
 		"run", l.runID,
 		"agent", e.Agent,
-		"rev", e.Rev,
+		"version", e.Version,
 		"seq", e.Seq,
-		"kind", string(e.Kind),
+		"type", e.Type,
 		"target", l.target.String(),
 		"connector", l.target.Connector,
 	}

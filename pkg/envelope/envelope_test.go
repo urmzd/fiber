@@ -6,6 +6,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/topic"
 )
 
@@ -61,25 +62,25 @@ func TestRouteSelectivity(t *testing.T) {
 
 	cases := []struct {
 		name                            string
-		kind                            envelope.Kind
+		typ                             string
 		wantStream, wantNotify, wantAll bool
 	}{
-		{"text delta", envelope.KindText, true, false, true},
-		{"citation", envelope.KindCitation, true, false, true},
-		{"started", envelope.KindStarted, false, false, true},
-		{"completed", envelope.KindCompleted, true, true, true},
-		{"failed", envelope.KindFailed, false, false, true},
+		{"text delta", event.TypeText, true, false, true},
+		{"citation", event.TypeCitation, true, false, true},
+		{"started", event.TypeStarted, false, false, true},
+		{"completed", event.TypeCompleted, true, true, true},
+		{"failed", event.TypeFailed, false, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := stream.Wants(tc.kind); got != tc.wantStream {
-				t.Errorf("stream.Wants(%s) = %v, want %v", tc.kind, got, tc.wantStream)
+			if got := stream.Wants(tc.typ); got != tc.wantStream {
+				t.Errorf("stream.Wants(%s) = %v, want %v", tc.typ, got, tc.wantStream)
 			}
-			if got := notify.Wants(tc.kind); got != tc.wantNotify {
-				t.Errorf("notify.Wants(%s) = %v, want %v", tc.kind, got, tc.wantNotify)
+			if got := notify.Wants(tc.typ); got != tc.wantNotify {
+				t.Errorf("notify.Wants(%s) = %v, want %v", tc.typ, got, tc.wantNotify)
 			}
-			if got := everything.Wants(tc.kind); got != tc.wantAll {
-				t.Errorf("everything.Wants(%s) = %v, want %v", tc.kind, got, tc.wantAll)
+			if got := everything.Wants(tc.typ); got != tc.wantAll {
+				t.Errorf("everything.Wants(%s) = %v, want %v", tc.typ, got, tc.wantAll)
 			}
 		})
 	}
@@ -150,7 +151,7 @@ func TestRoutesFallBackToSource(t *testing.T) {
 	if routes[0].Target.String() != tag.Source.String() {
 		t.Fatalf("fallback route = %q, want source %q", routes[0].Target, tag.Source)
 	}
-	if !routes[0].Wants(envelope.KindText) {
+	if !routes[0].Wants(event.TypeText) {
 		t.Error("fallback route should want every kind")
 	}
 }
@@ -250,18 +251,18 @@ func TestARouteReceivesUsageOnlyWhenItAsksForIt(t *testing.T) {
 	cases := []struct {
 		name  string
 		kinds []string
-		want  map[envelope.Kind]bool
+		want  map[string]bool
 	}{
-		{"no filter", nil, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindUsageChild: false, envelope.KindCompleted: true}},
-		{"an empty selector", []string{""}, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindCompleted: true}},
-		{"the conversation", []string{"delta", "lifecycle"}, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindUsageChild: false}},
-		{"the family", []string{"usage"}, map[envelope.Kind]bool{envelope.KindUsageCall: true, envelope.KindUsageChild: true, envelope.KindText: false}},
-		{"one kind", []string{"usage.child"}, map[envelope.Kind]bool{envelope.KindUsageCall: false, envelope.KindUsageChild: true}},
-		{"usage and the outcome", []string{"usage.call", "lifecycle.completed"}, map[envelope.Kind]bool{envelope.KindUsageCall: true, envelope.KindCompleted: true, envelope.KindText: false}},
+		{"no filter", nil, map[string]bool{event.TypeUsageCall: false, event.TypeUsageChild: false, event.TypeCompleted: true}},
+		{"an empty selector", []string{""}, map[string]bool{event.TypeUsageCall: false, event.TypeCompleted: true}},
+		{"the conversation", []string{"delta", "lifecycle"}, map[string]bool{event.TypeUsageCall: false, event.TypeUsageChild: false}},
+		{"the family", []string{"usage"}, map[string]bool{event.TypeUsageCall: true, event.TypeUsageChild: true, event.TypeText: false}},
+		{"one kind", []string{"usage.child"}, map[string]bool{event.TypeUsageCall: false, event.TypeUsageChild: true}},
+		{"usage and the outcome", []string{"usage.call", "lifecycle.completed"}, map[string]bool{event.TypeUsageCall: true, event.TypeCompleted: true, event.TypeText: false}},
 		// Compactions are opt-in the same way.
-		{"no filter, compactions", nil, map[envelope.Kind]bool{envelope.KindCompacted: false}},
-		{"the context family", []string{"context"}, map[envelope.Kind]bool{envelope.KindCompacted: true, envelope.KindUsageCall: false}},
-		{"one context kind", []string{"context.compacted"}, map[envelope.Kind]bool{envelope.KindCompacted: true}},
+		{"no filter, compactions", nil, map[string]bool{event.TypeCompacted: false}},
+		{"the context family", []string{"context"}, map[string]bool{event.TypeCompacted: true, event.TypeUsageCall: false}},
+		{"one context kind", []string{"context.compacted"}, map[string]bool{event.TypeCompacted: true}},
 	}
 	for _, tc := range cases {
 		r := envelope.Route{Target: address.MustParse("webhook://acme/deploys"), Kinds: tc.kinds}

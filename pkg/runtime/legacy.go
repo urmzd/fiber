@@ -7,8 +7,7 @@ import (
 
 	"github.com/urmzd/anchor"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/internal/pgrename"
 )
 
@@ -38,9 +37,7 @@ func (r *Runtime) failRunFromBeforeRename(ctx context.Context, in Input) (Output
 		"run_id", runID, "agent", in.Tag.Agent, "tenant", in.Tag.Tenant, "workflow", pgrename.LegacyActivityTurn)
 	if b, berr := newBand(r.stride, attempt); berr == nil {
 		at := &attemptLog{r: r, in: in, band: b, attempt: attempt}
-		at.report(ctx, envelope.KindFailed, payload.Lifecycle{
-			Attempt: attempt, Rev: in.Rev, Error: err.Error(), Terminal: true,
-		})
+		at.report(ctx, event.Failed{Attempt: attempt, Rev: in.Rev, Error: err.Error(), Terminal: true})
 	}
 	// A child run from before the rename has a parent from before it, which
 	// is failed the same way when this wakes it.

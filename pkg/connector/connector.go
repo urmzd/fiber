@@ -35,6 +35,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Errors returned by connectors and by the registry.
@@ -80,7 +81,7 @@ type Trigger interface {
 // guessing.
 type Sink interface {
 	Connector
-	Deliver(ctx context.Context, target address.Address, e envelope.Event) error
+	Deliver(ctx context.Context, target address.Address, e event.Envelope) error
 }
 
 // Actor contributes native verbs the agent can call as tools.

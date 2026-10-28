@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -14,13 +14,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
+	"github.com/urmzd/fiber/pkg/event"
+
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/connectors/slack"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/signature"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 const secret = "8f742231b10e8888abcd99yyyzzz85a5"
@@ -408,21 +410,31 @@ func TestARequestArrivingBeforeIngestAsksSlackToRetry(t *testing.T) {
 
 var target = address.MustParse("slack://T01ABCDEF/C02CHANNEL?thread=1700000000.000100")
 
-func event(seq uint64, kind envelope.Kind, payload string) envelope.Event {
-	return envelope.Event{
+func ev(seq uint64, typ, data string) event.Envelope {
+	if data == "" {
+		data = "{}"
+	}
+	body, err := event.Decode(typ, json.RawMessage(data))
+	if err != nil {
+		panic(err)
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("run_1:%d", seq),
+		Source:  "fiber://run/run_1",
+		Type:    typ,
+		Channel: "slack://T01ABCDEF/C02CHANNEL",
+		Tenant:  "acme",
+		Run:     "run_1",
 		Seq:     seq,
-		Topic:   topic.MustParse("agent:docs-bot:run_1"),
-		RunID:   "run_1",
 		Agent:   "docs-bot",
-		Origin:  "slack",
-		Kind:    kind,
-		Payload: []byte(payload),
-		At:      time.Unix(1700000100, 0).Add(time.Duration(seq) * time.Second),
+		Version: "1",
+		Time:    time.Unix(1700000100, 0).Add(time.Duration(seq) * time.Second),
+		Data:    body,
 	}
 }
 
-func textEvent(seq uint64, s string) envelope.Event {
-	return event(seq, envelope.KindText, `{"text":`+jsonString(s)+`}`)
+func textEvent(seq uint64, s string) event.Envelope {
+	return ev(seq, event.TypeText, `{"text":`+jsonString(s)+`}`)
 }
 
 func jsonString(s string) string {
@@ -447,12 +459,12 @@ func TestDeliveringTheSameEventsTwiceKeepsOneEditedMessage(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	events := []envelope.Event{
-		event(1, envelope.KindAccepted, ""),
+	events := []event.Envelope{
+		ev(1, event.TypeAccepted, ""),
 		textEvent(2, "The design doc says "),
 		textEvent(3, "three things."),
-		event(4, envelope.KindCitation, `{"title":"Design doc","uri":"https://example.com/design"}`),
-		event(5, envelope.KindCompleted, ""),
+		ev(4, event.TypeCitation, `{"source":{"document_title":"Design doc","source_uri":"https://example.com/design"}}`),
+		ev(5, event.TypeCompleted, ""),
 	}
 	for range 2 {
 		for _, e := range events {
@@ -489,10 +501,10 @@ func TestOutOfOrderDeliveryDoesNotRenderStaleTextOverFresh(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	for _, e := range []envelope.Event{
+	for _, e := range []event.Envelope{
 		textEvent(3, "second"),
 		textEvent(2, "first "),
-		event(4, envelope.KindCompleted, ""),
+		ev(4, event.TypeCompleted, ""),
 	} {
 		if err := c.Deliver(ctx, target, e); err != nil {
 			t.Fatal(err)

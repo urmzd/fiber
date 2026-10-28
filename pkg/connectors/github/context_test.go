@@ -11,7 +11,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/github"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 func TestContextReadsPRSourcesAndExposesPagination(t *testing.T) {
@@ -97,7 +97,7 @@ func TestCompletedOnlyDeliveryRendersOrdinaryMarkdownOnce(t *testing.T) {
 	fake := github.NewFake()
 	c := sinkConnector(t, fake)
 	payload, _ := json.Marshal(map[string]string{"text": "**Inspected abc.** Tests not run."})
-	e := event(4, envelope.KindCompleted, string(payload))
+	e := ev(4, event.TypeCompleted, string(payload))
 	for range 2 {
 		if err := c.Deliver(context.Background(), target, e); err != nil {
 			t.Fatal(err)

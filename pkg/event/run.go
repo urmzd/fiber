@@ -268,6 +268,13 @@ type Usage struct {
 	UnpricedCalls      int    `json:"unpriced_calls,omitempty"`
 }
 
+// IsZero reports whether nothing was counted.
+func (u Usage) IsZero() bool {
+	return u.ModelCalls == 0 && u.Requests == 0 && u.PromptTokens == 0 && u.CompletionTokens == 0 &&
+		u.CachedPromptTokens == 0 && u.CacheWriteTokens == 0 && u.Cost == nil && len(u.OtherCosts) == 0 &&
+		u.UnpricedCalls == 0
+}
+
 // ContextUsage is how full a run's context was at its latest model call.
 type ContextUsage struct {
 	Model  string `json:"model,omitempty"`

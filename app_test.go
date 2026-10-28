@@ -18,12 +18,12 @@ import (
 	"github.com/urmzd/anchor/pkg/ledger"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
@@ -37,31 +37,31 @@ const postgresEnv = "FIBER_POSTGRES_TEST_URL"
 // inbox is a sink that records what was delivered where.
 type inbox struct {
 	mu   sync.Mutex
-	seen map[string][]envelope.Event
+	seen map[string][]event.Envelope
 }
 
 func (i *inbox) Name() string { return "inbox" }
 
-func (i *inbox) Deliver(_ context.Context, target address.Address, e envelope.Event) error {
+func (i *inbox) Deliver(_ context.Context, target address.Address, e event.Envelope) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.seen == nil {
-		i.seen = map[string][]envelope.Event{}
+		i.seen = map[string][]event.Envelope{}
 	}
 	i.seen[target.String()] = append(i.seen[target.String()], e)
 	return nil
 }
 
-func (i *inbox) at(target string) []envelope.Event {
+func (i *inbox) at(target string) []event.Envelope {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return append([]envelope.Event(nil), i.seen[target]...)
+	return append([]event.Envelope(nil), i.seen[target]...)
 }
 
 // completed reports whether target has received a run's final event.
 func (i *inbox) completed(target string) bool {
 	for _, e := range i.at(target) {
-		if e.Kind == envelope.KindCompleted {
+		if e.Type == event.TypeCompleted {
 			return true
 		}
 	}
@@ -205,8 +205,8 @@ func TestATenantReusingAnotherTenantsTagIDCannotJoinOrRerouteItsRun(t *testing.T
 	awaitDelivered(t, box, globexOut)
 	for _, want := range []struct{ out, tenant, runID string }{{acmeOut, "acme", a.RunID}, {globexOut, "globex", b.RunID}} {
 		for _, e := range box.at(want.out) {
-			if e.Tenant != want.tenant || e.RunID != want.runID {
-				t.Errorf("%s received an event of tenant %q run %q; want only tenant %q run %q", want.out, e.Tenant, e.RunID, want.tenant, want.runID)
+			if e.Tenant != want.tenant || e.Run != want.runID {
+				t.Errorf("%s received an event of tenant %q run %q; want only tenant %q run %q", want.out, e.Tenant, e.Run, want.tenant, want.runID)
 			}
 		}
 	}
@@ -253,11 +253,11 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 
 	// Only now is there a worker.
 	start(t, app.RunExecution)
-	var last envelope.Event
+	var last event.Envelope
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		events := box.at(target.String())
-		if n := len(events); n > 0 && events[n-1].Kind == envelope.KindStopped {
+		if n := len(events); n > 0 && events[n-1].Type == event.TypeStopped {
 			last = events[n-1]
 			break
 		}
@@ -269,8 +269,8 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 	if box.completed(target.String()) {
 		t.Fatal("a stopped run was delivered as completed")
 	}
-	if !strings.Contains(string(last.Payload), "Stopped by a user") || !strings.Contains(string(last.Payload), "slack:U1") {
-		t.Errorf("lifecycle.stopped payload = %s, want the acme request", last.Payload)
+	if !strings.Contains(bodyJSON(last), "Stopped by a user") || !strings.Contains(bodyJSON(last), "slack:U1") {
+		t.Errorf("run.stopped body = %s, want the acme request", bodyJSON(last))
 	}
 	run := awaitEnded(t, app, "acme", acc.RunID)
 	if run.Status != StatusStopped || !run.Status.Terminal() || run.StopReason != "Stopped by a user" || run.StoppedBy != "slack:U1" {
@@ -298,18 +298,14 @@ func TestStatusReadsTheUsageTheRunRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitDelivered(t, box, target.String())
-	var delivered *payload.RunUsage
+	var delivered *event.RunUsage
 	calls := 0
 	for _, e := range box.at(target.String()) {
-		switch e.Kind {
-		case envelope.KindUsageCall:
+		switch b := e.Data.(type) {
+		case event.UsageCall:
 			calls++
-		case envelope.KindCompleted:
-			body, err := payload.Decode[payload.Lifecycle](e)
-			if err != nil {
-				t.Fatal(err)
-			}
-			delivered = body.Usage
+		case event.Completed:
+			delivered = b.Usage
 		}
 	}
 	if calls == 0 || delivered == nil || delivered.Total.ModelCalls != calls {

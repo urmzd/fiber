@@ -131,8 +131,8 @@ func coreExpandsAnMCPGrant(t *testing.T, pool *pgxpool.Pool) {
 		t.Errorf("the MCP server saw %v, want one call with the resolved credential", mcpAuth)
 	}
 	for _, e := range box.at(target.String()) {
-		if strings.Contains(string(e.Payload), secret) {
-			t.Errorf("event %s carries the credential", e.Kind)
+		if strings.Contains(bodyJSON(e), secret) {
+			t.Errorf("event %s carries the credential", e.Type)
 		}
 	}
 }

@@ -59,6 +59,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Name is the address scheme this connector owns.
@@ -372,7 +373,7 @@ func (s agentSet) Lookup(token string) (string, bool) {
 }
 
 // Deliver implements connector.Sink.
-func (c *Connector) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (c *Connector) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	if _, err := c.ref(target); err != nil {
 		return err
 	}

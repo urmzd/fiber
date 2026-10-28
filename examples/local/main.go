@@ -48,9 +48,9 @@ import (
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/topic"
 	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 )
 
@@ -301,8 +301,10 @@ func run() error {
 	// topic rather than the run topic. It will pick up this run and the next
 	// one without ever being told either exists. Section 5 reads its log.
 	watcher := &observer{}
-	watching, err := watcher.watch(ctx, broker, envelope.Subscription{
-		Topic: topic.MustParse("agent:docs-bot"),
+	watching, err := watcher.watch(ctx, broker, bus.Subscription{
+		Tenant:   runtime.TenantOf(tag),
+		Channels: []string{"github://", "cron://"},
+		Types:    []string{"run"},
 	})
 	if err != nil {
 		return fmt.Errorf("observer subscribe: %w", err)
@@ -325,8 +327,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("accept tag: %w", err)
 	}
-	fmt.Printf("  accepted run %s on topic %s, pinned to revision %d\n\n",
-		acc.RunID, acc.Topic, acc.Rev)
+	fmt.Printf("  accepted run %s on channel %s, pinned to revision %d\n\n",
+		acc.RunID, acc.Channel, acc.Rev)
 
 	out, err := app.Runtime().Result(ctx, acc.RunID)
 	if err != nil {
@@ -367,7 +369,7 @@ func run() error {
 	section(5, `A THIRD PARTY CAN LISTEN TO AN AGENT   ← "the Kafka of agents"`)
 
 	if err := await(ctx, "the observer to see the run finish", func() bool {
-		return watcher.sawKind(meshRun, envelope.KindCompleted)
+		return watcher.sawKind(meshRun, event.TypeCompleted)
 	}); err != nil {
 		return err
 	}
@@ -379,7 +381,7 @@ func run() error {
 	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "kind", "payload")
 	fmt.Printf("    %-5s  %-22s  %s\n", "─────", "──────────────────────", "───────")
 	for _, e := range watcher.events(meshRun) {
-		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Kind, summarize(e))
+		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Type, summarize(e))
 	}
 	fmt.Println()
 	fmt.Println("  seq 1 is accepted; 101 opens attempt 1's sequence band; 200 closes it.")
@@ -391,12 +393,9 @@ func run() error {
 
 	cites := 0
 	for _, e := range watcher.events(meshRun) {
-		if e.Kind != envelope.KindCitation {
+		c, ok := e.Data.(event.Citation)
+		if !ok {
 			continue
-		}
-		c, err := decodeCitation(e)
-		if err != nil {
-			return err
 		}
 		cites++
 		fmt.Printf("  %s  seq %d\n", c.Label, e.Seq)
@@ -436,7 +435,7 @@ func run() error {
 	// whose events nobody can see has not done its job — so anchor will
 	// replay the turn. Everything the turn recorded before that point is
 	// already in the ledger, including the ENTIRE agent execution.
-	published.failOnce(cronRun, envelope.KindCompleted)
+	published.failOnce(cronRun, event.TypeCompleted)
 
 	before := exec.modelCalls()
 	fmt.Printf("  model calls so far           %d\n", before)
@@ -451,7 +450,7 @@ func run() error {
 		return fmt.Errorf("nightly run: %w", err)
 	}
 	if err := await(ctx, "the observer to see the nightly run finish", func() bool {
-		return watcher.sawKind(cronRun, envelope.KindCompleted)
+		return watcher.sawKind(cronRun, event.TypeCompleted)
 	}); err != nil {
 		return err
 	}
@@ -461,7 +460,7 @@ func run() error {
 	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "kind", "payload")
 	fmt.Printf("    %-5s  %-22s  %s\n", "─────", "──────────────────────", "───────")
 	for _, e := range watcher.events(cronRun) {
-		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Kind, summarize(e))
+		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Type, summarize(e))
 	}
 
 	after := exec.modelCalls()
@@ -534,7 +533,7 @@ func section(n int, title string) {
 
 // kindList renders the kinds a sink was handed, so "the webhook never saw a
 // delta" is a printed fact rather than an assertion.
-func kindList(kinds map[envelope.Kind]int) string {
+func kindList(kinds map[string]int) string {
 	if len(kinds) == 0 {
 		return "nothing"
 	}

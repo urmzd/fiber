@@ -3,19 +3,25 @@ package bus_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/bus/bustest"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
-func TestMemoryConformance(t *testing.T) {
-	bustest.Run(t, func(t *testing.T, cfg bustest.Config) bus.Bus {
-		return bus.NewMemory(bus.WithRetention(cfg.Retention), bus.WithBacklog(cfg.Backlog))
-	})
+func newMemory(_ *testing.T, cfg bustest.Config) bus.Bus {
+	return bus.NewMemory(bus.WithRetention(cfg.Retention), bus.WithBacklog(cfg.Backlog))
+}
+
+func TestMemoryConformance(t *testing.T) { bustest.Run(t, newMemory) }
+
+func TestRootDoesNotSeeControl(t *testing.T) { bustest.RootDoesNotSeeControl(t, newMemory) }
+
+func TestEmptySubscriptionMatchesNothing(t *testing.T) {
+	bustest.EmptySubscriptionMatchesNothing(t, newMemory)
 }
 
 // The conformance suite tolerates either overflow policy, because a backend
@@ -26,14 +32,14 @@ func TestMemoryOverflowTerminatesTheSubscriberWithItsBufferDrained(t *testing.T)
 	const backlog = 4
 	b := bus.NewMemory(bus.WithRetention(64), bus.WithBacklog(backlog))
 
-	s, err := b.Subscribe(t.Context(), envelope.Subscription{Topic: topic.MustParse("agent:docs-bot")})
+	s, err := b.Subscribe(t.Context(), all)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	defer func() { _ = s.Close() }()
 
 	for seq := uint64(1); seq <= backlog+5; seq++ {
-		if err := b.Publish(t.Context(), event("run_1", seq)); err != nil {
+		if err := b.Publish(t.Context(), runEvent("run_1", seq)); err != nil {
 			t.Fatalf("Publish %d: %v", seq, err)
 		}
 	}
@@ -54,7 +60,7 @@ func TestMemoryOverflowTerminatesTheSubscriberWithItsBufferDrained(t *testing.T)
 		t.Fatalf("Recv after overflow = %v, want bus.ErrSlowConsumer", err)
 	}
 	// The verdict is sticky: the subscriber does not silently resume mid-gap.
-	if err := b.Publish(t.Context(), event("run_1", backlog+6)); err != nil {
+	if err := b.Publish(t.Context(), runEvent("run_1", backlog+6)); err != nil {
 		t.Fatalf("Publish after overflow: %v", err)
 	}
 	if _, err := s.Recv(t.Context()); !errors.Is(err, bus.ErrSlowConsumer) {
@@ -68,7 +74,7 @@ func TestMemoryPublishNeverWaitsOnAStalledSubscriber(t *testing.T) {
 	b := bus.NewMemory(bus.WithRetention(4096), bus.WithBacklog(1))
 
 	for range 8 {
-		s, err := b.Subscribe(t.Context(), envelope.Subscription{Topic: topic.MustParse("agent")})
+		s, err := b.Subscribe(t.Context(), all)
 		if err != nil {
 			t.Fatalf("Subscribe: %v", err)
 		}
@@ -77,7 +83,7 @@ func TestMemoryPublishNeverWaitsOnAStalledSubscriber(t *testing.T) {
 
 	started := time.Now()
 	for seq := uint64(1); seq <= 2000; seq++ {
-		if err := b.Publish(t.Context(), event("run_1", seq)); err != nil {
+		if err := b.Publish(t.Context(), runEvent("run_1", seq)); err != nil {
 			t.Fatalf("Publish %d: %v", seq, err)
 		}
 	}
@@ -94,7 +100,7 @@ func TestMemoryEvictsTheColdestRunOverTheRunBound(t *testing.T) {
 
 	publish := func(runID string, seq uint64) {
 		t.Helper()
-		if err := b.Publish(t.Context(), event(runID, seq)); err != nil {
+		if err := b.Publish(t.Context(), runEvent(runID, seq)); err != nil {
 			t.Fatalf("Publish(%s, %d): %v", runID, seq, err)
 		}
 	}
@@ -103,7 +109,7 @@ func TestMemoryEvictsTheColdestRunOverTheRunBound(t *testing.T) {
 	publish("run_warm", 2) // run_warm is now the most recently published
 	publish("run_hot", 1)  // over the bound: run_cold is dropped
 
-	s, err := b.Subscribe(t.Context(), envelope.Subscription{Topic: topic.MustParse("agent:docs-bot")})
+	s, err := b.Subscribe(t.Context(), all)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -117,7 +123,7 @@ func TestMemoryEvictsTheColdestRunOverTheRunBound(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Recv: %v", err)
 		}
-		seen[e.RunID]++
+		seen[e.Run]++
 	}
 	if seen["run_cold"] != 0 {
 		t.Errorf("run_cold survived eviction: %v", seen)
@@ -127,13 +133,19 @@ func TestMemoryEvictsTheColdestRunOverTheRunBound(t *testing.T) {
 	}
 }
 
-func event(runID string, seq uint64) envelope.Event {
-	return envelope.Event{
-		Seq:    seq,
-		Topic:  topic.MustParse("agent:docs-bot:" + runID),
-		Tenant: "acme",
-		Rev:    1,
-		Origin: "slack",
-		Kind:   envelope.KindText,
+// all is every run event of the tenant the helpers publish in.
+var all = bus.Subscription{Tenant: "acme", Channels: []string{"slack://"}, Types: []string{"run"}}
+
+func runEvent(runID string, seq uint64) event.Envelope {
+	return event.Envelope{
+		ID:      fmt.Sprintf("%s#%d", runID, seq),
+		Source:  "fiber://run/" + runID,
+		Type:    event.TypeText,
+		Channel: "slack://T01/C02",
+		Tenant:  "acme",
+		Run:     runID,
+		Seq:     seq,
+		Agent:   "docs-bot",
+		Data:    event.Text{Text: "hi"},
 	}
 }

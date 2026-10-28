@@ -3,6 +3,7 @@ package webhook_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -11,8 +12,8 @@ import (
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/router"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // An existing webhook route with no kind filter keeps receiving exactly what
@@ -45,22 +46,19 @@ func TestAWebhookIsSentUsageOnlyWhenItsRouteAsksForIt(t *testing.T) {
 				}
 			})
 
-			if err := r.Register("run_1", []envelope.Route{{Target: target, Kinds: tc.kinds}}); err != nil {
+			if err := r.Register("run_1", "acme", "cron://acme/nightly", []envelope.Route{{Target: target, Kinds: tc.kinds}}); err != nil {
 				t.Fatal(err)
 			}
-			tp, err := topic.Run("docs-bot", "run_1")
-			if err != nil {
-				t.Fatal(err)
-			}
-			bodies := map[envelope.Kind]string{
-				envelope.KindText:      `{"text":"hi"}`,
-				envelope.KindUsageCall: `{"accounting_id":"run_1/a1/1","prompt_tokens":1200}`,
-				envelope.KindCompleted: `{"text":"hi"}`,
-			}
-			for i, kind := range []envelope.Kind{envelope.KindText, envelope.KindUsageCall, envelope.KindCompleted} {
-				if err := b.Publish(ctx, envelope.Event{
-					Seq: uint64(i + 1), Topic: tp, RunID: "run_1", Tenant: "acme", Agent: "docs-bot",
-					Kind: kind, Payload: []byte(bodies[kind]), At: time.Now(),
+			for i, body := range []event.Body{
+				event.Text{Text: "hi"},
+				event.UsageCall{AccountingID: "run_1/a1/1", PromptTokens: 1200},
+				event.Completed{Text: "hi"},
+			} {
+				seq := uint64(i + 1)
+				if err := b.Publish(ctx, event.Envelope{
+					ID: fmt.Sprintf("run_1:%d", seq), Source: "fiber://run/run_1", Type: body.Type(),
+					Channel: "cron://acme/nightly", Tenant: "acme", Run: "run_1", Seq: seq,
+					Agent: "docs-bot", Data: body,
 				}); err != nil {
 					t.Fatal(err)
 				}

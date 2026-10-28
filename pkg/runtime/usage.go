@@ -16,6 +16,7 @@ import (
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // # Usage
@@ -72,19 +73,19 @@ type spent struct {
 
 func (s *spent) empty() bool { return len(s.Calls) == 0 && len(s.Children) == 0 }
 
-// observe files a usage chunk the attempt relayed, and ignores every other
-// kind. A body that does not decode is ignored too: it was published as it
-// came, and a malformed report cannot be counted.
-func (s *spent) observe(c agentrt.Chunk) {
-	switch c.Kind {
-	case envelope.KindUsageCall:
+// observe files a usage body the attempt relayed, and ignores every other
+// type. The record keeps the usage in the shape it always had, so the tally
+// keys a call and a child exactly as before.
+func (s *spent) observe(b event.Body) {
+	switch b := b.(type) {
+	case event.UsageCall:
 		var call payload.UsageCall
-		if json.Unmarshal(c.Payload, &call) == nil {
+		if recode(b, &call) == nil {
 			s.Calls = append(s.Calls, call)
 		}
-	case envelope.KindUsageChild:
+	case event.UsageChild:
 		var child payload.UsageChild
-		if json.Unmarshal(c.Payload, &child) == nil {
+		if recode(b, &child) == nil {
 			s.Children = append(s.Children, child)
 		}
 	}
@@ -105,12 +106,14 @@ type meter struct {
 	s  spent
 }
 
-func (m *meter) observe(c agentrt.Chunk) {
-	if c.Kind.Family() != "usage" {
+func (m *meter) observe(b event.Body) {
+	switch b.(type) {
+	case event.UsageCall, event.UsageChild:
+	default:
 		return
 	}
 	m.mu.Lock()
-	m.s.observe(c)
+	m.s.observe(b)
 	m.mu.Unlock()
 }
 

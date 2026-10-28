@@ -7,6 +7,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Probe: Release then Register of the same run must not put two goroutines on
@@ -14,7 +15,7 @@ import (
 func TestProbeReleaseThenRegisterKeepsOneLane(t *testing.T) {
 	gate := make(chan struct{})
 	slack := newSink("slack")
-	slack.hook = func(ctx context.Context, attempt int, e envelope.Event) error {
+	slack.hook = func(ctx context.Context, attempt int, e event.Envelope) error {
 		if e.Seq == 1 {
 			select {
 			case <-gate:
@@ -27,19 +28,19 @@ func TestProbeReleaseThenRegisterKeepsOneLane(t *testing.T) {
 	h := start(t, registry(t, slack))
 
 	routes := []envelope.Route{{Target: address.MustParse(slackTarget)}}
-	if err := h.Register("run_1", routes); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, routes); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	for seq := uint64(1); seq <= 5; seq++ {
-		h.publish(t, event("docs-bot", "run_1", seq, envelope.KindText))
+		h.publish(t, runEvent("docs-bot", "run_1", seq, event.TypeText))
 	}
 	slack.waitTries(t, 1) // lane is inside seq 1
 
 	h.Release("run_1")
-	if err := h.Register("run_1", routes); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, routes); err != nil {
 		t.Fatalf("re-Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_1", 6, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 6, event.TypeText))
 
 	close(gate)
 	got := seqsOf(slack.waitFor(t, 6))
@@ -57,7 +58,7 @@ func TestProbeConcurrentRunRestart(t *testing.T) {
 	gate := make(chan struct{})
 	defer close(gate)
 	slack := newSink("slack")
-	slack.hook = func(ctx context.Context, _ int, _ envelope.Event) error {
+	slack.hook = func(ctx context.Context, _ int, _ event.Envelope) error {
 		select {
 		case <-gate:
 		case <-ctx.Done():
@@ -66,10 +67,10 @@ func TestProbeConcurrentRunRestart(t *testing.T) {
 		return nil
 	}
 	h := start(t, registry(t, slack))
-	if err := h.Register("run_1", []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
+	if err := h.Register("run_1", "acme", runChannel, []envelope.Route{{Target: address.MustParse(slackTarget)}}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	h.publish(t, event("docs-bot", "run_1", 1, envelope.KindText))
+	h.publish(t, runEvent("docs-bot", "run_1", 1, event.TypeText))
 	slack.waitTries(t, 1)
 
 	// Cancel and immediately race a new Run against the shutdown's wg.Wait.

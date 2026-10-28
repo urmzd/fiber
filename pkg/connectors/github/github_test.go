@@ -6,12 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
+	"github.com/urmzd/fiber/pkg/event"
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
@@ -19,7 +22,6 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/signature"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 const secret = "It's a Secret to Everybody"
@@ -393,26 +395,36 @@ func TestThePingGitHubSendsWhenAHookIsCreatedIsAnswered(t *testing.T) {
 
 var target = address.MustParse("github://urmzd/fiber/issues/42")
 
-func event(seq uint64, kind envelope.Kind, payload string) envelope.Event {
-	return envelope.Event{
+func ev(seq uint64, typ, data string) event.Envelope {
+	if data == "" {
+		data = "{}"
+	}
+	body, err := event.Decode(typ, json.RawMessage(data))
+	if err != nil {
+		panic(err)
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("run_1:%d", seq),
+		Source:  "fiber://run/run_1",
+		Type:    typ,
+		Channel: "github://urmzd/fiber",
+		Tenant:  "acme",
+		Run:     "run_1",
 		Seq:     seq,
-		Topic:   topic.MustParse("agent:docs-bot:run_1"),
-		RunID:   "run_1",
 		Agent:   "docs-bot",
-		Origin:  "github",
-		Kind:    kind,
-		Payload: []byte(payload),
-		At:      time.Unix(1700000100, 0).Add(time.Duration(seq) * time.Second),
+		Version: "1",
+		Time:    time.Unix(1700000100, 0).Add(time.Duration(seq) * time.Second),
+		Data:    body,
 	}
 }
 
-func textEvent(seq uint64, s string) envelope.Event {
+func textEvent(seq uint64, s string) event.Envelope {
 	b, err := json.Marshal(s)
 	if err != nil {
 		t := &testing.T{}
 		t.Fatal(err)
 	}
-	return event(seq, envelope.KindText, `{"text":`+string(b)+`}`)
+	return ev(seq, event.TypeText, `{"text":`+string(b)+`}`)
 }
 
 func sinkConnector(t *testing.T, api github.API) *github.Connector {
@@ -429,12 +441,12 @@ func TestDeliveringTheSameEventsTwiceKeepsOneEditedComment(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	events := []envelope.Event{
-		event(1, envelope.KindAccepted, ""),
+	events := []event.Envelope{
+		ev(1, event.TypeAccepted, ""),
 		textEvent(2, "The retry path posts twice "),
 		textEvent(3, "because the handle was lost."),
-		event(4, envelope.KindCitation, `{"title":"sink.go","uri":"https://github.com/urmzd/fiber/blob/main/sink.go"}`),
-		event(5, envelope.KindCompleted, ""),
+		ev(4, event.TypeCitation, `{"source":{"document_title":"sink.go","source_uri":"https://github.com/urmzd/fiber/blob/main/sink.go"}}`),
+		ev(5, event.TypeCompleted, ""),
 	}
 	for range 2 {
 		for _, e := range events {
@@ -471,7 +483,7 @@ func TestOutOfOrderDeliveryDoesNotRenderStaleTextOverFresh(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	for _, e := range []envelope.Event{textEvent(3, "second"), textEvent(2, "first "), event(4, envelope.KindCompleted, "")} {
+	for _, e := range []event.Envelope{textEvent(3, "second"), textEvent(2, "first "), ev(4, event.TypeCompleted, "")} {
 		if err := c.Deliver(ctx, target, e); err != nil {
 			t.Fatal(err)
 		}
