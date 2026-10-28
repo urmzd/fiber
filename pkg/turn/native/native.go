@@ -270,8 +270,8 @@ type Result struct {
 
 // Runner runs turns of one pinned revision.
 //
-// Construction validates everything a turn needs — the provider exists and is
-// configured, every approval names a granted tool — so a run fails at accept
+// Construction validates everything a turn needs (the provider exists and is
+// configured, every approval names a granted tool), so a run fails at accept
 // time with a clear reason instead of halfway through a Slack thread. A granted
 // tool this process cannot resolve is the exception: it is dropped, the model
 // is told, and the operator is logged the reason (see Unavailable), unless the

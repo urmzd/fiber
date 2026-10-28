@@ -11,13 +11,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	saigetypes "github.com/urmzd/saige/agent/types"
-
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/envelope"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // renderer prints a run's events as they arrive.

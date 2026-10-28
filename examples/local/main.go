@@ -42,7 +42,6 @@ import (
 	"time"
 
 	"github.com/urmzd/anchor/pkg/worker"
-	ragtypes "github.com/urmzd/saige/rag/types"
 
 	"github.com/urmzd/fiber"
 	"github.com/urmzd/fiber/pkg/address"
@@ -52,6 +51,7 @@ import (
 	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/topic"
+	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 )
 
 // tenant is the authorization scope. It comes from the caller's credential in

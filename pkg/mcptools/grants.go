@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"sync"
 
-	saigetypes "github.com/urmzd/saige/agent/types"
-
 	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // ErrClosed reports an expansion after Grants.Close.

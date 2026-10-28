@@ -83,8 +83,8 @@ func (t *Translator) maps() {
 // Delta maps one saige delta to an event body. The second result reports
 // whether this delta becomes an event at all.
 //
-// Most deltas do not. saige's delta set is a rendering protocol — part starts
-// and ends, token usage, marker prompts, handoffs — while the catalog is a
+// Most deltas do not. saige's delta set is a rendering protocol (part starts
+// and ends, token usage, marker prompts, handoffs), while the catalog is a
 // published contract. Rather than invent types for the rest, this package
 // publishes the ones that mean something to a subscriber and drops the
 // framing:

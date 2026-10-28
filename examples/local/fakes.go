@@ -20,15 +20,14 @@ import (
 	"sync"
 	"sync/atomic"
 
-	saigetypes "github.com/urmzd/saige/agent/types"
-	ragtypes "github.com/urmzd/saige/rag/types"
-
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/runtime"
+	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // ── the transcript ──────────────────────────────────────────────────

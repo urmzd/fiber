@@ -30,7 +30,7 @@ type Access = turn.Policy
 //
 // Rev is the value a run pins and an event reports. Hash is the content hash of
 // the spec, which lets a replaying run assert that the definition it is about
-// to execute is the one it originally pinned — an immutable revision whose
+// to execute is the one it originally pinned. An immutable revision whose
 // content changed is corruption, and it must fail loudly rather than quietly
 // run something else.
 type Revision struct {

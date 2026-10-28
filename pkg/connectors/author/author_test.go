@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/saige/agent/agenttest"
-
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
@@ -18,6 +16,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/author"
 	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 )
 
 // runs is the test's run ledger: which principal each run acts as.

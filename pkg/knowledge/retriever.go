@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	ragtypes "github.com/urmzd/saige/rag/types"
+	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 )
 
 // Retriever makes a Store the retrieval source for one agent's turn.

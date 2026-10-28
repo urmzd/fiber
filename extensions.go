@@ -11,7 +11,6 @@ import (
 	dqueue "github.com/urmzd/anchor/pkg/queue"
 	"github.com/urmzd/anchor/pkg/worker"
 	"github.com/urmzd/playscape/pkg/metrics"
-	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
@@ -27,6 +26,7 @@ import (
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // options are everything New is given: what a program built on fiber adds to

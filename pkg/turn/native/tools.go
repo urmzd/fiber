@@ -39,8 +39,8 @@ var ErrNoSuchTool = fmt.Errorf("%w: no such tool", ErrInvalid)
 //
 // The target is where the action lands: the surface the tag came from, or a
 // route's destination. It is bound here rather than passed by the model,
-// because an action's target is an authorization fact — the tag arrived on that
-// surface — and a model that could name its own target could post anywhere the
+// because an action's target is an authorization fact (the tag arrived on that
+// surface), and a model that could name its own target could post anywhere the
 // credential reaches.
 //
 // after is called for every action that runs, successfully or not. pkg/runtime

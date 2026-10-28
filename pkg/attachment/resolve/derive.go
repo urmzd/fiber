@@ -12,7 +12,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/blob"
-	"github.com/urmzd/saige/agent/types"
+	types "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // Input is one file as an Ingestor sees it.

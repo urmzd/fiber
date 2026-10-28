@@ -17,7 +17,6 @@ import (
 	"github.com/urmzd/playscape/pkg/task"
 	"github.com/urmzd/playscape/pkg/tool"
 	"github.com/urmzd/playscape/pkg/workspace"
-	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
@@ -26,6 +25,7 @@ import (
 	"github.com/urmzd/fiber/pkg/envelope"
 
 	"github.com/urmzd/fiber/pkg/attachment"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // Sandbox defaults.
