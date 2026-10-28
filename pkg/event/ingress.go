@@ -173,9 +173,11 @@ type GitHubPullReadyForReview struct {
 }
 
 // GitHubReviewRequested is the body of github.pull_request.review_requested.v1.
+// Reviewer is the agent the review was requested from, when it is one.
 type GitHubReviewRequested struct {
 	Request
 	GitHubRef
+	Reviewer string `json:"reviewer,omitempty"`
 }
 
 // GitHubPullSynchronize is the body of github.pull_request.synchronize.v1.
@@ -224,10 +226,12 @@ type JiraIssueCreated struct {
 }
 
 // JiraIssueAssigned is the body of jira.issue.assigned.v1: the issue was
-// handed to an agent, and nobody typed a message.
+// handed to an agent, and nobody typed a message. Agent is that agent, when
+// the host knows it.
 type JiraIssueAssigned struct {
 	Request
 	JiraRef
+	Agent string `json:"agent,omitempty"`
 }
 
 // CronTick is the body of cron.tick.v1: one firing of a schedule.
@@ -555,4 +559,30 @@ func init() {
 	} {
 		Register(e)
 	}
+}
+
+// Addressees returns the agents an event names directly: the mentions of its
+// request, the agent a review was requested from, the agent an issue was
+// assigned to. A body that names nobody returns nil.
+func Addressees(b Body) []string {
+	r, _ := RequestOf(b)
+	out := append([]string(nil), r.Mentions...)
+	switch v := b.(type) {
+	case GitHubReviewRequested:
+		if v.Reviewer != "" {
+			out = append(out, v.Reviewer)
+		}
+	case JiraIssueAssigned:
+		if v.Agent != "" {
+			out = append(out, v.Agent)
+		}
+	}
+	return out
+}
+
+// DirectMessage reports whether an event arrived in a one-to-one
+// conversation with the agent, such as a Slack DM.
+func DirectMessage(b Body) bool {
+	m, ok := b.(MessagePosted)
+	return ok && m.Slack != nil && m.Slack.ChannelType == "im"
 }

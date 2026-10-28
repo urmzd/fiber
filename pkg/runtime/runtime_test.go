@@ -471,11 +471,11 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 	second := tag("docs-bot", "Ev-shared", "globex's question")
 	second.Tenant = "globex"
 
-	a, err := h.rt.Accept(context.Background(), first)
+	a, err := h.rt.AcceptTag(context.Background(), first)
 	if err != nil {
 		t.Fatalf("accept for acme: %v", err)
 	}
-	b, err := h.rt.Accept(context.Background(), second)
+	b, err := h.rt.AcceptTag(context.Background(), second)
 	if err != nil {
 		t.Fatalf("accept for globex: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 	}
 
 	// A redelivery within a tenant still joins that tenant's run.
-	again, err := h.rt.Accept(context.Background(), first)
+	again, err := h.rt.AcceptTag(context.Background(), first)
 	if err != nil || again.RunID != a.RunID {
 		t.Errorf("acme's redelivery got run %q, %v; want %q", again.RunID, err, a.RunID)
 	}
@@ -537,7 +537,7 @@ func TestLifecycleOrderOnSuccess(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev1", "update the docs"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev1", "update the docs"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestEveryEventCarriesRunIdentity(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev2", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev2", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -648,7 +648,7 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev6", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev6", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -701,13 +701,13 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 	h.specs.revise("docs-bot", "revision 1 instructions")
 
 	ctx := context.Background()
-	first, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-dup", "hello"))
+	first, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-dup", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
 	h.specs.revise("docs-bot", "revision 2 instructions")
 
-	second, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-dup", "hello"))
+	second, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-dup", "hello"))
 	if err != nil {
 		t.Fatalf("Accept (redelivery): %v", err)
 	}
@@ -770,7 +770,7 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-fail", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-fail", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -823,7 +823,7 @@ func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) 
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-retry", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-retry", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -880,7 +880,7 @@ func TestReplayingAnAttemptRepublishesTheIdenticalSequence(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-replay", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-replay", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -977,7 +977,7 @@ func TestAParkedRunPublishesParked(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-park", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-park", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-hash", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-hash", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -1049,7 +1049,7 @@ func TestAnUnknownAgentIsRefusedAtAcceptTime(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor(""))
-	if _, err := h.rt.Accept(context.Background(), tag("nobody", "Ev-x", "hello")); err == nil {
+	if _, err := h.rt.AcceptTag(context.Background(), tag("nobody", "Ev-x", "hello")); err == nil {
 		t.Fatal("Accept succeeded for an unknown agent")
 	}
 	if got := len(h.bus.all()); got != 0 {
@@ -1076,7 +1076,7 @@ func TestAMalformedTagIsRefused(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := h.rt.Accept(context.Background(), tc.tag); !errors.Is(err, envelope.ErrInvalid) {
+			if _, err := h.rt.AcceptTag(context.Background(), tc.tag); !errors.Is(err, envelope.ErrInvalid) {
 				t.Fatalf("Accept returned %v, want an envelope.ErrInvalid", err)
 			}
 		})
@@ -1137,7 +1137,7 @@ func TestAPublishFailureFailsTheAttempt(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-pub", "hello"))
+	acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", "Ev-pub", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -1195,5 +1195,27 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("timed out waiting for the run to reach the expected state")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// A run key is "r" and 32 hex digits, stable for one (tenant, event,
+// subscriber), different for every other subscriber, and never a RunID.
+func TestRunKeyIsDomainSeparatedPerSubscriber(t *testing.T) {
+	a := runtime.RunKey("acme", "Ev-1", "docs-bot")
+	if len(a) != 33 || a[0] != 'r' || strings.Trim(a[1:], "0123456789abcdef") != "" {
+		t.Fatalf("RunKey = %q; want r and 32 hex digits", a)
+	}
+	if runtime.RunKey("acme", "Ev-1", "docs-bot") != a {
+		t.Fatal("RunKey is not deterministic")
+	}
+	for _, other := range []string{
+		runtime.RunKey("acme", "Ev-1", "reviewer"),
+		runtime.RunKey("globex", "Ev-1", "docs-bot"),
+		runtime.RunKey("acme", "Ev-1d", "ocs-bot"),
+		runtime.RunID("acme", "Ev-1"),
+	} {
+		if other == a {
+			t.Fatalf("%q collides with RunKey(acme, Ev-1, docs-bot)", other)
+		}
 	}
 }

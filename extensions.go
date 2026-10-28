@@ -22,6 +22,7 @@ import (
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -55,6 +56,7 @@ type options struct {
 	Ledger      Ledger
 	Queue       dqueue.Queue
 	Threads     thread.Store
+	Memberships membership.Store
 	Knowledge   knowledge.Store
 	Embedder    knowledge.Embedder
 	Blobs       blob.Store

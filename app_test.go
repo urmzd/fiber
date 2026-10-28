@@ -25,6 +25,7 @@ import (
 	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -451,5 +452,56 @@ func TestIndexGroundsAgentsInFiles(t *testing.T) {
 	hits, err := app.Knowledge().Search(ctx, "acme", knowledge.Query{Text: "release workflow", Sources: []string{"handbook"}})
 	if err != nil || len(hits) == 0 {
 		t.Fatalf("Search = %v, %v", hits, err)
+	}
+}
+
+// An event published twice wakes each member once: the redelivery joins the
+// run the first delivery started, and the run answers at the event's source.
+func TestRedeliveredEventJoinsItsRun(t *testing.T) {
+	box := &inbox{}
+	app := newApp(t, WithTenant("acme"), WithConnector(box))
+	start(t, app.Run)
+	ctx := context.Background()
+	if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
+		t.Fatal(err)
+	}
+	const channel = "slack://T1/C1"
+	if err := app.Memberships().Join(ctx, "acme", channel, "docs-bot", membership.Rule{Types: []string{"message"}}); err != nil {
+		t.Fatal(err)
+	}
+	e := event.Envelope{
+		ID: "Ev-redelivered", Source: "inbox://acme/out", Type: event.TypeMessagePosted, Channel: channel,
+		Time: time.Now().UTC(), Data: event.MessagePosted{Request: event.Request{Text: "explain", Mentions: []string{"docs-bot"}}},
+	}
+	for range 2 {
+		if err := app.Publish(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	awaitDelivered(t, box, "inbox://acme/out")
+	runID := runtime.RunKey("acme", e.ID, "docs-bot")
+	run := awaitEnded(t, app, "acme", runID)
+	if run.Agent != "docs-bot" || run.Channel != channel {
+		t.Fatalf("run = %+v", run)
+	}
+	// The bus keeps an event once by its id, so a redelivery is what a
+	// resubscribe replays: handed to the dispatcher again, it joins the run.
+	e.Tenant = "acme"
+	accs, err := app.Dispatcher().Handle(ctx, e)
+	if err != nil || len(accs) != 1 || accs[0].RunID != runID {
+		t.Fatalf("redelivery = %v, %v; want run %s again", accs, err, runID)
+	}
+	if again := awaitEnded(t, app, "acme", runID); !again.CreatedAt.Equal(run.CreatedAt) {
+		t.Fatalf("the redelivery replaced the run: created %v, then %v", run.CreatedAt, again.CreatedAt)
+	}
+	runs := map[string]bool{}
+	for _, got := range box.at("inbox://acme/out") {
+		runs[got.Run] = true
+		if got.Hops != 1 {
+			t.Errorf("%s carries %d hops; want the trigger's plus one", got.Type, got.Hops)
+		}
+	}
+	if len(runs) != 1 || !runs[runID] {
+		t.Fatalf("delivered runs %v; want only %s", runs, runID)
 	}
 }

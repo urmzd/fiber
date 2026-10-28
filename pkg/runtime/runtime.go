@@ -10,9 +10,10 @@
 //
 // # Idempotency
 //
-// A run's id is the tag's id (see RunID). Slack retries its event, GitHub
-// redelivers its webhook, a cron fires twice on a leader flap — and anchor
-// treats starting a run that already exists as a no-op returning the existing
+// A run accepted from an event is keyed by the event and its subscriber (see
+// RunKey); a tag's run, by the tag's id (see RunID). Slack retries its event,
+// GitHub redelivers its webhook, a cron fires twice on a leader flap, and
+// anchor treats starting a run that already exists as a no-op returning the existing
 // run. A redelivery therefore JOINS the run it duplicated instead of starting a
 // second one, and no component downstream has to deduplicate anything.
 //
@@ -225,6 +226,10 @@ type Input struct {
 	Trigger event.Envelope `json:"trigger"`
 	// Subscriber is the agent the run is for.
 	Subscriber string `json:"subscriber"`
+	// Run is the run id, RunKey of the trigger and subscriber, for a run
+	// accepted from an event. Empty for a tag or child run, whose id is
+	// RunID(tenant, trigger id).
+	Run string `json:"run,omitempty"`
 	// Pin is the definition pinned at accept time. It never changes.
 	Pin definition.Pin `json:"pin"`
 	// HistorySeq is the head of the tag's thread journal, pinned at accept
@@ -467,6 +472,7 @@ type Runtime struct {
 	roles       Roles
 	reader      RecordReader
 	childRuns   bool
+	egress      Egress
 
 	registry *run.Registry
 	turn     *anchor.ActivityFn[Input, Output]
@@ -609,85 +615,132 @@ func New(client *anchor.Client, defs Definitions, b Bus, exec Executor, opts ...
 //	w := worker.New(ledger, queue, worker.WithRegistry(rt.Registry()))
 func (r *Runtime) Registry() *run.Registry { return r.registry }
 
-// Accept pins a definition to the tag and durably submits the run.
+// Egress binds a run to where its events are delivered. Accept calls it
+// before it publishes anything, so the first event of the run has somewhere
+// to go. tenant and channel are where the run publishes.
+type Egress interface {
+	Bind(ctx context.Context, runID, tenant, channel string, trigger event.Envelope) error
+}
+
+// WithEgress sets what Accept binds a run's delivery with. Without it a run
+// accepted from an event publishes to the bus and is delivered nowhere.
+// AcceptTag never calls it: a tag's caller registers the tag's own routes.
+func WithEgress(e Egress) Option {
+	return func(r *Runtime) { r.egress = e }
+}
+
+// Accept starts the run of subscriber answering trigger, and is what the
+// dispatcher calls for each member an event wakes. The run id is
+// RunKey(tenant, trigger id, subscriber), so a redelivered event joins the
+// run it started and two members of one channel get two runs.
 //
 // Order matters, and it is not the obvious one. The definition is resolved
-// first, so a tag naming an unknown agent is refused rather than accepted and
-// then failed. The accepted event is published SECOND, before the run is
-// submitted, because submitting makes the run claimable and a fast worker
-// would otherwise publish started first, and the bus treats a sequence at or
-// below a run's high-water mark as an already-seen event, so an accepted event
-// that lost that race would be dropped rather than delivered late. Events must
-// reach the bus in ascending sequence order, and sequence 1 belongs to
-// accepted.
+// first, so an event for an unknown agent is refused rather than accepted and
+// then failed. Then the run is bound to its egress, then the accepted event
+// (sequence 1) is published, and only then is the run submitted: submitting
+// makes the run claimable, and a fast worker would otherwise publish started
+// first, and the bus treats a sequence at or below a run's high-water mark as
+// already seen, so an accepted event that lost that race would be dropped
+// rather than delivered late.
 //
-// The cost of that order is a tag that is announced and then fails to submit. It
-// is the cheaper failure: the caller gets the error synchronously and retries the
-// same tag, which lands on the same run id and the same sequence 1, so the
-// announcement it already made is the announcement it makes again.
+// The cost of that order is a run that is announced and then fails to submit.
+// It is the cheaper failure: the caller gets the error synchronously and
+// retries the same event, which lands on the same run id and the same
+// sequence 1.
 //
-// Accept is idempotent on Tag.ID: a redelivery cannot change what the run
-// pinned, because anchor returns the existing run untouched and the bus keeps
-// the first write of sequence 1. The same holds for the history pin: a
-// redelivery reads a newer head and anchor discards it.
-//
-// The tag is read as its trigger event (TriggerOf) before anything is pinned:
-// the run's input holds the event, never the tag.
-func (r *Runtime) Accept(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
+// Accept is idempotent on (tenant, event id, subscriber): a redelivery cannot
+// change what the run pinned, because anchor returns the existing run
+// untouched and the bus keeps the first write of sequence 1. The same holds
+// for the history pin.
+func (r *Runtime) Accept(ctx context.Context, trigger event.Envelope, subscriber string) (Acceptance, error) {
+	if err := trigger.Validate(); err != nil {
+		return Acceptance{}, fmt.Errorf("runtime: accept: %w: %w", ErrInvalid, err)
+	}
+	if event.IsControl(trigger.Channel) {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: a control request starts no run", trigger.ID, ErrInvalid)
+	}
+	if subscriber == "" {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: no subscriber", trigger.ID, ErrInvalid)
+	}
+	runID := RunKey(trigger.Tenant, trigger.ID, subscriber)
+	in := Input{Trigger: trigger, Subscriber: subscriber, Run: runID}
+	return r.start(ctx, in, in.Tag(), "", true)
+}
+
+// AcceptTag pins a definition to the tag and durably submits the run. It is
+// the bridge for callers that still raise tags; its run id is RunID(tenant,
+// tag id), and it never binds egress, because the tag's caller registers the
+// tag's own routes. The tag is read as its trigger event (TriggerOf) before
+// anything is pinned: the run's input holds the event, never the tag.
+func (r *Runtime) AcceptTag(ctx context.Context, tag envelope.Tag) (Acceptance, error) {
 	return r.accept(ctx, tag, nil, "")
 }
 
-// accept is Accept for a run that may be another run's child. A child runs
-// the version its parent pinned for it.
+// accept is AcceptTag for a run that may be another run's child. A child
+// runs the version its parent pinned for it.
 func (r *Runtime) accept(ctx context.Context, tag envelope.Tag, parent *ParentRef, version string) (Acceptance, error) {
 	if err := tag.Validate(); err != nil {
 		return Acceptance{}, fmt.Errorf("runtime: accept: %w", err)
 	}
-	if tag.Agent == topic.ControlName {
-		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", tag.ID, ErrInvalid, tag.Agent)
+	in := Input{Trigger: TriggerOf(tag), Subscriber: tag.Agent, Parent: parent}
+	return r.start(ctx, in, tag, version, false)
+}
+
+// start resolves and pins the definition and history of in, then binds,
+// announces and submits the run, in that order (see Accept). tag is what the
+// thread journal reads the run as.
+func (r *Runtime) start(ctx context.Context, in Input, tag envelope.Tag, version string, bind bool) (Acceptance, error) {
+	id := in.Trigger.ID
+	if in.Subscriber == topic.ControlName {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w: %q is the control namespace, not an agent", id, ErrInvalid, in.Subscriber)
 	}
-	runID := RunID(tag.Tenant, tag.ID)
-	if _, err := topic.Run(tag.Agent, runID); err != nil {
-		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
+	runID := in.runID()
+	if _, err := topic.Run(in.Subscriber, runID); err != nil {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", id, err)
 	}
 	var (
 		pin definition.Pin
 		err error
 	)
 	if version != "" {
-		pin, err = r.defs.ResolveAt(ctx, tag.Tenant, tag.Agent, version)
+		pin, err = r.defs.ResolveAt(ctx, in.Trigger.Tenant, in.Subscriber, version)
 	} else {
-		pin, err = r.defs.Resolve(ctx, tag.Tenant, tag.Agent)
+		pin, err = r.defs.Resolve(ctx, in.Trigger.Tenant, in.Subscriber)
 	}
 	if err != nil {
-		return Acceptance{}, fmt.Errorf("runtime: accept %s: resolve agent %q: %w", tag.ID, tag.Agent, err)
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: resolve agent %q: %w", id, in.Subscriber, err)
 	}
+	in.Pin = pin
 
 	// The second pin. It is taken here, next to the definition's, because it
 	// is the same kind of fact: something that keeps moving, read once.
-	seq, err := r.pinHistory(ctx, tag)
-	if err != nil {
-		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
+	if in.HistorySeq, err = r.pinHistory(ctx, tag, runID); err != nil {
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: %w", id, err)
 	}
 
-	in := Input{Trigger: TriggerOf(tag), Subscriber: tag.Agent, Pin: pin, HistorySeq: seq, Parent: parent}
-	acc := Acceptance{RunID: runID, Version: pin.Version, Tenant: TenantOf(tag), Channel: ChannelOf(tag), AcceptedAt: r.now().UTC()}
+	tenant := busTenant(in.Trigger.Tenant)
+	acc := Acceptance{RunID: runID, Version: pin.Version, Tenant: tenant, Channel: in.Trigger.Channel, AcceptedAt: r.now().UTC()}
 
+	if bind && r.egress != nil {
+		if err := r.egress.Bind(ctx, runID, tenant, in.Trigger.Channel, in.Trigger); err != nil {
+			return Acceptance{}, fmt.Errorf("runtime: accept %s: bind egress: %w", id, err)
+		}
+	}
 	e := r.event(in, SeqAccepted, event.Accepted{})
 	if err := r.bus.Publish(ctx, e); err != nil {
-		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", tag.ID, err)
+		return Acceptance{}, fmt.Errorf("runtime: accept %s: publish accepted: %w", id, err)
 	}
 
 	startOpts := []anchor.StartOption{anchor.WithRunID(runID)}
-	if parent != nil {
-		startOpts = append(startOpts, anchor.WithParent(parent.RunID))
+	if in.Parent != nil {
+		startOpts = append(startOpts, anchor.WithParent(in.Parent.RunID))
 	}
 	if _, err := anchor.Start(ctx, r.client, r.turn, in, startOpts...); err != nil {
 		// Start returns a handle alongside an enqueue failure: the run is
-		// durable and the janitor will drive it anyway. Report the error —
-		// the caller asked for an acknowledgement it did not fully get — but
-		// return the acceptance too, so it can observe the run it now owns.
-		return acc, fmt.Errorf("runtime: accept %s: %w", tag.ID, err)
+		// durable and the janitor will drive it anyway. Report the error,
+		// since the caller asked for an acknowledgement it did not fully get,
+		// but return the acceptance too, so it can observe the run it now owns.
+		return acc, fmt.Errorf("runtime: accept %s: %w", id, err)
 	}
 	return acc, nil
 }
@@ -1051,7 +1104,7 @@ func pinnedOf(l definition.Loaded) agentrt.Revision {
 // of its thread's journal, after the thread has been reconciled with its
 // surface. It is called once, by Accept, and is the only place this package
 // asks a journal where it ends.
-func (r *Runtime) pinHistory(ctx context.Context, tag envelope.Tag) (uint64, error) {
+func (r *Runtime) pinHistory(ctx context.Context, tag envelope.Tag, runID string) (uint64, error) {
 	if r.threads == nil {
 		return 0, nil
 	}
@@ -1068,7 +1121,7 @@ func (r *Runtime) pinHistory(ctx context.Context, tag envelope.Tag) (uint64, err
 		}
 		if err := thread.Reconcile(ctx, r.threads, r.lister, key, tag.Source, skip...); err != nil {
 			r.logger.Warn("fiber/runtime: could not reconcile the thread with its surface; pinning what the journal holds",
-				"run_id", RunID(tag.Tenant, tag.ID), "thread", key.String(), "error", err)
+				"run_id", runID, "thread", key.String(), "error", err)
 		}
 	}
 	seq, err := r.threads.Head(ctx, key)
@@ -1263,6 +1316,22 @@ func attemptOf(ctx context.Context) int {
 		return 1
 	}
 	return info.Attempt
+}
+
+// RunKey is the run identity of one subscriber answering one event within
+// one tenant: "r" and 32 hex digits of a domain-separated sha256 over the
+// three, each length-prefixed. A redelivered event keeps its id and lands on
+// the same run; two subscribers woken by one event get two runs. The domain
+// keeps a key from ever equalling a RunID.
+func RunKey(tenant, eventID, subscriber string) string {
+	h := sha256.New()
+	h.Write([]byte("fiber.run.key.v1\x00"))
+	var n [binary.MaxVarintLen64]byte
+	for _, field := range []string{tenant, eventID, subscriber} {
+		h.Write(n[:binary.PutUvarint(n[:], uint64(len(field)))])
+		h.Write([]byte(field))
+	}
+	return "r" + hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // RunID is the run identity a tag maps to within one tenant.

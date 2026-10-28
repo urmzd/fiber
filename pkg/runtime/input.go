@@ -42,7 +42,12 @@ func TriggerOf(tag envelope.Tag) event.Envelope {
 }
 
 // runID is the run this input belongs to.
-func (in Input) runID() string { return RunID(in.Trigger.Tenant, in.Trigger.ID) }
+func (in Input) runID() string {
+	if in.Run != "" {
+		return in.Run
+	}
+	return RunID(in.Trigger.Tenant, in.Trigger.ID)
+}
 
 // Tag is the trigger read back as the tag TriggerOf made it from. The thread
 // journal, the surface reconciler and the answer rules still speak tags.

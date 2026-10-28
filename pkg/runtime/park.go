@@ -754,7 +754,7 @@ func (r *Runtime) childQuestion(tenant, parentRunID string) func(context.Context
 // starts a run of its own for a delegation and waits on it calls it with the
 // context it was given:
 //
-//	acc, err := rt.Accept(ctx, childTag)
+//	acc, err := rt.AcceptTag(ctx, childTag)
 //	...
 //	err = runtime.WatchChildQuestions(ctx, acc.RunID)
 //	out, err := rt.Result(ctx, acc.RunID)

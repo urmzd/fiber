@@ -24,6 +24,7 @@ import (
 	"github.com/urmzd/playscape/pkg/tool"
 	"github.com/urmzd/playscape/pkg/workspace"
 
+	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/attachment/resolve"
@@ -32,10 +33,13 @@ import (
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/author"
 	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/dispatch"
 	"github.com/urmzd/fiber/pkg/durable"
 	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/router"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
@@ -64,12 +68,14 @@ type App struct {
 	defs    *definition.Resolver
 	docs    knowledge.Store
 	threads thread.Store
+	members membership.Store
 	tools   toolprovider.Store
 	blobs   blob.Store
 	broker  bus.Bus
 	sinks   *connector.Registry
 	deliver *router.Router
 	rt      *runtime.Runtime
+	disp    *dispatch.Dispatcher
 	exec    runtime.Executor
 	ledger  Ledger
 	queue   dqueue.Queue
@@ -150,6 +156,10 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 	if a.threads, err = newThreads(ctx, pool, o); err != nil {
 		return fail(err)
 	}
+	// Who is a member of which channel: what decides who an event wakes.
+	if a.members, err = newMemberships(ctx, pool, o); err != nil {
+		return fail(err)
+	}
 	// External tools: the MCP servers a tenant may reach and the tools an
 	// admin accepted from each.
 	if a.tools, err = newToolProviders(ctx, pool, o); err != nil {
@@ -211,6 +221,9 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 		runtime.WithStopLedger(a.ledger),
 		// An answered or stopped question wakes its run at once.
 		runtime.WithWaker(a.queue),
+		// A run accepted from an event answers in place, at the event's
+		// source, bound before its first event is published.
+		runtime.WithEgress(egress{a.deliver}),
 	}
 	if pool != nil && o.Ledger == nil {
 		rtOpts = append(rtOpts, runtime.WithRecordReader(durable.NewRecords(pool)))
@@ -222,7 +235,22 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 	if a.rt, err = runtime.New(anchor.New(a.ledger, a.queue), a.defs, a.broker, a.exec, rtOpts...); err != nil {
 		return fail(fmt.Errorf("fiber: runtime: %w", err))
 	}
+	if a.disp, err = dispatch.New(a.broker, a.members, a.rt, dispatch.WithLogger(a.log)); err != nil {
+		return fail(fmt.Errorf("fiber: dispatch: %w", err))
+	}
 	return a, nil
+}
+
+// egress binds a run accepted from an event to the router: it answers at the
+// event's source when the source is an address a sink can render to.
+type egress struct{ r *router.Router }
+
+func (e egress) Bind(_ context.Context, runID, tenant, channel string, trigger event.Envelope) error {
+	target, err := address.Parse(trigger.Source)
+	if err != nil {
+		return nil
+	}
+	return e.r.Register(runID, tenant, channel, []envelope.Route{{Target: target}})
 }
 
 // Close releases what New made: MCP sessions and a workspace New created.
@@ -304,6 +332,21 @@ func newThreads(ctx context.Context, pool *pgxpool.Pool, o options) (thread.Stor
 	store := thread.NewPostgres(pool)
 	if err := store.Migrate(ctx); err != nil {
 		return nil, migrateErr("threads", err)
+	}
+	return store, nil
+}
+
+// newMemberships picks the membership store.
+func newMemberships(ctx context.Context, pool *pgxpool.Pool, o options) (membership.Store, error) {
+	if o.Memberships != nil {
+		return o.Memberships, nil
+	}
+	if pool == nil {
+		return membership.NewMemory(), nil
+	}
+	store := membership.NewPostgres(pool)
+	if err := store.Migrate(ctx); err != nil {
+		return nil, migrateErr("memberships", err)
 	}
 	return store, nil
 }
@@ -461,7 +504,8 @@ func (a *App) principal(ctx context.Context, runID string) (author.Principal, er
 }
 
 // Invoke accepts a tag: it registers the tag's routes with the router and
-// then accepts the run durably. It returns before any inference.
+// then accepts the run durably. It returns before any inference. It is the
+// bridge for callers that still raise tags; Publish is the event path.
 //
 // The order matters: routes are registered before the run is accepted,
 // because accept publishes the run's first event and an event for a run the
@@ -475,7 +519,28 @@ func (a *App) Invoke(ctx context.Context, tag envelope.Tag) (runtime.Acceptance,
 	if err := a.deliver.Register(runtime.RunID(tag.Tenant, tag.ID), runtime.TenantOf(tag), runtime.ChannelOf(tag), tag.Routes()); err != nil {
 		return runtime.Acceptance{}, fmt.Errorf("fiber: register routes: %w", err)
 	}
-	return a.rt.Accept(ctx, tag)
+	return a.rt.AcceptTag(ctx, tag)
+}
+
+// Publish puts an ingress event on the bus. The dispatcher started by Run
+// (or RunExecution) wakes every member of the event's channel whose rule
+// matches it, each in a run of its own. An event with no tenant is the
+// deployment's (WithTenant).
+//
+// The event's Tenant and actor are trusted as given, as Invoke trusts a
+// tag's. An embedding program that publishes events from callers sets the
+// tenant from the caller's credential, never from a request body.
+func (a *App) Publish(ctx context.Context, e event.Envelope) error {
+	if e.Tenant == "" {
+		e.Tenant = a.opt.Tenant
+	}
+	if e.Tenant == "" {
+		return configf("publish %s: no tenant, and the App has none (WithTenant)", e.ID)
+	}
+	if err := a.broker.Publish(ctx, e); err != nil {
+		return fmt.Errorf("fiber: publish %s: %w", e.ID, err)
+	}
+	return nil
 }
 
 // ToolsFor reports what a run of tag would be granted, without accepting
@@ -595,6 +660,9 @@ func (a *App) startExecution(ctx context.Context, g *group) {
 	}
 	wopts = append(wopts, a.opt.WorkerOpts...)
 	g.run("worker", func() error { return worker.New(a.ledger, a.queue, wopts...).Run(ctx) })
+	if a.opt.Tenant != "" {
+		g.run("dispatch", func() error { return a.disp.Run(ctx, a.opt.Tenant) })
+	}
 
 	triggers := a.sinks.Triggers()
 	if len(triggers) == 0 {
@@ -670,6 +738,14 @@ func (a *App) Knowledge() knowledge.Store { return a.docs }
 
 // Threads is the conversation journal.
 func (a *App) Threads() thread.Store { return a.threads }
+
+// Memberships is who is a member of which channel.
+func (a *App) Memberships() membership.Store { return a.members }
+
+// Dispatcher wakes channel members for the events published on the bus.
+// Run starts it for the deployment's tenant; a program serving more tenants
+// runs it once per tenant.
+func (a *App) Dispatcher() *dispatch.Dispatcher { return a.disp }
 
 // ToolProviders is the MCP tool provider store.
 func (a *App) ToolProviders() toolprovider.Store { return a.tools }

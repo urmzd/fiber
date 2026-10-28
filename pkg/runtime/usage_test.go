@@ -402,7 +402,7 @@ func TestChildRunsRollUpThreeLevelsDeepWithoutDoubleCounting(t *testing.T) {
 
 	var rt *runtime.Runtime
 	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
-		acc, err := rt.Accept(ctx, tag(target, parent.RunID+"-"+target, text))
+		acc, err := rt.AcceptTag(ctx, tag(target, parent.RunID+"-"+target, text))
 		if err != nil {
 			return "", err
 		}
@@ -606,7 +606,7 @@ func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
 	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
 		foreign := tag(target, "evt-foreign", "theirs")
 		foreign.Tenant = "globex"
-		facc, err := rt.Accept(ctx, foreign)
+		facc, err := rt.AcceptTag(ctx, foreign)
 		if err != nil {
 			return "", err
 		}
@@ -614,7 +614,7 @@ func TestAChildRunIsRolledUpOnlyWhenTheLedgerVouchesForIt(t *testing.T) {
 			return "", err
 		}
 		pending := tag(target, "evt-pending", "later")
-		pacc, err := rt.Accept(context.WithoutCancel(ctx), pending)
+		pacc, err := rt.AcceptTag(context.WithoutCancel(ctx), pending)
 		if err != nil {
 			return "", err
 		}

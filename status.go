@@ -107,7 +107,7 @@ func (a *App) Status(ctx context.Context, tenant, runID string) (Run, error) {
 		CreatedAt: rec.CreatedAt,
 		EndedAt:   rec.CompletedAt,
 	}
-	out.Channel = runtime.ChannelOf(tag)
+	out.Channel = in.Trigger.Channel
 	// LastSeq is the run's own answer: the sequence of its final event,
 	// which only a finished run has.
 	if rec.Status == drun.StatusSucceeded && len(rec.Output) > 0 {

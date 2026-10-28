@@ -54,6 +54,7 @@ import (
 	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -114,7 +115,8 @@ func WithAuthor(provider, model string) Option {
 // it is given.
 
 // WithPostgres puts every store family on pool: the agent definitions, the run
-// ledger and queue, knowledge, thread journals and MCP tool providers. New
+// ledger and queue, knowledge, thread journals, memberships and MCP tool
+// providers. New
 // migrates each. A store passed by its own option wins over this one. The
 // bus is chosen separately (WithBus with bus.NewPostgres or bus.NewRedis).
 func WithPostgres(pool *pgxpool.Pool) Option { return func(o *options) { o.Postgres = pool } }
@@ -133,6 +135,11 @@ func WithDefinitions(s definition.Source) Option { return func(o *options) { o.D
 func WithDurable(l Ledger, q dqueue.Queue) Option {
 	return func(o *options) { o.Ledger, o.Queue = l, q }
 }
+
+// WithMemberships sets which agents are members of which channels, which is
+// what decides who an event published with App.Publish wakes. Without it,
+// and without WithPostgres, memberships live in memory and start empty.
+func WithMemberships(s membership.Store) Option { return func(o *options) { o.Memberships = s } }
 
 // WithThreads sets the conversation journal.
 func WithThreads(s thread.Store) Option { return func(o *options) { o.Threads = s } }

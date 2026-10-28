@@ -274,7 +274,7 @@ func (w *world) work(t *testing.T, rt *runtime.Runtime, between func()) {
 
 func (w *world) accept(t *testing.T, rt *runtime.Runtime, tg envelope.Tag) string {
 	t.Helper()
-	acc, err := rt.Accept(context.Background(), tg)
+	acc, err := rt.AcceptTag(context.Background(), tg)
 	if err != nil {
 		t.Fatalf("Accept(%s): %v", tg.ID, err)
 	}
@@ -1083,7 +1083,7 @@ func TestAStopRequestIsPublishedToTheControlTopicUnderTheCallersTenant(t *testin
 func TestATagForTheControlNamespaceIsRefused(t *testing.T) {
 	w := newWorld(t)
 	rt := w.runtime(t, newPatient())
-	if _, err := rt.Accept(context.Background(), tag("_control", "evt-1", "hello")); !errors.Is(err, runtime.ErrInvalid) {
+	if _, err := rt.AcceptTag(context.Background(), tag("_control", "evt-1", "hello")); !errors.Is(err, runtime.ErrInvalid) {
 		t.Fatalf("Accept for the control namespace = %v, want ErrInvalid", err)
 	}
 }

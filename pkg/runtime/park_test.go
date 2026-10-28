@@ -690,7 +690,7 @@ func TestAChildRunParksAndItsParentShowsItsQuestion(t *testing.T) {
 	var rt *runtime.Runtime
 	child := make(chan string, 1)
 	delegate := func(ctx context.Context, parent runtime.Request, target, text string, _ func(payload.Action) error) (string, error) {
-		acc, err := rt.Accept(ctx, envelope.Tag{ID: parent.RunID + "/child", Tenant: parent.Tenant, Agent: target, Origin: "delegation", Text: text})
+		acc, err := rt.AcceptTag(ctx, envelope.Tag{ID: parent.RunID + "/child", Tenant: parent.Tenant, Agent: target, Origin: "delegation", Text: text})
 		if err != nil {
 			return "", err
 		}

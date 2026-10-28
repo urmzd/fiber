@@ -127,7 +127,7 @@ func replayed(history []agentrt.Message) []string {
 func finish(t *testing.T, h *harness, tg envelope.Tag) runtime.Request {
 	t.Helper()
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tg)
+	acc, err := h.rt.AcceptTag(ctx, tg)
 	if err != nil {
 		t.Fatalf("Accept(%s): %v", tg.ID, err)
 	}
@@ -207,7 +207,7 @@ func TestARunPinnedToAHistoryIsShownExactlyThatAfterTheThreadGrows(t *testing.T)
 	exchange(t, store, key, "run-a", "first question", "first answer")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tg)
+	acc, err := h.rt.AcceptTag(ctx, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -298,12 +298,12 @@ func TestARedeliveredTagCannotRepinItsHistory(t *testing.T) {
 	exchange(t, store, key, "run-a", "first question", "first answer")
 
 	ctx := context.Background()
-	first, err := h.rt.Accept(ctx, tg)
+	first, err := h.rt.AcceptTag(ctx, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
 	exchange(t, store, key, "run-b", "second question", "second answer")
-	second, err := h.rt.Accept(ctx, tg)
+	second, err := h.rt.AcceptTag(ctx, tg)
 	if err != nil {
 		t.Fatalf("Accept (redelivery): %v", err)
 	}
@@ -344,7 +344,7 @@ func TestACompletedRunAppendsItsExchangeExactlyOnce(t *testing.T) {
 	key := thread.KeyOf(tg)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tg)
+	acc, err := h.rt.AcceptTag(ctx, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestTagsRaisedTogetherInOneThreadKeepTheirExchangesWhole(t *testing.T) {
 	ctx := context.Background()
 	ids := make([]string, tags)
 	for i := range ids {
-		acc, err := h.rt.Accept(ctx, tag("docs-bot", fmt.Sprintf("Ev-together-%02d", i), "hello"))
+		acc, err := h.rt.AcceptTag(ctx, tag("docs-bot", fmt.Sprintf("Ev-together-%02d", i), "hello"))
 		if err != nil {
 			t.Fatalf("Accept: %v", err)
 		}
@@ -588,7 +588,7 @@ func TestAJournalThatLostWhatARunPinnedFailsTheRunTerminally(t *testing.T) {
 	exchange(t, store, thread.KeyOf(tg), "run-a", "first question", "first answer")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tg)
+	acc, err := h.rt.AcceptTag(ctx, tg)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
