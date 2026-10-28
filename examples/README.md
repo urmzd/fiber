@@ -7,8 +7,8 @@ for Postgres, Redis and a model provider, so `go run` is the only setup.
 
 | Example | Command | What it proves |
 | --- | --- | --- |
-| [`downstream`](downstream) | `go run ./examples/downstream` | A team's own program on fiber with no fork: it composes `fiber.New` with a model provider, an OpenAI-compatible endpoint and a tool, raises one tag in process and prints the answer. |
-| [`local`](local) | `go run ./examples/local` | The whole architecture end to end: a declarative agent, immutable revisions, a tag raised in one connector answered in two others, N:M selectivity, an uninvolved third party reading the stream, first-class citations, and a replayed run that does not re-execute a recorded activity. |
+| [`downstream`](downstream) | `go run ./examples/downstream` | A team's own program on fiber with no fork: it composes `fiber.New` with a model provider, an OpenAI-compatible endpoint and a tool, stores `agents/oncall.agent.md`, accepts one `message.posted.v1` in process and prints the answer. |
+| [`local`](local) | `go run ./examples/local` | The whole architecture end to end: an agent as a saige definition, immutable versions, an event raised on one channel answered by two egress adapters, N:M selectivity, an uninvolved third party reading the stream, first-class citations, and a replayed run that does not re-execute a recorded activity. |
 
 ## local
 
@@ -20,52 +20,54 @@ One process, one file of story (`main.go`) and one file of scaffolding
 (`fakes.go`). It prints seven numbered sections, each one a claim fiber makes
 and a demonstration of it:
 
-1. **An agent is a declarative spec.** A name, a provider, a model, a system
-   prompt and its sources go into the control plane and come back as revision 1
-   with a content hash. The name is now a topic anyone can subscribe to.
-2. **A revision is immutable.** Editing the prompt creates revision 2 and leaves
-   revision 1 byte for byte what it was. Both numbers still resolve. This is why
-   a run can pin its revision at accept time and replay under it forever.
-3. **Origin and destination are independent.** A tag arrives from
-   `github://acme/handbook/issues/42` and is answered into
-   `slack://T01/C02?thread=1699.001` and `webhook://acme/deploys`. The trigger is
-   GitHub; neither destination is. Nothing on the path from trigger to sink
-   holds both ends at once, which is the difference between a mesh and a pile of
-   integrations.
-4. **One run, two sinks, two granularities.** The Slack route takes every kind
-   and edits one message as the answer streams in; the webhook route takes
-   `lifecycle.completed` only and posts exactly once. Same run, same bus, same
-   events. Selectivity is a field on the route, not a second topic and not a
-   second run.
-5. **A third party can listen to an agent.** A subscriber holds one
-   subscription to `agent:docs-bot`. It raised nothing, no route names it, and
+1. **An agent is a definition file.** `agents/docs-bot.v1.agent.md` (a saige
+   definition: name, version, model, prompt) and its Policy sidecar
+   `docs-bot.policy.json` (its knowledge) are stored as version 1.0.0, with
+   saige's digest and the policy hash.
+2. **A version is immutable.** Storing `docs-bot.v2.agent.md` writes version
+   2.0.0 and leaves 1.0.0 byte for byte what it was. Both still resolve. This
+   is why a run can pin its version and digest at accept time and replay under
+   them forever.
+3. **Origin and destination are independent.** A `github.issue_comment.created.v1`
+   event arrives on `github://acme/handbook/issues/42` and is answered into
+   `slack://T01/C02?thread=1699.001` and `webhook://acme/deploys`, because those
+   egress adapters subscribe to the issue's channel. The trigger is GitHub; neither
+   destination is. Nothing on the path from trigger to sink holds both ends at
+   once, which is the difference between a mesh and a pile of integrations.
+4. **One run, two sinks, two granularities.** The Slack sink subscribes to the
+   `run` type prefix and edits one message as the answer streams in; the
+   webhook subscribes to `run.completed.v1` only and posts exactly once. Same run, same bus, same
+   events. Selectivity is a field on the subscription, not a second channel and
+   not a second run.
+5. **A third party can listen.** A subscriber holds one subscription to the
+   `github://` and `cron://` channel prefixes. It raised nothing, no sink names it, and
    neither run can tell it is there. It sees both runs in full, with `Seq` as a
    resume cursor.
-6. **Citations are first-class events.** `delta.citation` arrives on the same
+6. **Citations are first-class events.** `run.delta.citation.v1` arrives on the same
    stream and in the same order as the text, carrying document, section and a
    resolvable URI. Citations are derived from what the turn retrieved, not from
    what the model claimed, so a reader can check them.
 7. **A replayed run does not re-execute a recorded activity.** The example arms
-   one broker outage on a run's `lifecycle.completed` publish. The turn fails,
+   one broker outage on a run's `run.completed.v1` publish. The turn fails,
    anchor replays the workflow from the top, and the printed model-call
    counter moves by exactly one across two attempts: the agent activity was
-   served from the ledger. The subscriber sees a `lifecycle.resumed` event in
+   served from the ledger. The subscriber sees a `run.resumed.v1` event in
    its own sequence band rather than a run that went silent.
 
 ### What is real and what is swapped
 
 Nothing above the storage seam is simplified for the demo. The agent loop, the
-typed deltas, the translation into events, the sequence banding, publication,
+typed deltas, the translation into catalog events, the sequence banding, publication,
 routing, per-lane ordering and the durable replay are all the production code
 paths.
 
 | Concern | The example runs | A deployment runs |
 | --- | --- | --- |
-| Control plane | `pkg/registry.Memory` (`fiber.WithRegistry`) | `registry.Postgres` (`fiber.WithPostgres`) |
+| Control plane | `definition.Memory` (`fiber.WithDefinitions`), agents read from `agents/*.agent.md` | `definition.Postgres` (`fiber.WithPostgres`) |
 | Bus | `pkg/bus.Memory` (`fiber.WithBus`) | `bus.NewRedis` or `bus.NewPostgres` (`fiber.WithBus`) |
 | Ledger and queue | anchor `ledger.Memory`, `queue.Memory` | anchor's Postgres ledger and queue (`fiber.WithPostgres`) |
-| Model | saige `agenttest.ScriptedProvider`, via the spec's `offline` provider | `anthropic`, `openai` (or any OpenAI-compatible server) or `ollama`, by changing two fields on the spec |
-| Execution | an in-process `runtime.Executor` (`fiber.WithExecutor`) | `runtime.NewSandbox`, a playscape node under NGAC, which `fiber.New` builds by default |
+| Model | saige `agenttest.ScriptedProvider`, via the definition's `offline/scripted` model | `anthropic`, `openai` (or any OpenAI-compatible server) or `ollama`, by changing `model.use` in the definition |
+| Execution | an in-process `turn.Runtime` (`fiber.WithTurnRuntime`) | `runtime.NewSandbox`, a playscape node under NGAC, which `fiber.New` builds by default |
 | Connectors | two fakes implementing `connector.Sink` (`fiber.WithConnector`) | `pkg/connectors/slack`, `pkg/connectors/webhook` (`fiber.WithSlack`, `fiber.WithWebhooks`) |
 
 Every row is an option. `main.go` does not otherwise change.
@@ -80,7 +82,7 @@ its output after an interrupted attempt's partial output instead of vanishing
 behind the bus's high-water mark. The example shrinks the band from its default
 of 2^20 to 100 (`runtime.WithStride`) purely so the numbers stay readable.
 
-**The surface output is printed settled, not live.** The router carries events
+**The surface output is printed settled, not live.** Egress carries events
 for one `(run, target)` pair on a single goroutine and deliberately imposes no
 order across targets, so two sinks printing directly would interleave
 differently on every run. The fake sinks therefore record what they wrote to

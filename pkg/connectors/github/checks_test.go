@@ -12,7 +12,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/github"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 func TestChecksStreamAndKeepTheirPinnedCommit(t *testing.T) {
@@ -22,7 +22,7 @@ func TestChecksStreamAndKeepTheirPinnedCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := address.MustParse("github://acme/repo/pull/42").WithParam("head_sha", commitSHA)
-	events := []envelope.Event{event(1, envelope.KindAccepted, `{}`), event(2, envelope.KindStarted, `{}`), event(3, envelope.KindToolCall, `{"id":"t1","name":"github_read_context"}`), event(4, envelope.KindCompleted, `{"text":"Review complete. Tests not run."}`)}
+	events := []event.Envelope{ev(1, event.TypeAccepted, `{}`), ev(2, event.TypeStarted, `{}`), ev(3, event.TypeToolCall, `{"id":"t1","name":"github_read_context"}`), ev(4, event.TypeCompleted, `{"text":"Review complete. Tests not run."}`)}
 	for _, e := range events {
 		for range 2 {
 			if err := c.Deliver(context.Background(), target, e); err != nil {
@@ -89,12 +89,12 @@ func TestPRCommentPinsTheHeadBeforeAcceptance(t *testing.T) {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
 	}
 	select {
-	case tag := <-tags:
-		if tag.Source.Params["head_sha"] != commitSHA {
-			t.Fatalf("unpinned tag %+v", tag)
+	case e := <-tags:
+		if !strings.HasSuffix(e.Channel, "?head_sha="+commitSHA) || ref(t, e).HeadSHA != commitSHA {
+			t.Fatalf("unpinned event %+v", e)
 		}
 	default:
-		t.Fatal("missing tag")
+		t.Fatal("missing event")
 	}
 }
 
@@ -116,7 +116,7 @@ func TestPinnedReviewCannotReadEvidenceFromANewerCommit(t *testing.T) {
 func TestIssuesDoNotCreateCommitChecks(t *testing.T) {
 	fake := github.NewFake()
 	c, _ := github.New(github.Config{API: fake, Checks: true})
-	if err := c.Deliver(context.Background(), address.MustParse("github://acme/repo/issues/1"), event(1, envelope.KindStarted, `{}`)); err != nil {
+	if err := c.Deliver(context.Background(), address.MustParse("github://acme/repo/issues/1"), ev(1, event.TypeStarted, `{}`)); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.Checks()) != 0 || len(fake.Comments()) != 1 {
@@ -151,14 +151,14 @@ func TestCompletedChecksUseApplicationConclusionOrDefaultToNeutral(t *testing.T)
 				t.Fatal(err)
 			}
 			target := address.MustParse("github://acme/repo/pull/42").WithParam("head_sha", commitSHA)
-			if err := c.Deliver(context.Background(), target, event(1, envelope.KindStarted, `{}`)); err != nil {
+			if err := c.Deliver(context.Background(), target, ev(1, event.TypeStarted, `{}`)); err != nil {
 				t.Fatal(err)
 			}
 			if calls != 0 {
 				t.Fatal("conclusion callback ran before completion")
 			}
 			payload, _ := json.Marshal(map[string]string{"text": tc.text})
-			if err := c.Deliver(context.Background(), target, event(2, envelope.KindCompleted, string(payload))); err != nil {
+			if err := c.Deliver(context.Background(), target, ev(2, event.TypeCompleted, string(payload))); err != nil {
 				t.Fatal(err)
 			}
 			checks := fake.Checks()
@@ -185,10 +185,10 @@ func TestAStoppedRunFinishesItsCheckAsCancelled(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := address.MustParse("github://acme/repo/pull/42").WithParam("head_sha", commitSHA)
-	if err := c.Deliver(context.Background(), target, event(1, envelope.KindStarted, `{}`)); err != nil {
+	if err := c.Deliver(context.Background(), target, ev(1, event.TypeStarted, `{}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Deliver(context.Background(), target, event(2, envelope.KindStopped, `{"text":"Half a review","reason":"Stopped by a user"}`)); err != nil {
+	if err := c.Deliver(context.Background(), target, ev(2, event.TypeStopped, `{"text":"Half a review","reason":"Stopped by a user"}`)); err != nil {
 		t.Fatal(err)
 	}
 	checks := fake.Checks()

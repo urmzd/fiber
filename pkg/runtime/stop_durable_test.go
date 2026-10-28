@@ -26,19 +26,17 @@ import (
 	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
 
 // stopRecords returns the stop requests recorded on a run in the ledger.
-func (w *world) stopRecords(t *testing.T, runID string) []payload.StopRequest {
+func (w *world) stopRecords(t *testing.T, runID string) []event.StopRequest {
 	t.Helper()
 	_, records, err := w.ledger.Load(context.Background(), runID)
 	if errors.Is(err, drun.ErrNotFound) {
@@ -47,12 +45,12 @@ func (w *world) stopRecords(t *testing.T, runID string) []payload.StopRequest {
 	if err != nil {
 		t.Fatalf("Load(%s): %v", runID, err)
 	}
-	var out []payload.StopRequest
+	var out []event.StopRequest
 	for _, rec := range records {
 		if !strings.HasPrefix(rec.Key, "event:fiber.stop") {
 			continue
 		}
-		var body payload.StopRequest
+		var body event.StopRequest
 		if err := json.Unmarshal(rec.Output, &body); err != nil {
 			t.Fatalf("decode stop record: %v", err)
 		}
@@ -62,10 +60,10 @@ func (w *world) stopRecords(t *testing.T, runID string) []payload.StopRequest {
 }
 
 // controlEvents returns every stop request published to the bus.
-func (w *world) controlEvents() []envelope.Event {
-	var out []envelope.Event
+func (w *world) controlEvents() []event.Envelope {
+	var out []event.Envelope
 	for _, e := range w.bus.rec.all() {
-		if e.Topic.IsControl() {
+		if event.IsControl(e.Channel) {
 			out = append(out, e)
 		}
 	}
@@ -76,11 +74,12 @@ func (w *world) controlEvents() []envelope.Event {
 func noise(t *testing.T, b bus.Bus, n int) {
 	t.Helper()
 	for i := range n {
-		tp, err := topic.Run("someone-else", fmt.Sprintf("run_%d", i))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := b.Publish(context.Background(), envelope.Event{Topic: tp, Kind: envelope.KindText}); err != nil {
+		run := fmt.Sprintf("run_%d", i)
+		if err := b.Publish(context.Background(), event.Envelope{
+			ID: run + ":1", Source: "fiber://run/" + run, Type: event.TypeText,
+			Channel: "github://someone/else", Tenant: "acme", Run: run, Seq: 1,
+			Agent: "someone-else", Data: event.Text{Text: "noise"},
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -88,16 +87,16 @@ func noise(t *testing.T, b bus.Bus, n int) {
 
 // in returns tg answering in its own thread, so two runs of one test do not
 // share a conversation.
-func in(tg envelope.Tag, thread string) envelope.Tag {
+func in(tg fixture, thread string) fixture {
 	tg.Source = address.MustParse("github://urmzd/fiber/issues/" + thread)
 	return tg
 }
 
 // entriesOf returns a run's own entries in its thread.
-func entriesOf(t *testing.T, s thread.Store, tg envelope.Tag, runID string) []string {
+func entriesOf(t *testing.T, s thread.Store, tg fixture, runID string) []string {
 	t.Helper()
 	var mine []thread.Entry
-	for _, e := range journal(t, s, thread.KeyOf(tg)) {
+	for _, e := range journal(t, s, tg.key()) {
 		if e.RunID == runID {
 			mine = append(mine, e)
 		}
@@ -157,7 +156,7 @@ func TestAStopSurvivesAWorkerRestart(t *testing.T) {
 	}
 	ended(t, after.bus.of(runID))
 	want := []string{"user: explain", "assistant: [This turn was stopped before it finished.]"}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); fmt.Sprint(got) != fmt.Sprint(want) {
+	if got := said(journal(t, w.threads, tg.key())); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 }
@@ -195,7 +194,7 @@ type stopsAsItFinishes struct {
 	stop func(runID string)
 }
 
-func (s *stopsAsItFinishes) Execute(_ context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (s *stopsAsItFinishes) Execute(_ context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	s.stop(req.RunID)
 	return runtime.Outcome{Text: "The whole answer.", Prompt: req.Text}, nil
 }
@@ -219,8 +218,8 @@ func TestAStopThatLandsAsTheTurnFinishesLeavesItCompleted(t *testing.T) {
 	}
 	events := w.bus.of(runID)
 	last := events[len(events)-1]
-	if last.Kind != envelope.KindCompleted {
-		t.Fatalf("last event %s, want completed: %v", last.Kind, kindsOf(events))
+	if last.Type != event.TypeCompleted {
+		t.Fatalf("last event %s, want completed: %v", last.Type, kindsOf(events))
 	}
 	want := []string{"user: explain", "assistant: The whole answer."}
 	if got := entriesOf(t, w.threads, tg, runID); fmt.Sprint(got) != fmt.Sprint(want) {
@@ -257,10 +256,10 @@ func TestAStopRacingCompletionEndsExactlyOneWayEverywhere(t *testing.T) {
 		outcomes[stopped]++
 
 		events := w.bus.of(runID)
-		var terminal []envelope.Kind
+		var terminal []string
 		for _, e := range events {
-			if e.Kind == envelope.KindCompleted || e.Kind == envelope.KindStopped {
-				terminal = append(terminal, e.Kind)
+			if e.Type == event.TypeCompleted || e.Type == event.TypeStopped {
+				terminal = append(terminal, e.Type)
 			}
 		}
 		last := events[len(events)-1]
@@ -273,15 +272,15 @@ func TestAStopRacingCompletionEndsExactlyOneWayEverywhere(t *testing.T) {
 			if out.Text != "" {
 				answer = out.Text + "\n\n" + runtime.StopMarker
 			}
-			if len(terminal) != 1 || last.Kind != envelope.KindStopped || stoppedBody(t, last).Text != out.Text ||
+			if len(terminal) != 1 || last.Type != event.TypeStopped || stoppedBody(t, last).Text != out.Text ||
 				entries[1] != "assistant: "+answer {
-				t.Fatalf("run %d stopped but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Kind, entries, out)
+				t.Fatalf("run %d stopped but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Type, entries, out)
 			}
 		} else {
-			body, err := payload.Decode[payload.Lifecycle](last)
-			if err != nil || len(terminal) != 1 || last.Kind != envelope.KindCompleted || body.Text != out.Text ||
+			body, err := decode[lifecycle](last)
+			if err != nil || len(terminal) != 1 || last.Type != event.TypeCompleted || body.Text != out.Text ||
 				entries[1] != "assistant: "+out.Text {
-				t.Fatalf("run %d completed but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Kind, entries, out)
+				t.Fatalf("run %d completed but disagrees: terminal %v, last %s, journal %q, result %+v", i, terminal, last.Type, entries, out)
 			}
 		}
 		rec, err := w.ledger.GetRun(context.Background(), runID)
@@ -304,15 +303,15 @@ func TestACompletedRunRetriedAfterItsJournalEntryStaysCompleted(t *testing.T) {
 	rt := w.runtime(t, exec)
 
 	var once sync.Once
-	w.bus.rec.failWhen(func(e envelope.Event) error {
+	w.bus.rec.failWhen(func(e event.Envelope) error {
 		var err error
-		if e.Kind == envelope.KindCompleted {
+		if e.Type == event.TypeCompleted {
 			once.Do(func() { err = errors.New("broker outage") })
 		}
 		return err
 	})
 	tg := tag("docs-bot", "evt-1", "explain")
-	runID := runtime.RunID(tg.Tenant, tg.ID)
+	runID := tg.runID()
 	var asked sync.Once
 	w.work(t, rt, func() {
 		asked.Do(func() { w.stop(t, rt, "acme", runID, "after the answer", "U1") })
@@ -324,16 +323,16 @@ func TestACompletedRunRetriedAfterItsJournalEntryStaysCompleted(t *testing.T) {
 		t.Fatalf("Output = %+v, want the completed answer", out)
 	}
 	events := w.bus.of(runID)
-	if last := events[len(events)-1]; last.Kind != envelope.KindCompleted {
-		t.Fatalf("last event %s, want completed: %v", last.Kind, kindsOf(events))
+	if last := events[len(events)-1]; last.Type != event.TypeCompleted {
+		t.Fatalf("last event %s, want completed: %v", last.Type, kindsOf(events))
 	}
 	for _, e := range events {
-		if e.Kind == envelope.KindStopped {
+		if e.Type == event.TypeStopped {
 			t.Fatalf("a completed run was also announced stopped: %v", kindsOf(events))
 		}
 	}
 	want := []string{"user: explain", "assistant: The whole answer and the rest."}
-	if got := said(journal(t, w.threads, thread.KeyOf(tg))); fmt.Sprint(got) != fmt.Sprint(want) {
+	if got := said(journal(t, w.threads, tg.key())); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("journal:\n got %q\nwant %q", got, want)
 	}
 	if n := exec.count(); n != 1 {
@@ -353,7 +352,7 @@ func TestAStopIsRecordedOnlyForALiveRunTheAskerOwnsAndAtMostOnce(t *testing.T) {
 	rt := w.runtime(t, exec)
 
 	runID := w.accept(t, rt, tag("docs-bot", "evt-1", "explain"))
-	unknown := runtime.RunID("acme", "never-accepted")
+	unknown := runtime.RunKey("acme", "never-accepted", "docs-bot")
 
 	w.stop(t, rt, "globex", runID, "theirs", "intruder")
 	w.stop(t, rt, "acme", unknown, "nothing", "U1")
@@ -483,7 +482,7 @@ type panicky struct {
 	runs int
 }
 
-func (p *panicky) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (p *panicky) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	p.mu.Lock()
 	p.runs++
 	first := p.runs == 1
@@ -529,7 +528,7 @@ func TestAPanickingExecutorLeavesNoStopGoroutinesBehind(t *testing.T) {
 func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 	meta := map[string]string{"channel": "ops"}
 	want := "user: Context from the trigger:\n- channel: ops\n\nexplain"
-	mk := func(id string) envelope.Tag {
+	mk := func(id string) fixture {
 		tg := in(tag("docs-bot", id, "explain"), id)
 		tg.Meta = meta
 		return tg
@@ -543,7 +542,7 @@ func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 		w.stop(t, rt, "acme", runID, "", "")
 		w.work(t, rt, nil)
 		out := w.result(t, rt, runID)
-		if out.Stopped == nil || out.Stopped.Reason != agentrt.DefaultStopReason {
+		if out.Stopped == nil || out.Stopped.Reason != native.DefaultStopReason {
 			t.Fatalf("Output.Stopped = %+v, want the default reason", out.Stopped)
 		}
 		if got := entriesOf(t, w.threads, tg, runID); len(got) != 2 || got[0] != want {
@@ -561,7 +560,7 @@ func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 		exec.inFlight(t)
 		w.stop(t, rt, "acme", runID, "", "")
 		out := w.result(t, rt, runID)
-		if out.Stopped == nil || out.Stopped.Reason != agentrt.DefaultStopReason {
+		if out.Stopped == nil || out.Stopped.Reason != native.DefaultStopReason {
 			t.Fatalf("Output.Stopped = %+v, want the default reason", out.Stopped)
 		}
 		if got := entriesOf(t, w.threads, tg, runID); len(got) != 2 || got[0] != want {
@@ -582,7 +581,7 @@ func TestEveryWayOfStoppingRecordsTheSameRequest(t *testing.T) {
 		}
 		w.stop(t, rt, "acme", runID, "", "")
 		out := w.result(t, rt, runID)
-		if out.Stopped == nil || out.Stopped.Reason != agentrt.DefaultStopReason {
+		if out.Stopped == nil || out.Stopped.Reason != native.DefaultStopReason {
 			t.Fatalf("Output.Stopped = %+v, want the default reason", out.Stopped)
 		}
 		if got := entriesOf(t, w.threads, tg, runID); len(got) != 2 || got[0] != want {
@@ -602,7 +601,7 @@ func sandboxWithPlane(t *testing.T, sp *specs, model saigetypes.Provider) (*runt
 	tools := tool.NewRegistry()
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	s, err := runtime.NewSandbox(plane, tools, sp, runtime.WithAgentOptions(
-		agentrt.WithProvider(agentrt.ProviderOffline, func(agentrt.Spec) (saigetypes.Provider, error) { return model, nil })))
+		native.WithProvider(native.ProviderOffline, func(native.Spec) (saigetypes.Provider, error) { return model, nil })))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,14 +620,14 @@ func TestTheSandboxRefusesATaskWhoseTurnIsGone(t *testing.T) {
 	// is held, so stop it with an already-cancelled context.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _ = s.Execute(ctx, runtime.Request{RunID: "warm", Tenant: "acme", Text: "x", Revision: rev}, nil)
+	_, _ = s.Execute(ctx, withPin(runtime.Request{RunID: "warm", Tenant: "acme", Text: "x"}, rev), nil)
 
 	before := len(model.asked())
-	input, err := json.Marshal(runtime.Request{RunID: "nobody-waits", Tenant: "acme", Text: "x", Revision: rev})
+	input, err := json.Marshal(withPin(runtime.Request{RunID: "nobody-waits", Tenant: "acme", Text: "x"}, rev))
 	if err != nil {
 		t.Fatal(err)
 	}
-	deployment := runtime.DeploymentName("docs-bot", rev.Rev)
+	deployment := runtime.DeploymentName(withPin(runtime.Request{}, rev).Pin)
 	id, err := plane.SubmitAsync(context.Background(), deployment, task.Task{Tool: runtime.ToolName("docs-bot"), Input: input})
 	if err != nil {
 		t.Fatal(err)
@@ -671,8 +670,8 @@ func TestCancellingAWaitingTurnCancelsItsTask(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Execute(ctx, runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x", Revision: rev},
-			func(context.Context, agentrt.Chunk) error { return nil })
+		_, err := s.Execute(ctx, withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x"}, rev),
+			func(context.Context, event.Body) error { return nil })
 		done <- err
 	}()
 	select {
@@ -728,26 +727,19 @@ func newCauseRecorder() *causeRecorder {
 	return &causeRecorder{started: make(chan struct{}), cause: make(chan error, 1)}
 }
 
-func (c *causeRecorder) delegate(ctx context.Context, _ runtime.Request, _, _ string, _ func(payload.Action) error) (string, error) {
+func (c *causeRecorder) delegate(ctx context.Context, _ runtime.Request, _, _ string, _ func(event.Action) error) (string, error) {
 	close(c.started)
 	<-ctx.Done()
 	c.cause <- context.Cause(ctx)
 	return "", ctx.Err()
 }
 
-func leadWithSpawn(sp *specs) agentrt.Revision {
+func leadWithSpawn(sp *specs) native.Revision {
 	sp.revise("helper", "Help.")
-	rev := agentrt.Revision{
-		Rev: 1, Hash: "sha256:lead@1",
-		Spec: agentrt.Spec{
-			Name: "lead", Provider: agentrt.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
-			Access: agentrt.Access{Spawn: []string{"helper"}},
-		},
-	}
-	sp.mu.Lock()
-	sp.revs["lead"] = []agentrt.Revision{rev}
-	sp.mu.Unlock()
-	return rev
+	return sp.set(native.Spec{
+		Name: "lead", Provider: native.ProviderOffline, Model: "scripted", SystemPrompt: "Lead.",
+		Access: native.Access{Spawn: []string{"helper"}},
+	})
 }
 
 func delegatingLead() *agenttest.ScriptedProvider {
@@ -791,8 +783,8 @@ func TestADelegatorCanTellAStopFromAnyOtherCancellation(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_, _ = exec.Execute(ctx, runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x", Revision: lead},
-				func(context.Context, agentrt.Chunk) error { return nil })
+			_, _ = exec.Execute(ctx, withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Text: "x"}, lead),
+				func(context.Context, event.Body) error { return nil })
 		}()
 		<-rec.started
 		cancel()

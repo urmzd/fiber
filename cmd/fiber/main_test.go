@@ -12,34 +12,47 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
-// docsBot is a spec as a deployment would write it: a real provider, a
-// fallback on another, and grants this local composition only partly has.
-const docsBot = `{
-  "name": "docs-bot",
-  "description": "answers questions about how we ship",
-  "provider": "anthropic",
-  "model": "house-model",
-  "system_prompt": "You answer questions about the deploy pipeline.",
-  "fallbacks": [{"provider": "openai", "model": "other-model"}]
-}`
+// docsBot is a definition as a deployment would write it: a real provider
+// and a fallback on another.
+const docsBot = `---
+apiVersion: saige/v1
+name: docs-bot
+version: 1.0.0
+description: answers questions about how we ship
+model:
+  use: anthropic/house-model
+  fallback:
+    - openai/other-model
+---
+You answer questions about the deploy pipeline.
+`
+
+// agentFile is a minimal definition with frontmatter lines of the test's.
+func agentFile(front, prompt string) string {
+	return "---\napiVersion: saige/v1\nname: docs-bot\nversion: 1.0.0\n" + front + "---\n" + prompt + "\n"
+}
 
 // noKeys makes sure no vendor key is in reach, so a test that passes did so
 // without one.
 func noKeys(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{agentrt.EnvAnthropicKey, agentrt.EnvOpenAIKey, agentrt.EnvOpenAIBaseURL} {
+	for _, k := range []string{native.EnvAnthropicKey, native.EnvOpenAIKey, native.EnvOpenAIBaseURL} {
 		t.Setenv(k, "")
 	}
 }
 
 func writeSpec(t *testing.T, body string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "spec.json")
+	return writeFile(t, "docs-bot.agent.md", body)
+}
+
+func writeFile(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -69,11 +82,11 @@ func TestASpecRunsOfflineEndToEndWithNoKey(t *testing.T) {
 	}
 	at := -1
 	for _, want := range []string{
-		"[lifecycle.accepted] docs-bot revision 1, run ",
-		"[lifecycle.started] attempt 1",
+		"[run.accepted.v1] docs-bot version 1.0.0, run ",
+		"[run.started.v1] attempt 1",
 		"docs-bot is running with the offline provider, so no model was called.",
-		"[usage.call] house-model:",
-		"[lifecycle.completed] attempt 1",
+		"[run.usage.v1] house-model:",
+		"[run.completed.v1] attempt 1",
 	} {
 		i := strings.Index(stdout, want)
 		if i < 0 || i < at {
@@ -94,44 +107,36 @@ func TestJSONPrintsOneEventPerLine(t *testing.T) {
 	if code != exitCompleted {
 		t.Fatalf("exit %d\nstderr:\n%s", code, stderr)
 	}
-	var kinds []envelope.Kind
+	var types []string
 	var said strings.Builder
 	var last uint64
-	var completed payload.Lifecycle
+	var completed event.Completed
 	runs := map[string]bool{}
 	sc := bufio.NewScanner(strings.NewReader(stdout))
 	for sc.Scan() {
-		var e jsonEvent
-		dec := json.NewDecoder(strings.NewReader(sc.Text()))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&e); err != nil {
+		var e event.Envelope
+		if err := json.Unmarshal([]byte(sc.Text()), &e); err != nil {
 			t.Fatalf("line %q is not one event: %v", sc.Text(), err)
 		}
 		if e.Seq <= last {
 			t.Errorf("seq %d after %d", e.Seq, last)
 		}
 		last = e.Seq
-		kinds = append(kinds, e.Kind)
-		runs[e.RunID] = true
-		if e.Agent != "docs-bot" || e.Rev != 1 || e.Topic != "agent:docs-bot:"+e.RunID {
-			t.Errorf("event %+v is not docs-bot revision 1 on its run's topic", e)
+		types = append(types, e.Type)
+		runs[e.Run] = true
+		if e.Agent != "docs-bot" || e.Version != "1.0.0" || e.Run == "" {
+			t.Errorf("event %+v is not docs-bot version 1.0.0 of a run", e)
 		}
-		switch e.Kind {
-		case envelope.KindText:
-			var p payload.Text
-			if err := json.Unmarshal(e.Payload, &p); err != nil {
-				t.Fatal(err)
-			}
-			said.WriteString(p.Text)
-		case envelope.KindCompleted:
-			if err := json.Unmarshal(e.Payload, &completed); err != nil {
-				t.Fatal(err)
-			}
+		switch b := e.Data.(type) {
+		case event.Text:
+			said.WriteString(b.Text)
+		case event.Completed:
+			completed = b
 		}
 	}
-	want := []envelope.Kind{envelope.KindAccepted, envelope.KindStarted, envelope.KindText, envelope.KindUsageCall, envelope.KindCompleted}
-	if !slices.Equal(kinds, want) {
-		t.Errorf("kinds %v, want %v", kinds, want)
+	want := []string{event.TypeAccepted, event.TypeStarted, event.TypeText, event.TypeUsageCall, event.TypeCompleted}
+	if !slices.Equal(types, want) {
+		t.Errorf("types %v, want %v", types, want)
 	}
 	if len(runs) != 1 {
 		t.Errorf("events of %d runs, want one", len(runs))
@@ -145,13 +150,11 @@ func TestJSONPrintsOneEventPerLine(t *testing.T) {
 // name: here the offline provider, under a model name of the test's.
 func TestProviderAndModelFlagsReplaceTheSpecs(t *testing.T) {
 	noKeys(t)
-	code, stdout, stderr := fiberCLI(t, "", "run", "-json", "-provider", "offline", "-model", "chosen-here", writeSpec(t, `{
-  "name": "docs-bot", "provider": "anthropic", "model": "house-model", "system_prompt": "Answer."
-}`), "how?")
+	code, stdout, stderr := fiberCLI(t, "", "run", "-json", "-provider", "offline", "-model", "chosen-here", writeSpec(t, agentFile("model:\n  use: anthropic/house-model\n", "Answer.")), "how?")
 	if code != exitCompleted {
 		t.Fatalf("exit %d\nstderr:\n%s", code, stderr)
 	}
-	if !strings.Contains(stdout, `"kind":"usage.call"`) || !strings.Contains(stdout, `"model":"chosen-here"`) || strings.Contains(stdout, "house-model") {
+	if !strings.Contains(stdout, `"type":"run.usage.v1"`) || !strings.Contains(stdout, `"model":"chosen-here"`) || strings.Contains(stdout, "house-model") {
 		t.Errorf("the run was not on the flags' model:\n%s", stdout)
 	}
 }
@@ -160,31 +163,34 @@ func TestProviderAndModelFlagsReplaceTheSpecs(t *testing.T) {
 func TestASpecOnStandardInputRuns(t *testing.T) {
 	noKeys(t)
 	code, stdout, stderr := fiberCLI(t, docsBot, "run", "-offline", "-", "-5 degrees: is that why the deploy failed?")
-	if code != exitCompleted || !strings.Contains(stdout, "[lifecycle.completed]") {
+	if code != exitCompleted || !strings.Contains(stdout, "[run.completed.v1]") {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 }
 
 // -tools lists what a run would be granted here, needing no key and no
 // MESSAGE, and runs nothing: the built-in ask_person, the author tools
-// every App has, a delegation tool per spawn grant, which calls wait for
-// approval, and the grants this composition cannot honour, with why.
+// every App has, which calls wait for approval, and the grants this
+// composition cannot honour, with why.
 func TestToolsListsWhatTheAgentWouldBeGrantedAndRunsNothing(t *testing.T) {
 	noKeys(t)
-	path := writeSpec(t, `{
-  "name": "docs-bot", "provider": "anthropic", "model": "house-model", "system_prompt": "Answer.",
-  "tools": ["ask_person", "author_get", "jira_transition", "mcp:issues"],
-  "approvals": ["author_get"],
-  "access": {"spawn": ["helper"]}
-}`)
+	path := writeSpec(t, agentFile(`model:
+  use: anthropic/house-model
+tools:
+  registry: [ask_person, author_get, jira_transition]
+  mcp:
+    - server: issues
+approval:
+  ask: [author_get]
+`, "Answer."))
 
 	code, stdout, stderr := fiberCLI(t, "", "run", "-tools", path)
 	if code != exitCompleted {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	for _, want := range []string{
-		"docs-bot revision 1 would be granted 3 tools:",
-		"ask_person", "tag_helper",
+		"docs-bot 1.0.0 would be granted 2 tools:",
+		"ask_person", "author_get",
 		"(each call waits for approval)",
 		"2 grants are unavailable here",
 		`"jira_transition" is not contributed by any registered connector`,
@@ -194,7 +200,7 @@ func TestToolsListsWhatTheAgentWouldBeGrantedAndRunsNothing(t *testing.T) {
 			t.Errorf("the listing does not say %q:\n%s", want, stdout)
 		}
 	}
-	if strings.Contains(stdout, "[lifecycle.") || stderr != "" {
+	if strings.Contains(stdout, "[run.") || stderr != "" {
 		t.Errorf("listing ran something or logged:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 
@@ -216,8 +222,8 @@ func TestToolsListsWhatTheAgentWouldBeGrantedAndRunsNothing(t *testing.T) {
 	for _, u := range l.Unavailable {
 		missing = append(missing, u.Name)
 	}
-	if !slices.Equal(names, []string{"ask_person", "author_get", "tag_helper"}) || !slices.Equal(approved, []string{"author_get"}) ||
-		!slices.Equal(missing, []string{"jira_transition", "mcp:issues"}) || l.Agent != "docs-bot" || l.Rev != 1 {
+	if !slices.Equal(names, []string{"ask_person", "author_get"}) || !slices.Equal(approved, []string{"author_get"}) ||
+		!slices.Equal(missing, []string{"jira_transition", "mcp:issues"}) || l.Agent != "docs-bot" || l.Version != "1.0.0" {
 		t.Errorf("listing %+v", l)
 	}
 }
@@ -230,10 +236,10 @@ func TestARunThatFailsExitsOne(t *testing.T) {
 	if code != exitFailed {
 		t.Fatalf("exit %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFailed, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "[lifecycle.failed] attempt 1:") || !strings.Contains(stdout, agentrt.EnvAnthropicKey) {
+	if !strings.Contains(stdout, "[run.failed.v1] attempt 1:") || !strings.Contains(stdout, native.EnvAnthropicKey) {
 		t.Errorf("the failure was not printed:\n%s", stdout)
 	}
-	if strings.Contains(stdout, "[lifecycle.completed]") || !strings.Contains(stderr, "failed") {
+	if strings.Contains(stdout, "[run.completed.v1]") || !strings.Contains(stderr, "failed") {
 		t.Errorf("stdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 }
@@ -247,7 +253,17 @@ func TestARunOutOfTimeExitsOne(t *testing.T) {
 	}
 }
 
-// A command line or a spec that is wrong exits 2 before anything runs, and
+// A policy file is read with the definition, strictly.
+func TestAPolicyFileIsRead(t *testing.T) {
+	noKeys(t)
+	policy := writeFile(t, "policy.json", `{"tagged_only": true, "fallback_on": ["timeout"]}`)
+	code, stdout, stderr := fiberCLI(t, "", "run", "-offline", "-policy", policy, writeSpec(t, docsBot), "how?")
+	if code != exitCompleted || !strings.Contains(stdout, "[run.completed.v1]") {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
+// A command line or a definition that is wrong exits 2 before anything runs, and
 // says what is wrong. A misspelt field is wrong, not ignored.
 func TestBadInputExitsTwoAndSaysWhy(t *testing.T) {
 	noKeys(t)
@@ -260,7 +276,7 @@ func TestBadInputExitsTwoAndSaysWhy(t *testing.T) {
 	}{
 		{"no command", "", nil, "Usage: fiber run"},
 		{"an unknown command", "", []string{"serve"}, `unknown command "serve"`},
-		{"no spec", "", []string{"run"}, "no SPEC"},
+		{"no definition", "", []string{"run"}, "no DEFINITION"},
 		{"no message", "", []string{"run", good}, "no MESSAGE"},
 		{"an empty message", "", []string{"run", good, "  "}, "MESSAGE is empty"},
 		{"a flag after the spec", "", []string{"run", good, "hi", "-json"}, "flags go before it"},
@@ -269,14 +285,16 @@ func TestBadInputExitsTwoAndSaysWhy(t *testing.T) {
 		{"an unknown flag", "", []string{"run", "-verbose", good, "hi"}, "-verbose"},
 		{"offline and a provider", "", []string{"run", "-offline", "-provider", "openai", good, "hi"}, "give one"},
 		{"a negative timeout", "", []string{"run", "-timeout", "-1s", good, "hi"}, "negative"},
-		{"a missing file", "", []string{"run", filepath.Join(t.TempDir(), "nope.json"), "hi"}, "no such file"},
+		{"a missing file", "", []string{"run", filepath.Join(t.TempDir(), "nope.agent.md"), "hi"}, "no such file"},
 		{"empty input", "", []string{"run", "-", "hi"}, "empty"},
-		{"not JSON", "name: docs-bot", []string{"run", "-", "hi"}, "not an agent spec"},
-		{"a misspelt field", `{"name":"x","provider":"offline","model":"m","system-prompt":"hi"}`, []string{"run", "-", "hi"}, `unknown field "system-prompt"`},
-		{"two specs", `{"name":"x"} {"name":"y"}`, []string{"run", "-", "hi"}, "more than one JSON value"},
-		{"no system prompt", `{"name":"x","provider":"offline","model":"m"}`, []string{"run", "-", "hi"}, "empty system prompt"},
-		{"an unknown provider", `{"name":"x","provider":"house","model":"m","system_prompt":"hi"}`, []string{"run", "-", "hi"}, `names provider "house"`},
-		{"an approval for a tool it is not granted", `{"name":"x","provider":"offline","model":"m","system_prompt":"hi","approvals":["deploy"]}`, []string{"run", "-tools", "-"}, "deploy"},
+		{"no frontmatter", "name: docs-bot", []string{"run", "-", "hi"}, "frontmatter"},
+		{"no prompt", agentFile("model:\n  use: offline/m\n", ""), []string{"run", "-", "hi"}, "prompt is empty"},
+		{"no model", agentFile("", "hi"), []string{"run", "-", "hi"}, "a model is required"},
+		{"an unknown provider", agentFile("model:\n  use: house/m\n", "hi"), []string{"run", "-", "hi"}, `names provider "house"`},
+		{"an approval for a tool it is not granted", agentFile("model:\n  use: offline/m\napproval:\n  ask: [deploy]\n", "hi"), []string{"run", "-tools", "-"}, "deploy"},
+		{"a subagent it cannot resolve", agentFile("model:\n  use: offline/m\nsubagents:\n  - ref: helper\n", "hi"), []string{"run", "-tools", "-"}, "helper"},
+		{"a misspelt policy field", "", []string{"run", "-policy", writeFile(t, "p.json", `{"tagged-only": true}`), good, "hi"}, `unknown field "tagged-only"`},
+		{"two policies", "", []string{"run", "-policy", writeFile(t, "p.json", `{} {}`), good, "hi"}, "more than one JSON value"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, stdout, stderr := fiberCLI(t, tc.stdin, tc.args...)
@@ -302,55 +320,51 @@ func TestHelpIsExitZero(t *testing.T) {
 // the answer's fragments together, and shows a terminal event's answer when
 // none of it streamed, as a replayed attempt's does not.
 func TestTextShowsEachEventUnderItsKind(t *testing.T) {
-	ev := func(k envelope.Kind, body any) envelope.Event {
-		b, err := payload.Encode(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return envelope.Event{Kind: k, Agent: "docs-bot", Rev: 2, RunID: "r1", Payload: b}
+	ev := func(body event.Body) event.Envelope {
+		return event.Envelope{Type: body.Type(), Agent: "docs-bot", Version: "2.0.0", Run: "r1", Data: body}
 	}
 	for _, tc := range []struct {
 		name   string
-		events []envelope.Event
+		events []event.Envelope
 		want   string
 	}{
-		{"fragments stay on one line until another kind", []envelope.Event{
-			ev(envelope.KindText, payload.Text{Text: "Merging "}),
-			ev(envelope.KindText, payload.Text{Text: "releases."}),
-			ev(envelope.KindToolCall, payload.ToolCall{Name: "lookup", Phase: payload.PhaseRequested}),
-			ev(envelope.KindToolCall, payload.ToolCall{Name: "lookup", Phase: payload.PhaseExecuting, Arguments: json.RawMessage(`{ "q": "x" }`)}),
-			ev(envelope.KindToolDone, payload.ToolDone{Name: "lookup", Result: "two\nrows"}),
-			ev(envelope.KindToolDone, payload.ToolDone{Name: "lookup", Error: "refused"}),
-			ev(envelope.KindThinking, payload.Thinking{Text: "hmm"}),
-			ev(envelope.KindText, payload.Text{Text: "Done.\n"}),
-			ev(envelope.KindCompleted, payload.Lifecycle{Attempt: 1, Text: "Merging releases.Done."}),
+		{"fragments stay on one line until another kind", []event.Envelope{
+			ev(event.Text{Text: "Merging "}),
+			ev(event.Text{Text: "releases."}),
+			ev(event.ToolCall{Name: "lookup", Phase: event.PhaseRequested}),
+			ev(event.ToolCall{Name: "lookup", Phase: event.PhaseExecuting, Arguments: json.RawMessage(`{ "q": "x" }`)}),
+			ev(event.ToolDone{Name: "lookup", Result: "two\nrows"}),
+			ev(event.ToolDone{Name: "lookup", Error: "refused"}),
+			ev(event.Thinking{Text: "hmm"}),
+			ev(event.Text{Text: "Done.\n"}),
+			ev(event.Completed{Attempt: 1, Text: "Merging releases.Done."}),
 		}, "Merging releases.\n" +
-			"[delta.tool.call] lookup (requested)\n" +
-			"[delta.tool.call] lookup {\"q\":\"x\"}\n" +
-			"[delta.tool.done] lookup: two rows\n" +
-			"[delta.tool.done] lookup failed: refused\n" +
-			"[delta.thinking] hmm\n" +
+			"[run.delta.tool.call.v1] lookup (requested)\n" +
+			"[run.delta.tool.call.v1] lookup {\"q\":\"x\"}\n" +
+			"[run.delta.tool.done.v1] lookup: two rows\n" +
+			"[run.delta.tool.done.v1] lookup failed: refused\n" +
+			"[run.delta.thinking.v1] hmm\n" +
 			"Done.\n" +
-			"[lifecycle.completed] attempt 1\n"},
-		{"an answer that did not stream is shown with its ending", []envelope.Event{
-			ev(envelope.KindAccepted, payload.Lifecycle{Rev: 2}),
-			ev(envelope.KindResumed, payload.Lifecycle{Attempt: 2}),
-			ev(envelope.KindCompleted, payload.Lifecycle{Attempt: 2, Text: "From the ledger."}),
-		}, "[lifecycle.accepted] docs-bot revision 2, run r1\n" +
-			"[lifecycle.resumed] attempt 2\n" +
-			"[lifecycle.completed] attempt 2\n" +
+			"[run.completed.v1] attempt 1\n"},
+		{"an answer that did not stream is shown with its ending", []event.Envelope{
+			ev(event.Accepted{}),
+			ev(event.Resumed{Attempt: 2}),
+			ev(event.Completed{Attempt: 2, Text: "From the ledger."}),
+		}, "[run.accepted.v1] docs-bot version 2.0.0, run r1\n" +
+			"[run.resumed.v1] attempt 2\n" +
+			"[run.completed.v1] attempt 2\n" +
 			"From the ledger.\n"},
-		{"failures, questions and citations", []envelope.Event{
-			ev(envelope.KindFailed, payload.Lifecycle{Attempt: 1, Error: "boom"}),
-			ev(envelope.KindFailed, payload.Lifecycle{Attempt: 2, Error: "boom", Terminal: true}),
-			ev(envelope.KindParked, payload.Lifecycle{Question: &payload.Question{Kind: payload.QuestionChoice, Prompt: "Which?", Options: []string{"a", "b"}}}),
-			ev(envelope.KindCitation, payload.Citation{Label: "[1]", Source: payload.Provenance{SourceURI: "https://docs.example/x"}}),
-			{Kind: "custom.kind", Payload: []byte(`{"a": 1}`)},
-		}, "[lifecycle.failed] attempt 1: boom; the run may be attempted again\n" +
-			"[lifecycle.failed] attempt 2: boom; the run will not be attempted again\n" +
-			"[lifecycle.parked] choice: Which? [a, b]\n" +
-			"[delta.citation] [1] https://docs.example/x\n" +
-			"[custom.kind] {\"a\":1}\n"},
+		{"failures, questions and citations", []event.Envelope{
+			ev(event.Failed{Attempt: 1, Error: "boom"}),
+			ev(event.Failed{Attempt: 2, Error: "boom", Terminal: true}),
+			ev(event.Parked{Question: &event.Question{Kind: event.QuestionChoice, Prompt: "Which?", Options: []string{"a", "b"}}}),
+			ev(event.Citation{Label: "[1]", Source: event.Provenance{SourceURI: "https://docs.example/x"}}),
+			{Type: "custom.thing.v1", Data: event.Unknown{TypeName: "custom.thing.v1", Raw: json.RawMessage(`{"a": 1}`)}},
+		}, "[run.failed.v1] attempt 1: boom; the run may be attempted again\n" +
+			"[run.failed.v1] attempt 2: boom; the run will not be attempted again\n" +
+			"[run.parked.v1] choice: Which? [a, b]\n" +
+			"[run.delta.citation.v1] [1] https://docs.example/x\n" +
+			"[custom.thing.v1] {\"a\":1}\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var b strings.Builder

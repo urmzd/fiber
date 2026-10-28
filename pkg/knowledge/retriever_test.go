@@ -6,9 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	ragtypes "github.com/urmzd/saige/rag/types"
-
 	"github.com/urmzd/fiber/pkg/knowledge"
+	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 )
 
 // retriever restates pkg/agentrt.Retriever. The adapter exists to satisfy that

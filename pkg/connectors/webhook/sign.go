@@ -24,17 +24,20 @@ const (
 	HeaderTimestamp = "X-Fiber-Timestamp"
 
 	// HeaderDelivery identifies one event exactly: "<run id>/<seq>". It is the
-	// dedupe key. Delivery is at-least-once and the router retries, so a
+	// dedupe key. Delivery is at-least-once and egress retries, so a
 	// receiver will see the same delivery id more than once and must treat the
 	// second as a no-op.
 	HeaderDelivery = "X-Fiber-Delivery"
 
-	// HeaderEvent carries the event kind, so a receiver can route on a header
+	// HeaderEvent carries the event type, so a receiver can route on a header
 	// rather than parsing a body it is about to discard.
 	HeaderEvent = "X-Fiber-Event"
 
-	// HeaderTopic carries the bus topic the event was published on.
-	HeaderTopic = "X-Fiber-Topic"
+	// HeaderChannel carries the channel the event was published on.
+	HeaderChannel = "X-Fiber-Channel"
+
+	// HeaderVersion carries the body version, BodyVersion.
+	HeaderVersion = "Fiber-Event-Version"
 )
 
 // Version is the signing scheme version that prefixes the base string and the

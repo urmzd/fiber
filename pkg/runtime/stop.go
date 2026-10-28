@@ -2,9 +2,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +11,10 @@ import (
 
 	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
+	turnrt "github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // Stopping a run.
@@ -35,11 +31,11 @@ import (
 // the bus every process shares (the fast path), where the attempt executing
 // the run listens for as long as its turn lasts.
 //
-// The request does not travel on the run's own topic. That topic has one
+// The request does not travel on the run's own stream. That stream has one
 // writer, the attempt, which chooses its own sequence numbers (see seq.go),
 // and the bus keeps the first write of a sequence: a second writer would land
 // on numbers the attempt is about to use and displace its events. The request
-// goes to a stop stream of its own instead (StopTopic), keyed by the asker's
+// goes to a control channel of its own instead (StopChannel), keyed by the asker's
 // tenant and the run id, so that one tenant's requests never share a stream
 // with another's.
 //
@@ -75,7 +71,7 @@ import (
 //
 // # How long the bus keeps a request
 //
-// A request is retained under its own stream, the topic StopTopic returns. It
+// A request is retained on its own channel, the one StopChannel returns. It
 // does not share the run's stream, so a chatty run cannot push it out. That
 // stream is bounded like any other:
 //
@@ -232,7 +228,7 @@ var ErrStopUnavailable = errors.New("runtime: stop is not available")
 // implements it can stop its runs; one whose Bus does not, cannot, and says so
 // with ErrStopUnavailable. Every backend in pkg/bus implements it.
 type Subscriber interface {
-	Subscribe(ctx context.Context, sub envelope.Subscription) (bus.Stream, error)
+	Subscribe(ctx context.Context, sub bus.Subscription) (bus.Stream, error)
 }
 
 // StopRequest asks one run to stop.
@@ -263,28 +259,16 @@ func WithStopGrace(d time.Duration) Option {
 	}
 }
 
-// StopTopic is where a tenant's requests to stop a run are published and where
-// the attempt executing that run, if it is the tenant's, listens:
-// agent:_control:stop-<key>, the key a hash of the tenant and the run id.
+// StopChannel is where a tenant's requests to stop a run are published and
+// where the attempt executing that run, if it is the tenant's, listens:
+// control://<tenant>/stop/<key>, the key a hash of the tenant and the run id.
 //
 // The tenant is part of the address so that one tenant's requests can never
-// land in the stream another tenant's run listens on. A run id is a hash of a
-// tenant and a tag id anyone can compute; without the tenant here, a tenant
-// could publish enough requests for another tenant's run to push that tenant's
-// own request out of the stream before the run read it. The tenant a request
-// is published under is the caller's credential's, never something the caller
-// chooses, so the stream a request lands in is fixed by who asked.
-func StopTopic(tenant, runID string) (topic.Topic, error) {
-	if _, err := topic.Run("probe", runID); err != nil {
-		return topic.Topic{}, err
-	}
-	h := sha256.New()
-	var n [binary.MaxVarintLen64]byte
-	for _, field := range []string{tenant, runID} {
-		h.Write(n[:binary.PutUvarint(n[:], uint64(len(field)))])
-		h.Write([]byte(field))
-	}
-	return topic.Control(stopVerb, hex.EncodeToString(h.Sum(nil)[:16]))
+// land in the stream another tenant's run listens on. The tenant a request is
+// published under is the caller's credential's, never something the caller
+// chooses.
+func StopChannel(tenant, runID string) (string, error) {
+	return controlChannel(stopVerb, tenant, runID)
 }
 
 // Stop asks a run to stop.
@@ -345,16 +329,16 @@ func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
 		return fmt.Errorf("%w: the bus this runtime was built with cannot be subscribed to", ErrStopUnavailable)
 	}
 	req.RunID = strings.TrimSpace(req.RunID)
-	tp, err := StopTopic(req.Tenant, req.RunID)
+	ch, err := StopChannel(req.Tenant, req.RunID)
 	if err != nil {
 		return fmt.Errorf("%w: stop: %w", ErrInvalid, err)
 	}
 	reason := clip(req.Reason)
 	if reason == "" {
-		reason = agentrt.DefaultStopReason
+		reason = native.DefaultStopReason
 	}
 	at := r.now().UTC()
-	body, err := payload.Encode(payload.StopRequest{
+	body, err := json.Marshal(event.StopRequest{
 		RunID:  req.RunID,
 		Reason: reason,
 		By:     clip(req.By),
@@ -371,16 +355,17 @@ func (r *Runtime) Stop(ctx context.Context, req StopRequest) error {
 			return err
 		}
 	}
-	// Seq is left for the bus to assign: this stream has many writers and
-	// none of them replays.
-	e := envelope.Event{
-		Topic:   tp,
-		RunID:   tp.RunID(),
-		Tenant:  req.Tenant,
-		Agent:   topic.ControlName,
-		Kind:    envelope.KindStop,
-		Payload: body,
-		At:      at,
+	// A request is not a run event: it has no sequence, and the bus keeps
+	// it once by its id.
+	e := event.Envelope{
+		ID:      requestID(stopVerb, req.RunID, at),
+		Source:  "fiber://control",
+		Type:    event.TypeStop,
+		Channel: ch,
+		Time:    at,
+		Tenant:  busTenant(req.Tenant),
+		Run:     req.RunID,
+		Data:    event.StopRequest{RunID: req.RunID, Reason: reason, By: clip(req.By), At: at},
 	}
 	if err := r.bus.Publish(ctx, e); err != nil {
 		return fmt.Errorf("runtime: stop %s: %w", req.RunID, err)
@@ -409,7 +394,7 @@ func (r *Runtime) recordStop(ctx context.Context, tenant, runID string, body []b
 		return false, nil
 	}
 	var in Input
-	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
 		// Not a run of this runtime's, or not the asker's.
 		return false, nil
 	}
@@ -463,14 +448,14 @@ func (r *Runtime) StopRequested(ctx context.Context, tenant, runID string) (Stop
 		return StopRecord{}, false, fmt.Errorf("runtime: stop state of %s: %w", runID, err)
 	}
 	var in Input
-	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
+	if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
 		return StopRecord{}, false, nil
 	}
 	for _, record := range records {
 		if record.Key != stopRecordKey || record.Status != run.RecordOK {
 			continue
 		}
-		var body payload.StopRequest
+		var body event.StopRequest
 		if err := json.Unmarshal(record.Output, &body); err != nil || body.RunID != runID {
 			continue
 		}
@@ -503,27 +488,27 @@ func (r *Runtime) loadRun(ctx context.Context, runID string) (run.Run, error) {
 // again. A ledger that cannot be read is logged and treated as no request:
 // the bus is still listening, and refusing to run because a read failed
 // would turn a ledger hiccup into a failed run.
-func (r *Runtime) recordedStop(ctx context.Context, runID string) (agentrt.Stop, bool) {
+func (r *Runtime) recordedStop(ctx context.Context, runID string) (native.Stop, bool) {
 	if r.stops == nil {
-		return agentrt.Stop{}, false
+		return native.Stop{}, false
 	}
 	_, records, err := r.recordsOf(ctx, runID, false, prefixStop)
 	if err != nil {
 		r.logger.Warn("fiber/runtime: could not read recorded stop requests; relying on the bus",
 			"run_id", runID, "error", err)
-		return agentrt.Stop{}, false
+		return native.Stop{}, false
 	}
 	for _, rec := range records {
 		if rec.Key != stopRecordKey || rec.Status != run.RecordOK {
 			continue
 		}
-		var body payload.StopRequest
+		var body event.StopRequest
 		if err := json.Unmarshal(rec.Output, &body); err != nil || body.RunID != runID {
 			continue
 		}
-		return agentrt.Stop{Reason: body.Reason, By: body.By}, true
+		return native.Stop{Reason: body.Reason, By: body.By}, true
 	}
-	return agentrt.Stop{}, false
+	return native.Stop{}, false
 }
 
 // clip trims free text from a stop request and bounds it, on a rune boundary.
@@ -539,44 +524,38 @@ func clip(s string) string {
 	return s[:end]
 }
 
-type stopSignalKey struct{}
-
 // StopSignal returns the channel on which the turn executing under ctx is
 // asked to stop, or nil when it cannot be.
 //
-// It is how an Executor learns of a stop. The runtime puts the channel on the
-// context it calls Execute with and sends at most one value on it. An executor
-// that reads it wraps the turn up and returns an Outcome with Stopped set and
-// no error. One that never reads it is cancelled through the same context once
-// the grace period is over (see WithStopGrace), and the run ends stopped
-// either way.
+// It is how a turn.Runtime learns of a stop. The runtime puts the channel on
+// the context it calls Turn with and sends at most one value on it. A turn
+// that reads it wraps up and returns with Stopped set and no error. One that
+// never reads it is cancelled through the same context once the grace period
+// is over (see WithStopGrace), and the run ends stopped either way.
 //
-// It is a channel on the context rather than a method on Executor so that the
-// request waits for the turn: a stop that arrives before the executor has set
-// the turn up is still there when it looks.
-func StopSignal(ctx context.Context) <-chan agentrt.Stop {
-	ch, _ := ctx.Value(stopSignalKey{}).(chan agentrt.Stop)
-	return ch
-}
+// It is a channel on the context rather than a method so that the request
+// waits for the turn: a stop that arrives before the turn has started is
+// still there when it looks.
+func StopSignal(ctx context.Context) <-chan native.Stop { return turnrt.StopSignal(ctx) }
 
-// execute runs the turn through the executor, listening for a stop request for
+// execute runs the turn, listening for a stop request for
 // as long as it runs.
 //
-// It returns what the executor returned, with one exception: a turn that was
+// It returns what the turn returned, with one exception: a turn that was
 // asked to stop and then returned an error has done what was asked, by a
 // rougher route, and is reported as stopped with the text it had published.
 // Retrying it would restart work a person asked to end.
-func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
+func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(context.Context, event.Body) error) (Outcome, error) {
 	// A request recorded before this attempt began ends the turn before it
-	// starts: no executor, no model call.
+	// starts: no turn, no model call.
 	if stop, ok := r.recordedStop(ctx, req.RunID); ok {
-		return Outcome{Prompt: agentrt.RequestText(req.Text, req.Meta), Stopped: &stop, StopRecorded: true}, nil
+		return Outcome{Prompt: native.RequestText(req.Text, req.Meta), Stopped: &stop, StopRecorded: true}, nil
 	}
 	// Requests to compact are heard for as long as the turn runs (compact.go).
 	ctx, stopListening := r.listenCompact(ctx, in, req.RunID)
 	defer stopListening()
 	if r.control == nil && r.stops == nil {
-		return r.exec.Execute(ctx, req, emit)
+		return r.runOne(ctx, in, req, emit)
 	}
 	out, err := r.executeListening(ctx, in, req, emit)
 	if err == nil && r.stops != nil {
@@ -589,25 +568,25 @@ func (r *Runtime) execute(ctx context.Context, in Input, req Request, emit func(
 }
 
 // executeListening is execute for a runtime that can hear a stop request.
-func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
+func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, emit func(context.Context, event.Body) error) (Outcome, error) {
 
 	requests, release := r.listen(ctx, in, req.RunID)
 	defer release()
 
-	signal := make(chan agentrt.Stop, 1)
-	turnCtx, cancel := context.WithCancel(context.WithValue(ctx, stopSignalKey{}, signal))
+	signal := make(chan native.Stop, 1)
+	turnCtx, cancel := context.WithCancel(turnrt.WithStopSignal(ctx, signal))
 	defer cancel()
 
 	var (
 		mu     sync.Mutex
-		asked  *agentrt.Stop
+		asked  *native.Stop
 		said   strings.Builder
 		chunks int
 	)
 	returned := make(chan struct{})
 	relayed := make(chan struct{})
 	// settle ends the relay and waits for it. It is deferred as well as
-	// called, so an executor that panics leaves no goroutine behind: the
+	// called, so a turn that panics leaves no goroutine behind: the
 	// worker recovers the panic, and nothing else would ever close returned.
 	var settled sync.Once
 	settle := func() {
@@ -619,7 +598,7 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 	defer settle()
 	go func() {
 		defer close(relayed)
-		var stop agentrt.Stop
+		var stop native.Stop
 		select {
 		case stop = <-requests:
 		case <-returned:
@@ -641,17 +620,15 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 		}
 	}()
 
-	out, err := r.exec.Execute(turnCtx, req, func(ctx context.Context, c agentrt.Chunk) error {
-		if err := emit(ctx, c); err != nil {
+	out, err := r.runOne(turnCtx, in, req, func(ctx context.Context, b event.Body) error {
+		if err := emit(ctx, b); err != nil {
 			return err
 		}
 		mu.Lock()
 		defer mu.Unlock()
 		chunks++
-		if c.Kind == envelope.KindText {
-			if txt, derr := payload.Decode[payload.Text](envelope.Event{Kind: c.Kind, Payload: c.Payload}); derr == nil {
-				said.WriteString(txt.Text)
-			}
+		if txt, ok := b.(event.Text); ok {
+			said.WriteString(txt.Text)
 		}
 		return nil
 	})
@@ -661,7 +638,7 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 	defer mu.Unlock()
 	switch {
 	case err == nil:
-		// The executor's account stands. A turn that returned its whole
+		// The turn's account stands. A turn that returned its whole
 		// answer before the request took effect completed: "stopped" means
 		// cut short, and an answer that was finished was not.
 		return out, nil
@@ -675,12 +652,12 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 	}
 	r.logger.Warn("fiber/runtime: turn ended with an error after a stop request; the run ends stopped",
 		"run_id", req.RunID, "error", err)
-	// The executor never said what it sent, so the request is recorded as the
+	// The turn never said what it sent, so the request is recorded as the
 	// agent renders it before retrieval: the same words a turn stopped before
 	// it began records.
 	return Outcome{
 		Text: said.String(), Chunks: chunks, Stopped: asked,
-		Prompt: firstNonEmpty(out.Prompt, agentrt.RequestText(req.Text, req.Meta)),
+		Prompt: firstNonEmpty(out.Prompt, native.RequestText(req.Text, req.Meta)),
 	}, nil
 }
 
@@ -700,29 +677,28 @@ func (r *Runtime) executeListening(ctx context.Context, in Input, req Request, e
 // the isolation: a request stamped with another tenant is skipped as though it
 // had never been published. A ledger request was checked against the run's
 // tenant before it was written.
-func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan agentrt.Stop, func()) {
-	out := make(chan agentrt.Stop, 1)
+func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan native.Stop, func()) {
+	out := make(chan native.Stop, 1)
 	var once sync.Once
-	deliver := func(stop agentrt.Stop) {
+	deliver := func(stop native.Stop) {
 		once.Do(func() { out <- stop }) // buffered, and only one send happens
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	if r.control != nil {
-		tp, err := StopTopic(in.Tag.Tenant, runID)
+		ch, err := StopChannel(in.Trigger.Tenant, runID)
 		if err != nil {
-			// Accept built this run's own topic from the same id, so this
-			// cannot happen; a run that cannot be stopped is better than one
-			// that cannot start.
-			r.logger.Error("fiber/runtime: stop topic is invalid", "run_id", runID, "error", err)
+			// Accept checked this run's id, so this cannot happen; a run
+			// that cannot be stopped is better than one that cannot start.
+			r.logger.Error("fiber/runtime: stop channel is invalid", "run_id", runID, "error", err)
 		} else {
-			sub := envelope.Subscription{Topic: tp, Filter: envelope.Filter{Kinds: []string{string(envelope.KindStop)}}}
+			sub := bus.Subscription{Tenant: busTenant(in.Trigger.Tenant), Channels: []string{ch}, Types: []string{event.TypeStop}}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for ctx.Err() == nil {
-					stop, ok, err := r.firstStop(ctx, sub, in.Tag.Tenant, runID)
+					stop, ok, err := r.firstStop(ctx, sub, runID)
 					if ok {
 						deliver(stop)
 						return
@@ -768,27 +744,24 @@ func (r *Runtime) listen(ctx context.Context, in Input, runID string) (<-chan ag
 
 // firstStop reads one subscription until it yields a request this run should
 // honour, or ends.
-func (r *Runtime) firstStop(ctx context.Context, sub envelope.Subscription, tenant, runID string) (agentrt.Stop, bool, error) {
+func (r *Runtime) firstStop(ctx context.Context, sub bus.Subscription, runID string) (native.Stop, bool, error) {
 	stream, err := r.control.Subscribe(ctx, sub)
 	if err != nil {
-		return agentrt.Stop{}, false, err
+		return native.Stop{}, false, err
 	}
 	defer func() { _ = stream.Close() }()
 	for {
 		e, err := stream.Recv(ctx)
 		if err != nil {
-			return agentrt.Stop{}, false, err
+			return native.Stop{}, false, err
 		}
-		if e.Kind != envelope.KindStop || e.Tenant != tenant {
+		body, ok := e.Data.(event.StopRequest)
+		if !ok || e.Tenant != sub.Tenant || body.RunID != runID {
+			// The channel already names the run. A body that disagrees
+			// with it was not written by Stop, and is not obeyed.
 			continue
 		}
-		body, err := payload.Decode[payload.StopRequest](e)
-		if err != nil || body.RunID != runID {
-			// The topic already names the run. A body that disagrees with
-			// it was not written by Stop, and is not obeyed.
-			continue
-		}
-		return agentrt.Stop{Reason: body.Reason, By: body.By}, true, nil
+		return native.Stop{Reason: body.Reason, By: body.By}, true, nil
 	}
 }
 

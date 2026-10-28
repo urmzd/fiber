@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"sync"
@@ -11,38 +12,38 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // ErrSchedule reports a schedule that cannot be run. Callers match with
 // errors.Is.
 var ErrSchedule = errors.New("cron: invalid schedule")
 
-// Schedule is one standing request: run this agent, with this text, on this
-// expression, delivering to these routes.
+// Schedule is one standing request: publish this text on this expression.
 //
-// It is the whole of what a schedule is. There is no per-schedule state here —
-// no "last run", no "next run" — because a schedule is a declaration and the
+// It is the whole of what a schedule is. There is no per-schedule state here,
+// no "last run" and no "next run", because a schedule is a declaration and the
 // position in it belongs to whoever is ticking, which is the connector.
 type Schedule struct {
 	// Name identifies the schedule and appears in two places that outlive this
-	// process: the source address and the occurrence id. It is held to the
-	// address workspace charset (letters, digits, "-", "_") so that both stay
-	// readable and unescaped.
+	// process: the channel and the occurrence id. It is held to the address
+	// workspace charset (letters, digits, "-", "_") so that both stay readable
+	// and unescaped.
 	Name string
 
 	// Expression is a standard 5-field cron expression. See Parse.
 	Expression string
 
-	// Agent is the agent to run.
+	// Agent, when set, is made a member of the schedule's channel that wakes
+	// on its ticks (Config.Members). The tick itself names no agent.
 	Agent string
 
-	// Text is the request the agent receives. A schedule has no human typing a
+	// Text is the request a tick carries. A schedule has no human typing a
 	// message, so this is the message: "summarize yesterday's incidents".
 	Text string
 
 	// Tenant is the authorization scope the schedule was created under, and it
-	// becomes both Tag.Tenant and the workspace of the source address.
+	// becomes both the tick's tenant and the workspace of its channel.
 	//
 	// A schedule is the one trigger where carrying a tenant is not "trusting the
 	// wire": nothing arrives from outside. The schedule is a stored object,
@@ -50,26 +51,19 @@ type Schedule struct {
 	// that credential's scope recorded at creation time.
 	Tenant string
 
-	// Routes are where this schedule's events go. Empty is meaningful and
-	// correct: a schedule has no surface to answer on, so a schedule with no
-	// routes still runs, still publishes every event to the bus, and simply has
-	// nowhere to be rendered. Anyone subscribed to the agent's topic sees it.
-	Routes []envelope.Route
-
-	// Meta is extra context for the agent's tools, merged under the cron_* keys
-	// this connector sets.
-	Meta map[string]string
+	// Context is extra trigger context shown to the agent next to the tick's
+	// own fields. It never overrides them.
+	Context map[string]string
 }
 
-// Validate reports whether the schedule can be run.
+// Validate checks that the schedule can run. It parses the expression, so a
+// schedule that passes cannot fail to schedule later.
 func (s Schedule) Validate() error {
 	switch {
 	case s.Name == "":
 		return fmt.Errorf("%w: schedule has no name", ErrSchedule)
-	case s.Agent == "":
-		return fmt.Errorf("%w: schedule %q names no agent", ErrSchedule, s.Name)
 	case s.Tenant == "":
-		return fmt.Errorf("%w: schedule %q has no tenant, so it has no scope and no source address", ErrSchedule, s.Name)
+		return fmt.Errorf("%w: schedule %q has no tenant, so it has no scope and no channel", ErrSchedule, s.Name)
 	}
 	if err := address.ValidWorkspace(s.Name); err != nil {
 		return fmt.Errorf("%w: schedule name %q is not usable in an address or an occurrence id: %w", ErrSchedule, s.Name, err)
@@ -77,84 +71,55 @@ func (s Schedule) Validate() error {
 	if err := address.ValidWorkspace(s.Tenant); err != nil {
 		return fmt.Errorf("%w: schedule %q has a tenant that cannot be an address workspace: %w", ErrSchedule, s.Name, err)
 	}
-	if !mention.Valid(s.Agent) {
+	if s.Agent != "" && !mention.Valid(s.Agent) {
 		return fmt.Errorf("%w: schedule %q names agent %q, which is not a usable agent name", ErrSchedule, s.Name, s.Agent)
 	}
 	if _, err := Parse(s.Expression); err != nil {
 		return fmt.Errorf("%w: schedule %q: %w", ErrSchedule, s.Name, err)
 	}
-	for i, r := range s.Routes {
-		if err := r.Validate(); err != nil {
-			return fmt.Errorf("%w: schedule %q route %d: %w", ErrSchedule, s.Name, i, err)
-		}
-	}
 	return nil
 }
 
-// Source is the address a schedule's tags come from: cron://<tenant>/<name>.
-//
-// It is not a deliverable address — this connector implements no Sink, and
-// Registry.Sink refuses it — which is the point. Tag.Routes falls back to
-// Tag.Source only when the source is set, so a cron tag with no routes reaching
-// a source that cannot receive would be a delivery loop with no destination. The
-// address exists to say WHERE the tag came from, for audit and for the agent's
-// own context, and pkg/router never resolves it because a cron tag with no
-// routes produces no routes at all.
-func (s Schedule) Source() address.Address {
+// Channel is where the schedule's ticks are published:
+// cron://<tenant>/<name>. Its members decide who a tick wakes, and an egress
+// adapter subscribed to it renders the runs.
+func (s Schedule) Channel() address.Address {
 	return address.Address{Connector: Name, Workspace: s.Tenant, Path: []string{s.Name}}
 }
 
-// OccurrenceID is the idempotency key for one firing of one schedule.
+// OccurrenceID is the identity of one firing: "<schedule>@<unix seconds>".
 //
-// This is the entire correctness story of the cron trigger, so it is worth being
-// exact about what it buys. The id is derived from the SCHEDULED instant, never
-// from the instant we noticed it was due, and the scheduled instant is a
-// property of the expression rather than of this process. Two consequences
-// follow, and they are the two failures a scheduler has:
-//
-//   - A process restart cannot double-fire. If 03:00 already produced
-//     "nightly@1769913600" and a restarted process were to emit 03:00 again, it
-//     would emit the same id, which is the run's idempotency key: the redelivery
-//     joins the run that exists instead of starting a second one.
-//   - Two processes running the same schedule cannot double-fire either, for the
-//     same reason. Leader election makes that efficient; it is not what makes it
-//     correct.
-//
-// Unix seconds rather than RFC 3339 because the id travels as a run key and a
-// log field: it is short, it never contains a separator, and it is the same
-// string in every time zone.
+// It is derived from the occurrence, never from the clock of the process that
+// computed it, so every replica and every restart computes the same id for the
+// same firing. That id is the tick's event id, and so part of its run key: a
+// firing seen twice joins one run.
 func OccurrenceID(schedule string, occurrence time.Time) string {
 	return schedule + "@" + strconv.FormatInt(occurrence.Unix(), 10)
 }
 
-// tag renders one occurrence of this schedule as a Tag.
-func (s Schedule) tag(occurrence time.Time) envelope.Tag {
-	meta := map[string]string{
-		"cron_schedule":   s.Name,
-		"cron_expression": s.Expression,
-		// The scheduled instant, not the observed one. An agent asked to
-		// "summarize yesterday" needs to know which day it was supposed to run
-		// for, which is not the same as when it actually got the message.
-		"cron_occurrence": occurrence.UTC().Format(time.RFC3339),
+// tick is the cron.tick.v1 event of one occurrence. Its source is opaque
+// ("cron:<tenant>/<name>"), not an address: a tick has no surface, so each
+// run it starts is a conversation of its own.
+func (s Schedule) tick(occurrence time.Time) event.Envelope {
+	actor := event.Actor{ID: Name + ":" + s.Name, Display: "schedule " + s.Name, Bot: true}
+	req := event.Request{Text: s.Text, Actor: actor}
+	if len(s.Context) > 0 {
+		req.Context = maps.Clone(s.Context)
 	}
-	for k, v := range s.Meta {
-		if _, taken := meta[k]; !taken {
-			meta[k] = v
-		}
-	}
-	return envelope.Tag{
-		ID:     OccurrenceID(s.Name, occurrence),
-		Tenant: s.Tenant,
-		Agent:  s.Agent,
-		Origin: Name,
-		Source: s.Source(),
-		Text:   s.Text,
-		// The actor is the schedule itself, marked as automation so a sink
-		// rendering "who asked" does not invent a human.
-		Actor:   envelope.Actor{ID: Name + ":" + s.Name, Display: "schedule " + s.Name, Bot: true},
-		Deliver: s.Routes,
-		Meta:    meta,
-		At:      occurrence,
+	return event.Envelope{
+		ID:      OccurrenceID(s.Name, occurrence),
+		Source:  Name + ":" + s.Tenant + "/" + s.Name,
+		Type:    event.TypeCronTick,
+		Subject: s.Name,
+		Channel: s.Channel().String(),
+		Time:    occurrence.UTC(),
+		Tenant:  s.Tenant,
+		Data: event.CronTick{
+			Request:    req,
+			Schedule:   s.Name,
+			Expression: s.Expression,
+			Occurrence: occurrence.UTC(),
+		},
 	}
 }
 

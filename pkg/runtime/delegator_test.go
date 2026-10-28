@@ -16,17 +16,16 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // scripted gives each agent its own canned model, keyed by the agent's name,
 // so a turn can call a tool and then answer without a model being called.
-func scripted(scripts map[string][][]saigetypes.Delta) agentrt.Option {
+func scripted(scripts map[string][][]saigetypes.Delta) native.Option {
 	var mu sync.Mutex
-	return agentrt.WithProvider(agentrt.ProviderOffline, func(spec agentrt.Spec) (saigetypes.Provider, error) {
+	return native.WithProvider(native.ProviderOffline, func(spec native.Spec) (saigetypes.Provider, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		return &agenttest.ScriptedProvider{Responses: scripts[spec.Name]}, nil
@@ -35,7 +34,7 @@ func scripted(scripts map[string][][]saigetypes.Delta) agentrt.Option {
 
 // delegating builds a real sandbox with a lead that may tag a helper. The
 // lead's model tags the helper once and then repeats what came back.
-func delegating(t *testing.T, opts ...runtime.SandboxOption) (*runtime.Sandbox, agentrt.Revision) {
+func delegating(t *testing.T, opts ...runtime.SandboxOption) (*runtime.Sandbox, native.Revision) {
 	t.Helper()
 	ws, err := workspace.NewLocal(t.TempDir())
 	if err != nil {
@@ -45,8 +44,8 @@ func delegating(t *testing.T, opts ...runtime.SandboxOption) (*runtime.Sandbox, 
 	plane := controlplane.NewMemory(inproc.NewFactory(tools, ws), metrics.Nop())
 	history := newSpecs()
 	history.revise("helper", "Help.")
-	lead := history.revise("lead", "Lead.")
-	lead.Spec.Access.Spawn = []string{"helper"}
+	history.revise("lead", "Lead.")
+	lead := history.edit("lead", func(s *native.Spec) { s.Access.Spawn = []string{"helper"} })
 
 	opts = append([]runtime.SandboxOption{runtime.WithAgentOptions(scripted(map[string][][]saigetypes.Delta{
 		"lead": {
@@ -62,30 +61,26 @@ func delegating(t *testing.T, opts ...runtime.SandboxOption) (*runtime.Sandbox, 
 	return s, lead
 }
 
-func runLead(t *testing.T, s *runtime.Sandbox, lead agentrt.Revision) (runtime.Outcome, []agentrt.Chunk, error) {
+func runLead(t *testing.T, s *runtime.Sandbox, lead native.Revision) (runtime.Outcome, []event.Body, error) {
 	t.Helper()
-	var chunks []agentrt.Chunk
-	out, err := s.Execute(context.Background(), runtime.Request{RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "How are the tests?", Revision: lead},
-		func(_ context.Context, c agentrt.Chunk) error {
+	var chunks []event.Body
+	out, err := s.Execute(context.Background(), withPin(runtime.Request{RunID: "run-1", Tenant: "acme", Attempt: 1, Text: "How are the tests?"}, lead),
+		func(_ context.Context, c event.Body) error {
 			chunks = append(chunks, c)
 			return nil
 		})
 	return out, chunks, err
 }
 
-func toolResult(t *testing.T, chunks []agentrt.Chunk) payload.ToolDone {
+func toolResult(t *testing.T, chunks []event.Body) event.ToolDone {
 	t.Helper()
 	for _, c := range chunks {
-		if c.Kind == envelope.KindToolDone {
-			done, err := payload.Decode[payload.ToolDone](envelope.Event{Kind: c.Kind, Payload: c.Payload})
-			if err != nil {
-				t.Fatal(err)
-			}
+		if done, ok := c.(event.ToolDone); ok {
 			return done
 		}
 	}
 	t.Fatalf("no tool result among %d chunks", len(chunks))
-	return payload.ToolDone{}
+	return event.ToolDone{}
 }
 
 // With no Delegator a delegation is what it always was: a sub-task of the
@@ -95,7 +90,7 @@ func TestDelegationIsASubTaskByDefault(t *testing.T) {
 	s, lead := delegating(t, runtime.WithReplicas(1))
 	type result struct {
 		out    runtime.Outcome
-		chunks []agentrt.Chunk
+		chunks []event.Body
 		err    error
 	}
 	done := make(chan result, 1)
@@ -131,12 +126,12 @@ func TestDelegatorCarriesOutADelegation(t *testing.T) {
 		run, tenant  string
 		target, text string
 	}
-	s, lead := delegating(t, runtime.WithDelegator(func(_ context.Context, parent runtime.Request, target, text string, report func(payload.Action) error) (string, error) {
+	s, lead := delegating(t, runtime.WithDelegator(func(_ context.Context, parent runtime.Request, target, text string, report func(event.Action) error) (string, error) {
 		got.Lock()
 		defer got.Unlock()
 		got.calls++
 		got.run, got.tenant, got.target, got.text = parent.RunID, parent.Tenant, target, text
-		if err := report(payload.Action{Name: runtime.DelegateToolName(target), Address: "run:child-1"}); err != nil {
+		if err := report(event.Action{Name: runtime.DelegateToolName(target), Address: "run:child-1"}); err != nil {
 			return "", err
 		}
 		return "Answered by a run of its own.", nil
@@ -156,7 +151,7 @@ func TestDelegatorCarriesOutADelegation(t *testing.T) {
 	}
 	reported := false
 	for _, c := range chunks {
-		if c.Kind == envelope.KindActionTaken && strings.Contains(string(c.Payload), "run:child-1") {
+		if a, ok := c.(event.Action); ok && strings.Contains(a.Summary+a.Target+a.Address+string(a.Data), "run:child-1") {
 			reported = true
 		}
 	}
@@ -168,7 +163,7 @@ func TestDelegatorCarriesOutADelegation(t *testing.T) {
 // A refusal from the Delegator is the tool failing, which the model can read
 // and answer around. It does not end the turn.
 func TestDelegatorRefusalIsAToolError(t *testing.T) {
-	s, lead := delegating(t, runtime.WithDelegator(func(context.Context, runtime.Request, string, string, func(payload.Action) error) (string, error) {
+	s, lead := delegating(t, runtime.WithDelegator(func(context.Context, runtime.Request, string, string, func(event.Action) error) (string, error) {
 		return "", errors.New("the tree is at its depth limit")
 	}))
 	out, chunks, err := runLead(t, s, lead)

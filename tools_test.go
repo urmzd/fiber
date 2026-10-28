@@ -14,12 +14,12 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
-	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // A listing of an agent's tools is what a run of the tag would be granted,
@@ -34,7 +34,7 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 		tenant   = "acme"
 		anaToken = "ana-own-token-do-not-print"
 	)
-	t.Setenv(agentrt.EnvAnthropicKey, "")
+	t.Setenv(native.EnvAnthropicKey, "")
 
 	var mu sync.Mutex
 	var seen []string
@@ -59,7 +59,7 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 		t.Fatal(err)
 	}
 	search.Class = toolprovider.ClassRead
-	people := mcptools.PersonResolverFunc(func(_ context.Context, _ string, _ toolprovider.Provider, a envelope.Actor) (mcptools.PersonCredential, error) {
+	people := mcptools.PersonResolverFunc(func(_ context.Context, _ string, _ toolprovider.Provider, a event.Actor) (mcptools.PersonCredential, error) {
 		if a.User == "u-ana" {
 			return mcptools.PersonCredential{Secret: mcptools.NewSecret(anaToken)}, nil
 		}
@@ -69,21 +69,23 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 		WithToolProvider(toolprovider.Provider{Name: "issues", Transport: toolprovider.TransportHTTP,
 			Endpoint: mcpTS.URL, CredentialScope: toolprovider.ScopePerson}, search))
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, tenant, agentspec.AgentSpec{
-		Name: "triage", Provider: agentspec.ProviderAnthropic, Model: "m", SystemPrompt: "Triage.",
-		Tools: []string{"mcp:issues", agentrt.AskPersonToolName, "jira_transition"},
+	if _, err := createAgent(app.Definitions(), ctx, tenant, definition.AgentSpec{
+		Name: "triage", Provider: definition.ProviderAnthropic, Model: "m", SystemPrompt: "Triage.",
+		Tools: []string{"mcp:issues", native.AskPersonToolName, "jira_transition"},
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	listFor := func(a envelope.Actor) agentrt.Granted {
+	listFor := func(a event.Actor) native.Granted {
 		t.Helper()
-		g, err := app.ToolsFor(ctx, envelope.Tag{Tenant: tenant, Agent: "triage", Origin: "test", Actor: a})
+		e := posted("list", tenant, "triage", "inbox://"+tenant+"/out", "")
+		e.Data = event.MessagePosted{Request: event.Request{Actor: a, Mentions: []string{"triage"}}}
+		g, err := app.ToolsFor(ctx, e, "triage")
 		if err != nil {
 			t.Fatalf("ToolsFor %+v: %v", a, err)
 		}
 		return g
 	}
-	names := func(g agentrt.Granted) (tools, unavailable []string) {
+	names := func(g native.Granted) (tools, unavailable []string) {
 		for _, d := range g.Tools {
 			tools = append(tools, d.Name)
 		}
@@ -93,12 +95,12 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 		return tools, unavailable
 	}
 
-	anas := listFor(envelope.Actor{ID: "U-ana", User: "u-ana"})
+	anas := listFor(event.Actor{ID: "U-ana", User: "u-ana"})
 	if b, _ := json.Marshal(anas); strings.Contains(string(b), anaToken) {
 		t.Errorf("ana's credential is in her listing: %s", b)
 	}
 	tools, missing := names(anas)
-	if !slices.Equal(tools, []string{agentrt.AskPersonToolName, "issues__search"}) || !slices.Equal(missing, []string{"jira_transition"}) {
+	if !slices.Equal(tools, []string{native.AskPersonToolName, "issues__search"}) || !slices.Equal(missing, []string{"jira_transition"}) {
 		t.Errorf("ana is shown %v and %v unavailable, want ask_person and issues__search, and jira_transition", tools, missing)
 	}
 	mu.Lock()
@@ -110,15 +112,15 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		who  envelope.Actor
+		who  event.Actor
 		note string
 	}{
-		{envelope.Actor{ID: "U-carol", User: "u-carol"}, "they have not connected one for issues"},
-		{envelope.Actor{}, "this request was made for no one"},
+		{event.Actor{ID: "U-carol", User: "u-carol"}, "they have not connected one for issues"},
+		{event.Actor{}, "this request was made for no one"},
 	} {
 		g := listFor(tc.who)
 		tools, missing := names(g)
-		if !slices.Equal(tools, []string{agentrt.AskPersonToolName}) || !slices.Equal(missing, []string{"jira_transition", "mcp:issues"}) {
+		if !slices.Equal(tools, []string{native.AskPersonToolName}) || !slices.Equal(missing, []string{"jira_transition", "mcp:issues"}) {
 			t.Errorf("%+v is shown %v and %v unavailable, want ask_person, and jira_transition and the group", tc.who, tools, missing)
 			continue
 		}
@@ -136,25 +138,19 @@ func TestAListingShowsEachPersonWhatTheirRunWouldBeGranted(t *testing.T) {
 	}
 }
 
-// An executor a program brings is asked for the listing only if it can
+// A turn runtime a program brings is asked for the listing only if it can
 // give one; otherwise the App says it cannot rather than guessing.
-func TestAListingNeedsAnExecutorThatCanGiveOne(t *testing.T) {
-	app := newApp(t, WithExecutor(executorFunc(func(context.Context, runtime.Request, func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
-		return runtime.Outcome{}, nil
+func TestAListingNeedsATurnRuntimeThatCanGiveOne(t *testing.T) {
+	app := newApp(t, WithTurnRuntime(turn.Func(func(context.Context, turn.Pinned, turn.Input, func(context.Context, event.Body) error) (turn.Result, error) {
+		return turn.Result{}, nil
 	})))
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, "acme", agentspec.AgentSpec{
-		Name: "triage", Provider: agentspec.ProviderOffline, Model: "m", SystemPrompt: "Triage.",
+	if _, err := createAgent(app.Definitions(), ctx, "acme", definition.AgentSpec{
+		Name: "triage", Provider: definition.ProviderOffline, Model: "m", SystemPrompt: "Triage.",
 	}, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.ToolsFor(ctx, envelope.Tag{Tenant: "acme", Agent: "triage"}); !errors.Is(err, errors.ErrUnsupported) {
+	if _, err := app.ToolsFor(ctx, posted("list", "acme", "triage", "inbox://acme/out", ""), "triage"); !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("ToolsFor = %v, want errors.ErrUnsupported", err)
 	}
-}
-
-type executorFunc func(context.Context, runtime.Request, func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error)
-
-func (f executorFunc) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
-	return f(ctx, req, emit)
 }

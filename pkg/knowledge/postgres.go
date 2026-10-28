@@ -83,9 +83,9 @@ CREATE INDEX IF NOT EXISTS fiber_knowledge_chunks_terms
 `
 
 // migrateLock is the advisory lock Migrate holds, for the reason
-// pkg/registry gives: CREATE ... IF NOT EXISTS is not safe against itself.
+// pkg/definition gives: CREATE ... IF NOT EXISTS is not safe against itself.
 // CREATE EXTENSION is database-wide, so the lock has to be too, which an
-// advisory lock is. The value differs from the registry's so the two
+// advisory lock is. The value differs from the definition source's so the two
 // migrations do not wait on each other.
 const migrateLock = 0x6b6e6f77 // "know"
 
@@ -450,7 +450,7 @@ func vectorLiteral(v []float32) string {
 }
 
 // wrap adds this package's context to a database failure and leaves the
-// sentinels alone, as pkg/registry does.
+// sentinels alone, as pkg/definition does.
 func wrap(op string, err error) error {
 	for _, sentinel := range []error{ErrNotFound, ErrInvalid, ErrDimensions, ErrEmbedding, context.Canceled, context.DeadlineExceeded} {
 		if errors.Is(err, sentinel) {

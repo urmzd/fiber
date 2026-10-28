@@ -8,28 +8,36 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber/pkg/connectors/internal/render"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
-// ev builds a run-scoped event the way the bus delivers one.
-func ev(seq uint64, kind envelope.Kind, payload string) envelope.Event {
-	return envelope.Event{
-		Seq:     seq,
-		Topic:   topic.MustParse("agent:docs-bot:run_1"),
-		RunID:   "run_1",
-		Agent:   "docs-bot",
-		Rev:     3,
-		Origin:  "slack",
+// ev builds a run event the way the bus delivers one, decoding data into the
+// type's body.
+func ev(seq uint64, typ, data string) event.Envelope {
+	if data == "" {
+		data = "{}"
+	}
+	body, err := event.Decode(typ, json.RawMessage(data))
+	if err != nil {
+		panic(err)
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("run_1:%d", seq),
+		Source:  "fiber://run/run_1",
+		Type:    typ,
+		Channel: "slack://T01/C02",
 		Tenant:  "acme",
-		Kind:    kind,
-		Payload: []byte(payload),
-		At:      time.Unix(1700000000, 0).UTC().Add(time.Duration(seq) * time.Second),
+		Run:     "run_1",
+		Seq:     seq,
+		Agent:   "docs-bot",
+		Version: "3",
+		Time:    time.Unix(1700000000, 0).UTC().Add(time.Duration(seq) * time.Second),
+		Data:    body,
 	}
 }
 
-func text(seq uint64, s string) envelope.Event {
-	return ev(seq, envelope.KindText, `{"text":`+quote(s)+`}`)
+func text(seq uint64, s string) event.Envelope {
+	return ev(seq, event.TypeText, `{"text":`+quote(s)+`}`)
 }
 
 func quote(s string) string {
@@ -41,12 +49,12 @@ func quote(s string) string {
 }
 
 func TestApplyingTheSameEventTwiceLeavesTheDocumentIdentical(t *testing.T) {
-	events := []envelope.Event{
-		ev(1, envelope.KindAccepted, ""),
+	events := []event.Envelope{
+		ev(1, event.TypeAccepted, ""),
 		text(2, "hello "),
-		ev(3, envelope.KindCitation, `{"title":"Design","uri":"https://example.com/d"}`),
+		ev(3, event.TypeCitation, `{"source":{"document_title":"Design","source_uri":"https://example.com/d"}}`),
 		text(4, "world"),
-		ev(5, envelope.KindCompleted, ""),
+		ev(5, event.TypeCompleted, ""),
 	}
 
 	once := render.New()
@@ -114,27 +122,27 @@ func TestALateFragmentOutsideTheWindowIsDroppedRatherThanAppendedOutOfPlace(t *t
 func TestStatusFollowsTheHighestSequenceNumberNotTheLastArrival(t *testing.T) {
 	tests := []struct {
 		name  string
-		order []envelope.Event
+		order []event.Envelope
 		want  render.Status
 	}{
 		{
 			name:  "in order",
-			order: []envelope.Event{ev(1, envelope.KindAccepted, ""), ev(2, envelope.KindStarted, ""), ev(9, envelope.KindCompleted, "")},
+			order: []event.Envelope{ev(1, event.TypeAccepted, ""), ev(2, event.TypeStarted, ""), ev(9, event.TypeCompleted, "")},
 			want:  render.StatusDone,
 		},
 		{
 			name:  "completion arrives before the start it followed",
-			order: []envelope.Event{ev(9, envelope.KindCompleted, ""), ev(2, envelope.KindStarted, "")},
+			order: []event.Envelope{ev(9, event.TypeCompleted, ""), ev(2, event.TypeStarted, "")},
 			want:  render.StatusDone,
 		},
 		{
 			name:  "no lifecycle event at all",
-			order: []envelope.Event{text(4, "hi")},
+			order: []event.Envelope{text(4, "hi")},
 			want:  render.StatusUnknown,
 		},
 		{
 			name:  "failure carries its message",
-			order: []envelope.Event{ev(1, envelope.KindStarted, ""), ev(2, envelope.KindFailed, `{"error":"provider timeout"}`)},
+			order: []event.Envelope{ev(1, event.TypeStarted, ""), ev(2, event.TypeFailed, `{"error":"provider timeout"}`)},
 			want:  render.StatusFailed,
 		},
 	}
@@ -161,10 +169,10 @@ func TestStatusFollowsTheHighestSequenceNumberNotTheLastArrival(t *testing.T) {
 
 func TestCitationsAreNumberedBySequenceAndDeduplicated(t *testing.T) {
 	d := render.New()
-	d.Apply(ev(7, envelope.KindCitation, `{"title":"Second","uri":"https://example.com/2"}`))
-	d.Apply(ev(3, envelope.KindCitation, `{"title":"First","uri":"https://example.com/1"}`))
+	d.Apply(ev(7, event.TypeCitation, `{"source":{"document_title":"Second","source_uri":"https://example.com/2"}}`))
+	d.Apply(ev(3, event.TypeCitation, `{"source":{"document_title":"First","source_uri":"https://example.com/1"}}`))
 	// The same source cited again is one footnote, not two.
-	d.Apply(ev(9, envelope.KindCitation, `{"title":"First","uri":"https://example.com/1"}`))
+	d.Apply(ev(9, event.TypeCitation, `{"source":{"document_title":"First","source_uri":"https://example.com/1"}}`))
 
 	cites := d.View().Citations
 	if len(cites) != 2 {
@@ -178,37 +186,35 @@ func TestCitationsAreNumberedBySequenceAndDeduplicated(t *testing.T) {
 	}
 }
 
-func TestCitationsAcceptASetAndPreferAnAgentSuppliedLabel(t *testing.T) {
+func TestCitationsPreferAnAgentSuppliedLabelAndFallBackToTheSection(t *testing.T) {
 	d := render.New()
-	d.Apply(ev(2, envelope.KindCitation, `[
-		{"label":"rfc","title":"RFC 9110","url":"https://example.com/rfc"},
-		{"citation":"Design doc","source":"https://example.com/d","text":"a snippet"}
-	]`))
+	d.Apply(ev(2, event.TypeCitation, `{"label":"rfc","source":{"document_title":"RFC 9110","source_uri":"https://example.com/rfc"}}`))
+	d.Apply(ev(3, event.TypeCitation, `{"text":"a snippet","source":{"section_heading":"Design doc","source_uri":"https://example.com/d"}}`))
 
 	cites := d.View().Citations
 	if len(cites) != 2 {
 		t.Fatalf("got %d citations, want 2", len(cites))
 	}
 	if cites[0].Ref() != "rfc" || cites[0].URI != "https://example.com/rfc" {
-		t.Errorf("citation from url/label = %+v", cites[0])
+		t.Errorf("labelled citation = %+v", cites[0])
 	}
 	if cites[1].Title != "Design doc" || cites[1].URI != "https://example.com/d" || cites[1].Snippet != "a snippet" {
-		t.Errorf("citation from citation/source/text = %+v", cites[1])
+		t.Errorf("citation from a section = %+v", cites[1])
 	}
 }
 
 func TestToolCallAndCompletionJoinOnTheirIDInEitherOrder(t *testing.T) {
 	tests := []struct {
 		name  string
-		order []envelope.Event
+		order []event.Envelope
 	}{
-		{name: "call then done", order: []envelope.Event{
-			ev(1, envelope.KindToolCall, `{"id":"t1","name":"search","args":{"q":  "fiber"}}`),
-			ev(2, envelope.KindToolDone, `{"id":"t1","result":"3 hits"}`),
+		{name: "call then done", order: []event.Envelope{
+			ev(1, event.TypeToolCall, `{"id":"t1","name":"search","arguments":{"q":  "fiber"}}`),
+			ev(2, event.TypeToolDone, `{"id":"t1","result":"3 hits"}`),
 		}},
-		{name: "done then call", order: []envelope.Event{
-			ev(2, envelope.KindToolDone, `{"id":"t1","result":"3 hits"}`),
-			ev(1, envelope.KindToolCall, `{"id":"t1","name":"search","args":{"q":  "fiber"}}`),
+		{name: "done then call", order: []event.Envelope{
+			ev(2, event.TypeToolDone, `{"id":"t1","result":"3 hits"}`),
+			ev(1, event.TypeToolCall, `{"id":"t1","name":"search","arguments":{"q":  "fiber"}}`),
 		}},
 	}
 	for _, tc := range tests {
@@ -231,25 +237,20 @@ func TestToolCallAndCompletionJoinOnTheirIDInEitherOrder(t *testing.T) {
 	}
 }
 
-func TestPayloadsThatAreNotTheDocumentedShapeStillRender(t *testing.T) {
+func TestTextKeepsItsWhitespaceAndAnEmptyBodyAddsNothing(t *testing.T) {
 	tests := []struct {
-		name    string
-		payload string
-		want    string
+		name string
+		data string
+		want string
 	}{
-		{name: "documented object", payload: `{"text":"hi"}`, want: "hi"},
-		{name: "content synonym", payload: `{"content":"hi"}`, want: "hi"},
-		{name: "delta synonym", payload: `{"delta":"hi"}`, want: "hi"},
-		{name: "json string", payload: `"hi"`, want: "hi"},
-		{name: "raw bytes", payload: `hi`, want: "hi"},
-		{name: "raw bytes keep their whitespace", payload: " hi ", want: " hi "},
-		{name: "empty payload contributes nothing", payload: ``, want: ""},
-		{name: "unrecognized object renders as nothing", payload: `{"unknown":"hi"}`, want: ""},
+		{name: "text", data: `{"text":"hi"}`, want: "hi"},
+		{name: "whitespace is kept", data: `{"text":" hi "}`, want: " hi "},
+		{name: "empty body contributes nothing", data: ``, want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			d := render.New()
-			d.Apply(ev(1, envelope.KindText, tc.payload))
+			d.Apply(ev(1, event.TypeText, tc.data))
 			if got := d.View().Text; got != tc.want {
 				t.Errorf("Text = %q, want %q", got, tc.want)
 			}
@@ -257,32 +258,27 @@ func TestPayloadsThatAreNotTheDocumentedShapeStillRender(t *testing.T) {
 	}
 }
 
-func TestActionsRenderTheirAddressWhicheverFormItWasMarshalledIn(t *testing.T) {
+func TestActionsRenderAValidAddressAndDropABrokenOne(t *testing.T) {
 	tests := []struct {
-		name    string
-		payload string
-		want    render.Action
+		name string
+		data string
+		want render.Action
 	}{
 		{
-			name:    "address as a uri string",
-			payload: `{"summary":"commented","address":"github://urmzd/fiber/issues/42"}`,
-			want:    render.Action{Summary: "commented", Address: "github://urmzd/fiber/issues/42"},
+			name: "address as a uri",
+			data: `{"name":"comment","summary":"commented","address":"github://urmzd/fiber/issues/42"}`,
+			want: render.Action{Summary: "commented", Address: "github://urmzd/fiber/issues/42"},
 		},
 		{
-			name:    "address as the struct it marshals to",
-			payload: `{"summary":"commented","address":{"Connector":"github","Workspace":"urmzd","Path":["fiber","issues","42"]}}`,
-			want:    render.Action{Summary: "commented", Address: "github://urmzd/fiber/issues/42"},
-		},
-		{
-			name:    "zero address is dropped, not rendered as a broken link",
-			payload: `{"summary":"noted","address":{"Connector":"","Workspace":"","Path":null,"Params":null}}`,
-			want:    render.Action{Summary: "noted"},
+			name: "broken address is dropped, not rendered as a broken link",
+			data: `{"name":"note","summary":"noted","address":"not an address"}`,
+			want: render.Action{Summary: "noted"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			d := render.New()
-			d.Apply(ev(1, envelope.KindActionTaken, tc.payload))
+			d.Apply(ev(1, event.TypeAction, tc.data))
 			actions := d.View().Actions
 			if len(actions) != 1 {
 				t.Fatalf("got %d actions, want 1", len(actions))
@@ -296,7 +292,7 @@ func TestActionsRenderTheirAddressWhicheverFormItWasMarshalledIn(t *testing.T) {
 
 func TestAnUnknownKindReportsNoChangeSoTheSinkSkipsTheRoundTrip(t *testing.T) {
 	d := render.New()
-	if changed := d.Apply(ev(1, envelope.Kind("delta.something.new"), `{"text":"hi"}`)); changed {
+	if changed := d.Apply(ev(1, "run.delta.something.new.v1", `{"text":"hi"}`)); changed {
 		t.Error("an unknown kind reported a change")
 	}
 	if v := d.View(); !v.Empty() {
@@ -315,8 +311,8 @@ func TestIdentityIsTakenFromTheFirstEventApplied(t *testing.T) {
 	d := render.New()
 	d.Apply(text(4, "hi"))
 	v := d.View()
-	if v.Agent != "docs-bot" || v.RunID != "run_1" || v.Rev != 3 || v.Origin != "slack" || v.Tenant != "acme" {
-		t.Errorf("identity = %+v, want the event's agent/run/rev/origin/tenant", v)
+	if v.Agent != "docs-bot" || v.RunID != "run_1" || v.Version != "3" || v.Channel != "slack://T01/C02" || v.Tenant != "acme" {
+		t.Errorf("identity = %+v, want the event's agent/run/version/channel/tenant", v)
 	}
 	if v.Seq != 4 {
 		t.Errorf("Seq = %d, want 4", v.Seq)
@@ -325,9 +321,9 @@ func TestIdentityIsTakenFromTheFirstEventApplied(t *testing.T) {
 
 func TestThinkingAccumulatesSeparatelyFromTheAnswer(t *testing.T) {
 	d := render.New()
-	d.Apply(ev(1, envelope.KindThinking, `{"text":"let me check "}`))
+	d.Apply(ev(1, event.TypeThinking, `{"text":"let me check "}`))
 	d.Apply(text(2, "the answer is 4"))
-	d.Apply(ev(3, envelope.KindThinking, `{"text":"the docs"}`))
+	d.Apply(ev(3, event.TypeThinking, `{"text":"the docs"}`))
 
 	v := d.View()
 	if v.Text != "the answer is 4" {
@@ -386,10 +382,10 @@ func equalViews(a, b render.View) bool {
 }
 
 func TestFinalAnswerReplacesPartialAndLateDeltas(t *testing.T) {
-	for _, events := range [][]envelope.Event{
-		{ev(5, envelope.KindCompleted, `{"text":"complete answer"}`)},
-		{text(2, "partial"), ev(5, envelope.KindCompleted, `{"text":"complete answer"}`), text(3, " late")},
-		{ev(5, envelope.KindCompleted, `{"text":"complete answer"}`), ev(4, envelope.KindCompleted, `{"text":"stale answer"}`)},
+	for _, events := range [][]event.Envelope{
+		{ev(5, event.TypeCompleted, `{"text":"complete answer"}`)},
+		{text(2, "partial"), ev(5, event.TypeCompleted, `{"text":"complete answer"}`), text(3, " late")},
+		{ev(5, event.TypeCompleted, `{"text":"complete answer"}`), ev(4, event.TypeCompleted, `{"text":"stale answer"}`)},
 	} {
 		var doc render.Doc
 		for _, e := range events {
@@ -407,10 +403,10 @@ func TestFinalAnswerReplacesPartialAndLateDeltas(t *testing.T) {
 // only lifecycle kinds still shows both.
 func TestAStoppedRunIsTerminalAndCarriesItsPartialAnswerAndReason(t *testing.T) {
 	d := render.New()
-	d.Apply(ev(1, envelope.KindStarted, `{}`))
+	d.Apply(ev(1, event.TypeStarted, `{}`))
 	d.Apply(text(2, "Half an "))
 	d.Apply(text(3, "answer"))
-	if !d.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped by a user","by":"slack:U1"}`)) {
+	if !d.Apply(ev(9, event.TypeStopped, `{"text":"Half an answer","reason":"Stopped by a user","by":"slack:U1"}`)) {
 		t.Fatal("applying lifecycle.stopped reported no change")
 	}
 
@@ -426,13 +422,13 @@ func TestAStoppedRunIsTerminalAndCarriesItsPartialAnswerAndReason(t *testing.T) 
 	}
 
 	// At-least-once: the same event again changes nothing.
-	if d.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped by a user"}`)) {
+	if d.Apply(ev(9, event.TypeStopped, `{"text":"Half an answer","reason":"Stopped by a user"}`)) {
 		t.Error("a redelivered lifecycle.stopped changed the document")
 	}
 
 	// A sink that was sent the terminal event alone still has the answer.
 	only := render.New()
-	only.Apply(ev(9, envelope.KindStopped, `{"text":"Half an answer"}`))
+	only.Apply(ev(9, event.TypeStopped, `{"text":"Half an answer"}`))
 	if got := only.View(); got.Text != "Half an answer" || got.Status != render.StatusStopped || got.Reason != "" {
 		t.Errorf("lifecycle-only view = %+v", got)
 	}
@@ -444,16 +440,16 @@ func TestAStoppedRunIsTerminalAndCarriesItsPartialAnswerAndReason(t *testing.T) 
 // completed event does not reach the document either.
 func TestUsageIsNeverRenderedOnAChatSurface(t *testing.T) {
 	d := render.New()
-	if d.Apply(ev(1, envelope.KindUsageCall, `{"accounting_id":"r/a1/1","prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}`)) {
+	if d.Apply(ev(1, event.TypeUsageCall, `{"accounting_id":"r/a1/1","prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}`)) {
 		t.Error("a usage.call event reported a change")
 	}
-	if d.Apply(ev(2, envelope.KindUsageChild, `{"accounting_id":"run:r9","usage":{"prompt_tokens":5}}`)) {
+	if d.Apply(ev(2, event.TypeUsageChild, `{"accounting_id":"run:r9","usage":{"prompt_tokens":5}}`)) {
 		t.Error("a usage.child event reported a change")
 	}
 	if v := d.View(); !v.Empty() {
 		t.Errorf("usage contributed to the document: %+v", v)
 	}
-	d.Apply(ev(3, envelope.KindCompleted, `{"text":"Done.","usage":{"total":{"prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}}}`))
+	d.Apply(ev(3, event.TypeCompleted, `{"text":"Done.","usage":{"total":{"prompt_tokens":12000,"cost":{"micros":40500,"currency":"USD"}}}}`))
 	if v := d.View(); strings.Contains(fmt.Sprintf("%+v", v), "40500") || strings.Contains(fmt.Sprintf("%+v", v), "12000") {
 		t.Errorf("the run's usage reached the document: %+v", v)
 	}

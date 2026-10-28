@@ -9,10 +9,8 @@ import (
 
 	drun "github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // ErrNotFound reports a run that does not exist or belongs to another
@@ -20,8 +18,8 @@ import (
 // existence across a tenant boundary.
 var ErrNotFound = errors.New("fiber: not found")
 
-// Status is where a run is in its lifecycle. It mirrors the lifecycle.*
-// event kinds: status answers "where is it now", the events answer "how did
+// Status is where a run is in its lifecycle. It mirrors the run lifecycle
+// types (run.completed.v1 and the rest): status answers "where is it now", the events answer "how did
 // it get there".
 type Status string
 
@@ -44,14 +42,17 @@ func (s Status) Terminal() bool {
 // Run is the durable record of one invocation. It is a projection of the
 // ledger, so reading one never touches a worker and polling it is cheap.
 type Run struct {
-	ID      string
-	Tenant  string
-	Agent   string
-	Rev     int
+	ID     string
+	Tenant string
+	Agent  string
+	// Version is the definition version the run pinned.
+	Version string
 	Origin  string
-	Topic   topic.Topic
+	// Channel is where the run's events are published.
+	Channel string
 	Status  Status
-	Tag     envelope.Tag
+	// Trigger is the event the run answers.
+	Trigger event.Envelope
 	LastSeq uint64
 	Error   string
 	// StopReason and StoppedBy say why a stopped run was stopped and who
@@ -59,10 +60,10 @@ type Run struct {
 	StopReason string
 	StoppedBy  string
 	// Usage is what the run spent, nil while nothing is recorded.
-	Usage *payload.RunUsage
+	Usage *event.RunUsage
 	// Question is what the run is waiting on a person for, set while
 	// Status is StatusParked.
-	Question *payload.Question
+	Question *event.Question
 
 	CreatedAt time.Time
 	EndedAt   time.Time
@@ -72,7 +73,7 @@ type Run struct {
 // tenant is ErrNotFound, exactly like one that does not exist.
 //
 // The record trails the run's terminal event briefly. A run publishes
-// lifecycle.completed, failed or stopped from inside its turn, and the worker
+// run.completed.v1, run.failed.v1 or run.stopped.v1 from inside its turn, and the worker
 // records how it ended only once the turn has returned, so a Status read the
 // moment that event arrives can still report accepted. The ledger is the
 // authority: a worker that dies in between leaves the run pending, and the
@@ -90,24 +91,22 @@ func (a *App) Status(ctx context.Context, tenant, runID string) (Run, error) {
 	if err := json.Unmarshal(rec.Input, &in); err != nil {
 		return Run{}, fmt.Errorf("fiber: decode run %q input: %w", runID, err)
 	}
-	if in.Tag.Tenant != tenant {
+	if in.Trigger.Tenant != tenant {
 		return Run{}, fmt.Errorf("%w: run %q", ErrNotFound, runID)
 	}
 	out := Run{
 		ID:        rec.ID,
-		Tenant:    in.Tag.Tenant,
-		Agent:     in.Tag.Agent,
-		Rev:       in.Rev,
-		Origin:    in.Tag.Origin,
+		Tenant:    in.Trigger.Tenant,
+		Agent:     in.Subscriber,
+		Version:   in.Pin.Version,
+		Origin:    in.Origin(),
 		Status:    statusOf(rec.Status),
-		Tag:       in.Tag,
+		Trigger:   in.Trigger,
 		Error:     rec.Error,
 		CreatedAt: rec.CreatedAt,
 		EndedAt:   rec.CompletedAt,
 	}
-	if t, err := topic.Run(in.Tag.Agent, rec.ID); err == nil {
-		out.Topic = t
-	}
+	out.Channel = in.Trigger.Channel
 	// LastSeq is the run's own answer: the sequence of its final event,
 	// which only a finished run has.
 	if rec.Status == drun.StatusSucceeded && len(rec.Output) > 0 {

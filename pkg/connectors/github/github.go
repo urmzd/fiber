@@ -4,26 +4,29 @@
 //
 // GitHub delivers events over a webhook signed with HMAC-SHA256 over the body,
 // so the connector is an http.Handler and a pkg/connector.Trigger at once:
-// Ingest holds the channel and parks, ServeHTTP authenticates and translates.
-// Tag.ID is the X-GitHub-Delivery GUID, which GitHub reuses across retries and
-// manual redeliveries — the property that makes it an idempotency key rather than
-// merely a unique string.
+// Ingest holds the publish function and parks, ServeHTTP authenticates,
+// translates and publishes. The event id is the X-GitHub-Delivery GUID, which
+// GitHub reuses across retries and manual redeliveries: the property that
+// makes it part of a run key rather than merely a unique string.
 //
-// Six deliveries raise tags. Five are a human naming an agent in text: a comment
-// on an issue or pull request, a review, a review comment, a new issue, a new
-// pull request. The sixth is GitHub naming the agent structurally, by requesting
-// a review from it — the case with no message at all, where the pull request
-// itself is the request.
+// Each delivery publishes one github.<event>.<action>.v1 event, on the
+// channel of its issue or pull request. Five are a human naming agents in
+// text: a comment on an issue or pull request, a review, a review comment, a
+// new issue, a new pull request. The event lists them as its mentions. The
+// sixth is GitHub naming the agent structurally, by requesting a review from
+// it: the case with no message at all, where the pull request itself is the
+// request.
 //
 // In the same five, a human may address the app instead (Config.Login) and
-// name no agent: "@humagen what changed?". Config.DefaultAgent answers that, and
-// with none it raises nothing. Text that names no agent and does not mention
-// the app raises nothing at all.
+// name no agent: "@humagen what changed?". That is published with no
+// mentions, and the members of the channel decide whether anyone answers.
+// Text that names no agent and does not mention the app publishes nothing.
 //
-// Application automation callbacks can raise tags for labels and new commits.
-// Everything else is acknowledged and dropped, and an event whose sender is a Bot
-// is dropped except for a labeled PR's synchronize event: this connector's own comment arrives back as an
-// issue_comment, and acting on it would have the mesh answer itself in a loop.
+// Automation (Config.Automation) publishes labels and new commits. Everything
+// else is acknowledged and dropped, and an event whose sender is a Bot is
+// dropped except for a pull request's synchronize event: this connector's own
+// comment arrives back as an issue_comment, and acting on it would have the
+// mesh answer itself in a loop.
 //
 // # Sink
 //
@@ -58,7 +61,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/internal/render"
 	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Name is the address scheme this connector owns.
@@ -101,7 +104,7 @@ type Config struct {
 	Bots map[string]string
 
 	// Agents is the set of agent names a mention may name. A connector with
-	// neither Bots nor Agents raises no tags at all: on GitHub "@urmzd" and
+	// neither Bots nor Agents names no agent at all: on GitHub "@urmzd" and
 	// "@docs-bot" are the same syntax, so an open name set would start a run
 	// every time one human tagged another.
 	Agents mention.Set
@@ -114,19 +117,14 @@ type Config struct {
 	// names that agent instead, as any login in Bots does.
 	Login string
 
-	// DefaultAgent answers a comment addressed to the app (Login) that names
-	// no agent. Empty means such a comment raises no tag. A host that decides
-	// who answers once the tag reaches it gives a name it resolves before the
-	// run is accepted. A comment that names no agent and does not mention the
-	// app raises nothing either way, so a busy repository wakes no agent on
-	// every comment.
-	DefaultAgent string
-
-	// Automation chooses the agent for labeled/synchronize events. Nil is off.
-	// It runs only after signature and repository validation.
-	Automation func(Hook) (agent, text string, ok bool)
-	// Prepare applies application policy before a verified tag is accepted.
-	Prepare func(context.Context, *envelope.Tag) error
+	// Automation decides whether a labeled or synchronize event asks for
+	// work, and with what text. Nil is off. It runs only after signature and
+	// repository validation. It names no agent: the members of the pull
+	// request's channel decide who answers.
+	Automation func(Hook) (text string, ok bool)
+	// Prepare applies application policy to a verified event before it is
+	// published. An error refuses the delivery.
+	Prepare func(context.Context, *event.Envelope) error
 	// Render formats the accumulated run view. Nil uses ordinary Markdown.
 	Render func(View) string
 	// Checks publishes lifecycle progress on the pinned PR head.
@@ -134,28 +132,25 @@ type Config struct {
 	// Conclusion derives a completed check's outcome. Nil means neutral.
 	Conclusion func(View) string
 
-	// Deliver overrides where a tag's events go. Empty answers on the issue or
-	// pull request the tag came from.
-	Deliver []envelope.Route
-
 	// Interval coalesces comment edits. Zero means sink.DefaultInterval. GitHub's
 	// secondary rate limits are stricter than Slack's about writes to one
 	// resource, so a longer interval is reasonable here.
 	Interval time.Duration
 
-	// Clock is the time source for coalescing. Nil means time.Now.
+	// Clock is the time source for coalescing, and the time of an event
+	// whose payload carries none. Nil means time.Now.
 	Clock func() time.Time
 
 	// MaxBody bounds an inbound request body. Zero means inbound.DefaultMaxBody.
 	MaxBody int64
 
-	// Tenant is the authorization scope this connector's tags belong to. It
-	// is stamped on every tag it raises, files are stored under it, and a
+	// Tenant is the authorization scope this connector's events belong to. It
+	// is stamped on every event it publishes, files are stored under it, and a
 	// thread listing (Messages) for any other tenant is refused.
 	Tenant string
 
 	// Files brings in the images and videos referenced in the body that
-	// raised a tag as the tag's attachments (see attachments.go). Needs
+	// raised an event as the event's attachments (see attachments.go). Needs
 	// Tenant. No credential is sent to a file host: public files need none,
 	// and a private repository's are fetched through signed URLs read from
 	// the API.
@@ -221,9 +216,6 @@ func New(cfg Config) (*Connector, error) {
 		}
 		c.app = mention.NewNames(handle)
 	}
-	if cfg.DefaultAgent != "" && !mention.Valid(cfg.DefaultAgent) {
-		return nil, fmt.Errorf("github: default agent %q is not a usable agent name", cfg.DefaultAgent)
-	}
 	if len(cfg.Owners) > 0 {
 		c.owners = make(map[string]bool, len(cfg.Owners))
 		for _, owner := range cfg.Owners {
@@ -262,8 +254,8 @@ func New(cfg Config) (*Connector, error) {
 func (c *Connector) Name() string { return Name }
 
 // Ingest implements connector.Trigger.
-func (c *Connector) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
-	return c.pipe.Serve(ctx, out)
+func (c *Connector) Ingest(ctx context.Context, publish connector.Publish) error {
+	return c.pipe.Serve(ctx, publish)
 }
 
 // Ingesting reports whether an Ingest is running, so a server can answer a
@@ -279,8 +271,8 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The ping GitHub sends when a webhook is created carries no event to
 	// translate, and answering it is how the UI shows the hook as healthy.
-	event := r.Header.Get(HeaderEvent)
-	if event == "ping" {
+	name := r.Header.Get(HeaderEvent)
+	if name == "ping" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -291,55 +283,89 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tag, ok := c.tagFrom(event, r.Header.Get(HeaderDelivery), h)
+	e, ok := c.eventFrom(name, r.Header.Get(HeaderDelivery), h)
 	if !ok {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	// Issue-comment payloads identify a PR but omit its head. Resolve it before
-	// accepting the tag so replay and check delivery never choose a later head.
-	if c.cfg.Checks && tag.Source.Path[1] == "pull" && tag.Source.Params["head_sha"] == "" {
+	if e.Time.IsZero() {
+		// A payload with no timestamp of its own was observed now.
+		e.Time = c.now()
+	}
+	channel, err := address.Parse(e.Channel)
+	if err != nil {
+		http.Error(w, "invalid GitHub reference", http.StatusBadRequest)
+		return
+	}
+	// Issue-comment payloads identify a PR but omit its head. Pin it before
+	// the event is published, so replay and check delivery never choose a
+	// later head.
+	if c.cfg.Checks && channel.Path[1] == "pull" && channel.Params["head_sha"] == "" {
 		api, supported := c.cfg.API.(ContextAPI)
 		if !supported {
 			http.Error(w, "github: checks need context reads for PR comments", http.StatusBadGateway)
 			return
 		}
-		ref, err := c.ref(tag.Source)
+		ref, err := c.ref(channel)
 		if err != nil {
 			http.Error(w, "invalid PR reference", http.StatusBadRequest)
 			return
 		}
-		ctx, err := api.ReadContext(r.Context(), ref, 1)
-		if err != nil || !validSHA(ctx.Subject.Head.SHA) {
+		got, err := api.ReadContext(r.Context(), ref, 1)
+		if err != nil || !validSHA(got.Subject.Head.SHA) {
 			http.Error(w, "could not resolve PR head", http.StatusBadGateway)
 			return
 		}
-		tag.Source = tag.Source.WithParam("head_sha", ctx.Subject.Head.SHA)
-		tag.Meta["github_head_sha"] = ctx.Subject.Head.SHA
-	}
-	if c.cfg.Tenant != "" {
-		tag.Tenant = c.cfg.Tenant
+		e = pinHead(e, channel, got.Subject.Head.SHA)
+		channel, _ = address.Parse(e.Channel)
 	}
 	if c.cfg.Prepare != nil {
-		if err := c.cfg.Prepare(r.Context(), &tag); err != nil {
+		if err := c.cfg.Prepare(r.Context(), &e); err != nil {
 			http.Error(w, "could not prepare GitHub request", http.StatusBadGateway)
 			return
 		}
 	}
 	var candidates []intake.Candidate
-	if ref, err := c.ref(tag.Source); err == nil && c.fetcher != nil {
-		kind, id, markdown := bodyOf(event, h)
+	if ref, err := c.ref(channel); err == nil && c.fetcher != nil {
+		kind, id, markdown := bodyOf(name, h)
 		bodyCtx, cancelBody := context.WithTimeout(context.WithoutCancel(r.Context()), httpjson.DefaultTimeout)
 		candidates = c.candidates(bodyCtx, ref, h.Repository.Private, kind, id, markdown)
 		cancelBody()
 	}
-	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, tag.Tenant, &tag, candidates)
+	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, e.Tenant, channel, &e, candidates)
 	defer cancel()
-	if err := c.pipe.Send(ctx, tag); err != nil {
+	if err := c.pipe.Send(ctx, e); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// pinHead sets a pull request's head on an event: the head_sha parameter of
+// its channel and source, and HeadSHA in its body.
+func pinHead(e event.Envelope, channel address.Address, sha string) event.Envelope {
+	at := channel.WithParam("head_sha", sha).String()
+	e.Channel, e.Source = at, at
+	switch b := e.Data.(type) {
+	case event.GitHubIssueCommentCreated:
+		b.HeadSHA = sha
+		e.Data = b
+	case event.GitHubReviewCommentCreated:
+		b.HeadSHA = sha
+		e.Data = b
+	case event.GitHubReviewSubmitted:
+		b.HeadSHA = sha
+		e.Data = b
+	}
+	return e
+}
+
+// now is the configured clock's time.
+func (c *Connector) now() time.Time {
+	if c.cfg.Clock != nil {
+		return c.cfg.Clock().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // agents is the set a mention or a reviewer login is resolved against: the
@@ -372,7 +398,7 @@ func (s agentSet) Lookup(token string) (string, bool) {
 }
 
 // Deliver implements connector.Sink.
-func (c *Connector) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (c *Connector) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	if _, err := c.ref(target); err != nil {
 		return err
 	}

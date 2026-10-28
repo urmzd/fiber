@@ -6,104 +6,111 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
 )
 
 // AgentName is the built-in agent's name. It matches the connector's, so the
 // agent people tag and the tools it holds read as one thing.
 const AgentName = Name
 
-// SeededBy is the author recorded on revisions Seed writes. Seed uses it to
-// tell its own revisions from a person's.
+// SeededBy is the author recorded on versions Seed writes. Seed uses it to
+// tell its own versions from a person's.
 const SeededBy = "system:author-seed"
 
 //go:embed prompt.md
 var systemPrompt string
 
-// Spec returns the built-in agent's definition for a model and provider.
+// Spec returns the built-in agent for a model and provider, in the shape
+// FromAgentSpec converts.
 //
 // The model and provider are parameters because they are the deployment's
-// choice; everything else is the package's. With agentspec.ProviderOffline the
-// definition builds and runs with no API key, which is how the tests exercise
+// choice; everything else is the package's. With definition.ProviderOffline
+// the agent builds and runs with no API key, which is how the tests exercise
 // it.
 //
-// It grants every core action and nothing else: no delegation, no workspace
+// It grants every core action and nothing else: no sub-agents, no workspace
 // area. The agent's authority is its tools, and its tools are gated by the
 // two-step approval described in the package comment, not by this prompt.
-func Spec(model, provider string) agentspec.AgentSpec {
-	return agentspec.AgentSpec{
+func Spec(model, provider string) definition.AgentSpec {
+	return definition.AgentSpec{
 		Name:         AgentName,
 		Description:  "Creates, reviews and manages this workspace's agents, one approved change at a time.",
 		Model:        model,
 		Provider:     provider,
 		SystemPrompt: systemPrompt,
 		Tools:        ToolNames(),
-	}.Normalize()
+	}
 }
 
-// Seed makes sure tenant has the built-in agent, and reports the revision now
+// Seed makes sure tenant has the built-in agent, and reports the version now
 // in effect. It is safe to call at every startup and from several replicas at
 // once.
 //
 // It never takes a decision away from a person:
 //
-//   - No agent of that name has ever existed: it is created.
-//   - The current revision was written by Seed: it is revised to spec. The
-//     registry treats identical content as a no-op, so an unchanged binary
-//     burns no revision number, and a new binary upgrades the prompt.
-//   - The current revision was written by anyone else: it is left alone. A
+//   - No agent of that name has ever existed: it is written as 1.0.0.
+//   - The latest version was written by Seed: when spec renders differently,
+//     it is written as the next major version. An unchanged binary writes
+//     nothing, and a new binary upgrades the prompt.
+//   - The latest version was written by anyone else: it is left alone. A
 //     person edited the built-in agent and their edit wins.
-//   - The agent was deleted: it stays deleted, and Seed returns the zero
-//     Revision with no error. Someone retired it on purpose, and an agent that
+//   - The agent was retired: it stays retired, and Seed returns the zero
+//     Record with no error. Someone retired it on purpose, and an agent that
 //     reappears on every restart cannot be retired at all.
-func Seed(ctx context.Context, store registry.Store, tenant string, spec agentspec.AgentSpec) (agentspec.Revision, error) {
-	if store == nil {
-		return agentspec.Revision{}, fmt.Errorf("%w: no registry store", ErrInvalid)
+func Seed(ctx context.Context, src definition.Source, tenant string, spec definition.AgentSpec) (definition.Record, error) {
+	if src == nil {
+		return definition.Record{}, fmt.Errorf("%w: no definition source", ErrInvalid)
 	}
-	cur, err := store.Get(ctx, tenant, spec.Name, 0)
+	name := definition.NormalizeName(spec.Name)
+	major := 1
+	cur, err := src.Latest(ctx, tenant, name)
 	switch {
-	case err == nil:
+	case errors.Is(err, definition.ErrRetired):
+		return definition.Record{}, nil
+	case errors.Is(err, definition.ErrNotFound):
+	case err != nil:
+		return definition.Record{}, fmt.Errorf("author: seed: %w", err)
+	default:
 		if cur.CreatedBy != SeededBy {
 			return cur, nil
 		}
-		rev, err := store.Revise(ctx, tenant, spec, cur.Rev, SeededBy)
-		if errors.Is(err, registry.ErrConflict) {
-			// Another replica or a person got there between the read and
-			// the write. Either way the agent exists and is current.
-			return current(ctx, store, tenant, spec.Name)
-		}
+		curMajor, err := definition.Major(cur.Version)
 		if err != nil {
-			return agentspec.Revision{}, fmt.Errorf("author: seed: %w", err)
+			return definition.Record{}, fmt.Errorf("author: seed: %s@%s: %w", cur.Name, cur.Version, err)
 		}
-		return rev, nil
-	case !errors.Is(err, registry.ErrNotFound):
-		return agentspec.Revision{}, fmt.Errorf("author: seed: %w", err)
+		same, err := definition.FromAgentSpec(spec, curMajor)
+		if err != nil {
+			return definition.Record{}, fmt.Errorf("author: seed: %w", err)
+		}
+		if same.Version == cur.Version && same.Content == cur.Content && same.Policy.Hash() == cur.PolicyHash {
+			return cur, nil
+		}
+		major = curMajor + 1
 	}
-
-	// Not found by name is either "never existed" or "retired". History
-	// tells them apart, because a tombstone keeps its past.
-	switch hist, err := store.History(ctx, tenant, spec.Name); {
-	case err == nil && len(hist) > 0:
-		return agentspec.Revision{}, nil
-	case err != nil && !errors.Is(err, registry.ErrNotFound):
-		return agentspec.Revision{}, fmt.Errorf("author: seed: %w", err)
+	rec, err := definition.FromAgentSpec(spec, major)
+	if err != nil {
+		return definition.Record{}, fmt.Errorf("author: seed: %w", err)
 	}
-
-	rev, err := store.Create(ctx, tenant, spec, SeededBy)
-	if errors.Is(err, registry.ErrExists) {
-		return current(ctx, store, tenant, spec.Name)
+	rec.Tenant, rec.CreatedBy = tenant, SeededBy
+	out, err := src.Put(ctx, rec)
+	if errors.Is(err, definition.ErrExists) || errors.Is(err, definition.ErrRetired) {
+		// Another replica or a person got there between the read and the
+		// write. Either way what is there now is in effect.
+		return current(ctx, src, tenant, name)
 	}
 	if err != nil {
-		return agentspec.Revision{}, fmt.Errorf("author: seed: %w", err)
+		return definition.Record{}, fmt.Errorf("author: seed: %w", err)
 	}
-	return rev, nil
+	return out, nil
 }
 
-func current(ctx context.Context, store registry.Store, tenant, name string) (agentspec.Revision, error) {
-	rev, err := store.Get(ctx, tenant, name, 0)
-	if err != nil {
-		return agentspec.Revision{}, fmt.Errorf("author: seed: %w", err)
+func current(ctx context.Context, src definition.Source, tenant, name string) (definition.Record, error) {
+	rec, err := src.Latest(ctx, tenant, name)
+	if errors.Is(err, definition.ErrRetired) {
+		return definition.Record{}, nil
 	}
-	return rev, nil
+	if err != nil {
+		return definition.Record{}, fmt.Errorf("author: seed: %w", err)
+	}
+	return rec, nil
 }

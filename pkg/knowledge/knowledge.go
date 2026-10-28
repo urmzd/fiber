@@ -6,7 +6,7 @@
 // this text", and refuses to answer anything else. Where documents come from
 // (a crawler, a connector, a CLI) is the caller's concern: this package is
 // handed content and never fetches it. What a model does with the passages
-// belongs to pkg/agentrt, which turns them into a prompt and into citation
+// belongs to pkg/turn/native, which turns them into a prompt and into citation
 // events; Retriever in this package is the adapter between the two.
 //
 // # Why hybrid
@@ -41,7 +41,7 @@
 // # Tenancy
 //
 // The tenant is a hard boundary and an explicit argument on every method, for
-// the reason pkg/registry gives: a call with no tenant does not compile. No
+// the reason pkg/definition gives: a call with no tenant does not compile. No
 // operation reads across tenants, and no error reveals that a document exists
 // in another one.
 //
@@ -113,7 +113,7 @@ const (
 // Document is one unit of content to index.
 type Document struct {
 	// Source names the corpus the document belongs to. It is the name an
-	// agent's agentspec.Source carries, which is how an agent is scoped to
+	// agent's policy corpus carries, which is how an agent is scoped to
 	// the corpora it declared.
 	Source string
 	// URI identifies the document within its source and is what a citation

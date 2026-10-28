@@ -16,11 +16,6 @@ import "strings"
 // LegacyPrefix is the prefix fiber's Postgres objects had before the rename.
 const LegacyPrefix = "mandatum_"
 
-// LegacyAgentSpecDomain is the domain agent-spec hashes were computed under
-// before the rename. The registry's migration re-addresses revisions stored
-// under it (see agentspec.AgentSpec.HashIn).
-const LegacyAgentSpecDomain = "mandatum/agentspec/v1"
-
 // LegacyActivityTurn is the workflow name runs were accepted under before the
 // rename (runtime.ActivityTurn is its successor). A run still pending under it
 // recorded its activities, questions and answers under the old names, which

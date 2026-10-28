@@ -18,7 +18,7 @@ for accepted old names and identifiers kept for stored data.
 | Postgres tables, indexes and constraints | `mandatum_*` | `fiber_*` |
 | Redis bus key namespace (`bus.DefaultKeyPrefix`) | `mandatum:` | `fiber:` |
 | anchor activities and records | `mandatum.turn`, `mandatum.turn.agent`, `mandatum.turn.resume`, `mandatum.park`, `mandatum.stop`, `mandatum.question.*`, `mandatum.answer.*`, `mandatum.usage.*`, `mandatum.child.*` | the same under `fiber.` |
-| Agent-spec hash domain | `mandatum/agentspec/v1` | `fiber/agentspec/v1` |
+| Agent hash domain | the old spec domain under `mandatum/` | the same under `fiber/`, retired with the event union (see [events.md](architecture/events.md#10-upgrade)) |
 | Knowledge document hash domain | `mandatum.knowledge.v1` | `fiber.knowledge.v1` |
 
 ## Upgrading a deployment
@@ -67,17 +67,17 @@ for accepted old names and identifiers kept for stored data.
    renames its own `mandatum_*` tables in the current schema, with their
    indexes and constraints, to `fiber_*`, in the same transaction as the rest
    of the migration, so rows are kept and the order stores migrate in does not
-   matter. The registry then re-addresses every stored
-   revision whose hash was computed under the old agent-spec domain, so
-   revisions still pass the hash check on read and need no re-import. A
-   revision matching neither domain is left alone and still fails that
-   check. `pkg/internal/pgrename` is the only code that knows the old names.
+   matter. The old agent registry tables are read once, to move their
+   agents into saige definitions in `fiber_definitions`, and never written
+   (see [events.md](architecture/events.md#7-definitions)). `pkg/internal/pgrename` is the only code that knows the old names.
 4. **Redis starts empty.** The bus's keys are a reconnect window, not a
    record, so the old `mandatum:` keys are simply abandoned; delete them when
    convenient.
 5. **Knowledge re-embeds once.** A document's hash includes its domain, so
    the first re-index after the upgrade treats every document as changed.
 6. **Anything that stored a revision hash** outside fiber (a link, an audit
-   log) holds the old address. The new one is `App.Registry().Get(...).Hash`.
+   log) holds the old address. The new one is the definition content hash,
+   `App.Definitions().Get(ctx, tenant, name, version)` then `.Digest` (see
+   [events.md](architecture/events.md#7-definitions)).
 
 Historical changelog entries keep the names they were written with.

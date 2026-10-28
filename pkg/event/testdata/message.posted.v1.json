@@ -1,0 +1,40 @@
+{
+  "id": "ev-1",
+  "source": "slack://T01",
+  "type": "message.posted.v1",
+  "subject": "C02",
+  "channel": "slack://T01/C02",
+  "time": "2026-10-28T14:03:11Z",
+  "hops": 0,
+  "data": {
+    "text": "summarise this",
+    "actor": {
+      "id": "U07",
+      "display": "ada"
+    },
+    "mentions": [
+      "helper"
+    ],
+    "attachments": [
+      {
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "media_type": "text/plain",
+        "name": "notes.txt",
+        "size": 5
+      }
+    ],
+    "context": {
+      "project": "handbook"
+    },
+    "slack": {
+      "team": "T01",
+      "channel": "C02",
+      "user": "U07",
+      "event": "app_mention",
+      "ts": "1699.002",
+      "thread_ts": "1699.001",
+      "channel_type": "channel",
+      "app_id": "A01"
+    }
+  }
+}

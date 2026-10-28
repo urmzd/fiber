@@ -4,19 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
+	"github.com/urmzd/fiber/pkg/event"
+
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/internal/inbound"
 	"github.com/urmzd/fiber/pkg/connectors/jira"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 const (
@@ -42,15 +44,18 @@ func deliver(t *testing.T, identifier, body string) *http.Request {
 	return r
 }
 
-func start(t *testing.T, cfg jira.Config) (*jira.Connector, <-chan envelope.Tag) {
+func start(t *testing.T, cfg jira.Config) (*jira.Connector, <-chan event.Envelope) {
 	t.Helper()
 	c := build(t, cfg)
-	tags := make(chan envelope.Tag, 8)
+	tags := make(chan event.Envelope, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = c.Ingest(ctx, tags)
+		_ = c.Ingest(ctx, func(_ context.Context, e event.Envelope) error {
+			tags <- e
+			return nil
+		})
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -124,7 +129,7 @@ func botConfig() jira.Config {
 	}
 }
 
-func TestACommentMentioningAnAgentBecomesATagAddressedAtTheIssue(t *testing.T) {
+func TestACommentMentioningAnAgentIsPublishedOnTheIssue(t *testing.T) {
 	c, tags := start(t, botConfig())
 
 	w := httptest.NewRecorder()
@@ -134,27 +139,24 @@ func TestACommentMentioningAnAgentBecomesATagAddressedAtTheIssue(t *testing.T) {
 	}
 
 	tag := receive(t, tags)
-	if err := tag.Validate(); err != nil {
-		t.Fatalf("invalid tag: %v", err)
-	}
 	if tag.ID != "b8a5f0c2-1111-2222-3333-444455556666" {
-		t.Errorf("Tag.ID = %q, want Atlassian's own delivery identifier", tag.ID)
+		t.Errorf("ID = %q, want Atlassian's own delivery identifier", tag.ID)
 	}
-	if tag.Agent != "docs-bot" || tag.Origin != "jira" {
-		t.Errorf("agent/origin = %q/%q", tag.Agent, tag.Origin)
+	if tag.Agent != "docs-bot" || tag.Type != event.TypeJiraCommentCreated {
+		t.Errorf("agent/type = %q/%q", tag.Agent, tag.Type)
 	}
 	want := "summarize what changed here, and ask to check the retry path too"
 	if tag.Text != want {
-		t.Errorf("Tag.Text = %q, want %q with both account-id mentions resolved and stripped", tag.Text, want)
+		t.Errorf("Text = %q, want %q with both account-id mentions resolved and stripped", tag.Text, want)
 	}
-	if got, want := tag.Source.String(), "jira://acme/PROJ-5"; got != want {
-		t.Errorf("Tag.Source = %q, want %q — the SHORT SITE KEY, never the hostname", got, want)
+	if got, want := tag.Channel, "jira://acme/PROJ-5"; got != want {
+		t.Errorf("Channel = %q, want %q: the SHORT SITE KEY, never the hostname", got, want)
 	}
 	if tag.Actor.ID != human || tag.Actor.Display != "Urmzd" || tag.Actor.Bot {
-		t.Errorf("Tag.Actor = %+v", tag.Actor)
+		t.Errorf("Actor = %+v", tag.Actor)
 	}
-	if !tag.At.Equal(time.Date(2026, 7, 20, 12, 30, 0, 0, time.UTC)) {
-		t.Errorf("Tag.At = %s, want the comment's own timestamp", tag.At)
+	if !tag.Time.Equal(time.Date(2026, 7, 20, 12, 30, 0, 0, time.UTC)) {
+		t.Errorf("Time = %s, want the comment's own timestamp", tag.Time)
 	}
 	for key, want := range map[string]string{
 		"jira_event":        "comment_created",
@@ -221,15 +223,15 @@ func TestAnAtlassianDocumentFormatBodyReadsTheSameAsWikiMarkup(t *testing.T) {
 	tag := receive(t, tags)
 
 	if tag.Agent != "docs-bot" {
-		t.Errorf("Tag.Agent = %q, want the mention node resolved to an agent", tag.Agent)
+		t.Errorf("Agent = %q, want the mention node resolved to an agent", tag.Agent)
 	}
 	if !strings.HasPrefix(tag.Text, "please triage this before standup") {
-		t.Errorf("Tag.Text = %q, want the mention node stripped from the front", tag.Text)
+		t.Errorf("Text = %q, want the mention node stripped from the front", tag.Text)
 	}
 	// Paragraph structure survives as a blank line, so a summary cannot run into
 	// a description.
 	if !strings.Contains(tag.Text, "\n\nSee https://acme.atlassian.net/browse/PROJ-4") {
-		t.Errorf("Tag.Text = %q, want the second paragraph and its card url", tag.Text)
+		t.Errorf("Text = %q, want the second paragraph and its card url", tag.Text)
 	}
 	if tag.Meta["jira_comment_id"] != "10102" {
 		t.Errorf("Meta[jira_comment_id] = %q", tag.Meta["jira_comment_id"])
@@ -273,19 +275,19 @@ func TestAssigningAnIssueToAnAgentRaisesATagWithNoMessage(t *testing.T) {
 	tag := receive(t, tags)
 
 	if tag.Agent != "docs-bot" {
-		t.Errorf("Tag.Agent = %q, want the assignee's agent", tag.Agent)
+		t.Errorf("Agent = %q, want the assignee's agent", tag.Agent)
 	}
-	if got, want := tag.Source.String(), "jira://acme/PROJ-9"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	if got, want := tag.Channel, "jira://acme/PROJ-9"; got != want {
+		t.Errorf("Channel = %q, want %q", got, want)
 	}
 	// Nobody typed a message, so the ticket is the request.
 	if !strings.HasPrefix(tag.Text, "Coalesce sink edits") || !strings.Contains(tag.Text, "flushes on an interval") {
-		t.Errorf("Tag.Text = %q, want the summary and description", tag.Text)
+		t.Errorf("Text = %q, want the summary and description", tag.Text)
 	}
 	// A mention of a human in the description is normalized but not removed: the
 	// agent may be being asked to involve them.
 	if !strings.Contains(tag.Text, "[~accountid:5b10a2844c20165700ede21g]") {
-		t.Errorf("Tag.Text = %q, want the human mention preserved", tag.Text)
+		t.Errorf("Text = %q, want the human mention preserved", tag.Text)
 	}
 	if tag.Meta["jira_assigned"] != "true" {
 		t.Error("Meta[jira_assigned] is unset, so the agent cannot tell nobody asked it a question")
@@ -309,7 +311,7 @@ const issueCreated = `{
   }
 }`
 
-func TestAnIssueCreatedWithATextualMentionRaisesATag(t *testing.T) {
+func TestAnIssueCreatedWithATextualMentionIsPublished(t *testing.T) {
 	// An agent is not a Jira user, so "@docs-bot" stays literal text rather than
 	// becoming an account-id mention. Config.Agents is what makes that
 	// resolvable without every "@" starting a run.
@@ -319,17 +321,17 @@ func TestAnIssueCreatedWithATextualMentionRaisesATag(t *testing.T) {
 	tag := receive(t, tags)
 
 	if tag.Agent != "docs-bot" {
-		t.Errorf("Tag.Agent = %q", tag.Agent)
+		t.Errorf("Agent = %q", tag.Agent)
 	}
 	if tag.Text != "please triage this\n\nThe sink posts twice on retry." {
-		t.Errorf("Tag.Text = %q", tag.Text)
+		t.Errorf("Text = %q", tag.Text)
 	}
-	if got, want := tag.Source.String(), "jira://acme/PROJ-11"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	if got, want := tag.Channel, "jira://acme/PROJ-11"; got != want {
+		t.Errorf("Channel = %q, want %q", got, want)
 	}
 }
 
-func TestDeliveriesThatMustNotRaiseTags(t *testing.T) {
+func TestDeliveriesThatPublishNothing(t *testing.T) {
 	tests := []struct{ name, body string }{
 		{
 			name: "our own comment coming back, which is how a mesh loops forever",
@@ -385,8 +387,8 @@ func TestDeliveriesThatMustNotRaiseTags(t *testing.T) {
 				t.Errorf("status = %d, want 200 so Jira stops retrying", w.Code)
 			}
 			select {
-			case tag := <-tags:
-				t.Errorf("raised a tag: %+v", tag)
+			case e := <-tags:
+				t.Errorf("published %+v", e)
 			default:
 			}
 		})
@@ -434,7 +436,7 @@ func TestWithoutAnAtlassianIdentifierTheIdComesFromTheChangeItself(t *testing.T)
 	c.ServeHTTP(w, deliver(t, "", commentCreated))
 	first := receive(t, tags)
 	if first.ID != "comment_created:PROJ-5:comment:10101" {
-		t.Fatalf("Tag.ID = %q, want a key derived from the comment's own identity", first.ID)
+		t.Fatalf("ID = %q, want a key derived from the comment's own identity", first.ID)
 	}
 
 	w = httptest.NewRecorder()
@@ -449,25 +451,35 @@ func TestWithoutAnAtlassianIdentifierTheIdComesFromTheChangeItself(t *testing.T)
 
 var target = address.MustParse("jira://acme/PROJ-5")
 
-func event(seq uint64, kind envelope.Kind, payload string) envelope.Event {
-	return envelope.Event{
+func ev(seq uint64, typ, data string) event.Envelope {
+	if data == "" {
+		data = "{}"
+	}
+	body, err := event.Decode(typ, json.RawMessage(data))
+	if err != nil {
+		panic(err)
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("run_1:%d", seq),
+		Source:  "fiber://run/run_1",
+		Type:    typ,
+		Channel: "jira://acme",
+		Tenant:  "acme",
+		Run:     "run_1",
 		Seq:     seq,
-		Topic:   topic.MustParse("agent:docs-bot:run_1"),
-		RunID:   "run_1",
 		Agent:   "docs-bot",
-		Origin:  "jira",
-		Kind:    kind,
-		Payload: []byte(payload),
-		At:      time.Unix(1784600000, 0).Add(time.Duration(seq) * time.Second),
+		Version: "1",
+		Time:    time.Unix(1784600000, 0).Add(time.Duration(seq) * time.Second),
+		Data:    body,
 	}
 }
 
-func textEvent(seq uint64, s string) envelope.Event {
+func textEvent(seq uint64, s string) event.Envelope {
 	encoded, err := json.Marshal(s)
 	if err != nil {
 		panic(err)
 	}
-	return event(seq, envelope.KindText, `{"text":`+string(encoded)+`}`)
+	return ev(seq, event.TypeText, `{"text":`+string(encoded)+`}`)
 }
 
 func sinkConnector(t *testing.T, api jira.API) *jira.Connector {
@@ -480,12 +492,12 @@ func TestDeliveringTheSameEventsTwiceKeepsOneEditedComment(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	events := []envelope.Event{
-		event(1, envelope.KindAccepted, ""),
+	events := []event.Envelope{
+		ev(1, event.TypeAccepted, ""),
 		textEvent(2, "The retry path posts twice "),
 		textEvent(3, "because the handle was lost."),
-		event(4, envelope.KindCitation, `{"title":"sink.go","uri":"https://github.com/urmzd/fiber/blob/main/sink.go"}`),
-		event(5, envelope.KindCompleted, ""),
+		ev(4, event.TypeCitation, `{"source":{"document_title":"sink.go","source_uri":"https://github.com/urmzd/fiber/blob/main/sink.go"}}`),
+		ev(5, event.TypeCompleted, ""),
 	}
 	for range 2 {
 		for _, e := range events {
@@ -516,11 +528,11 @@ func TestTheAnswerIsRenderedInJiraWikiMarkup(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	for _, e := range []envelope.Event{
+	for _, e := range []event.Envelope{
 		textEvent(1, "Fixed in {code}sink.go{code}, see [the doc]."),
-		event(2, envelope.KindCitation, `{"title":"sink.go","uri":"https://example.com/sink.go"}`),
-		event(3, envelope.KindActionTaken, `{"summary":"moved acme/PROJ-5 to Done","address":"jira://acme/PROJ-5"}`),
-		event(4, envelope.KindCompleted, ""),
+		ev(2, event.TypeCitation, `{"source":{"document_title":"sink.go","source_uri":"https://example.com/sink.go"}}`),
+		ev(3, event.TypeAction, `{"summary":"moved acme/PROJ-5 to Done","address":"jira://acme/PROJ-5"}`),
+		ev(4, event.TypeCompleted, ""),
 	} {
 		if err := c.Deliver(ctx, target, e); err != nil {
 			t.Fatal(err)
@@ -560,7 +572,7 @@ func TestOutOfOrderDeliveryDoesNotRenderStaleTextOverFresh(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	for _, e := range []envelope.Event{textEvent(3, "second"), textEvent(2, "first "), event(4, envelope.KindCompleted, "")} {
+	for _, e := range []event.Envelope{textEvent(3, "second"), textEvent(2, "first "), ev(4, event.TypeCompleted, "")} {
 		if err := c.Deliver(ctx, target, e); err != nil {
 			t.Fatal(err)
 		}
@@ -800,13 +812,40 @@ func TestASiteIsKeyedByAShortNameBecauseAHostnameCannotBeAWorkspace(t *testing.T
 	}
 }
 
-func receive(t *testing.T, tags <-chan envelope.Tag) envelope.Tag {
+// published is a published event as a test reads it: the envelope, and its
+// body's request, the agent it names and the context it renders.
+type published struct {
+	event.Envelope
+	event.Request
+	// Agent is the first agent mentioned, or the agent an issue was
+	// assigned to.
+	Agent string
+	// Meta is the trigger context the body renders next to its text.
+	Meta map[string]string
+}
+
+// receive waits for an event, checks it is valid and renders through the
+// event catalog as its request text, and reads it.
+func receive(t *testing.T, tags <-chan event.Envelope) published {
 	t.Helper()
 	select {
-	case tag := <-tags:
-		return tag
+	case e := <-tags:
+		if err := e.Validate(); err != nil {
+			t.Fatalf("published an invalid event: %v", err)
+		}
+		rendertest.Check(t, e)
+		p := published{Envelope: e}
+		p.Request, _ = event.RequestOf(e.Data)
+		_, p.Meta, _ = event.Prompt(e.Data)
+		if len(p.Mentions) > 0 {
+			p.Agent = p.Mentions[0]
+		}
+		if b, ok := e.Data.(event.JiraIssueAssigned); ok {
+			p.Agent = b.Agent
+		}
+		return p
 	case <-time.After(2 * time.Second):
-		t.Fatal("no tag was raised")
-		return envelope.Tag{}
+		t.Fatal("no event was published")
+		return published{}
 	}
 }

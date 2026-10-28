@@ -16,7 +16,7 @@ import (
 	"github.com/urmzd/playscape/pkg/tool"
 	"github.com/urmzd/playscape/pkg/workspace"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // parentRuntime is the runtime a parent turn's node hands it: its scoped
@@ -77,7 +77,7 @@ func subTaskWorld(t *testing.T) (*Sandbox, *parentRuntime, Request, workspace.Wo
 		t.Fatal(err)
 	}
 	parent := &parentRuntime{ws: dispatchsandbox.ScopePDP(raw, ToolName("ops"), pdp)}
-	req := Request{Service: "svc", Revision: agentrt.Revision{Rev: 1, Spec: agentrt.Spec{Name: "ops"}}}
+	req := Request{Service: "svc", Definition: native.Revision{Name: "ops", Version: "1.0.0", Spec: native.Spec{Name: "ops"}}}
 	return s, parent, req, raw
 }
 

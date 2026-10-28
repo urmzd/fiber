@@ -7,7 +7,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/attachment/intake"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 )
 
@@ -33,8 +33,8 @@ var _ thread.Lister = (*Connector)(nil)
 // Messages implements thread.Lister: the Slack thread surface names, as Slack
 // holds it now, oldest first.
 //
-// The message timestamp is the id, which is also what a tag's slack_ts meta
-// carries, so the message that raised a tag is recognized. A message posted
+// The message timestamp is the id, which is also what message.posted.v1's slack
+// ts carries, so the message that raised a run is recognized. A message posted
 // by this app, or by a bot user that stands for an agent, is Own. A file on a
 // message is brought in only when the journal first sees that message, and
 // under the tenant this connector serves.
@@ -64,7 +64,7 @@ func (c *Connector) Messages(ctx context.Context, tenant string, surface address
 		msg := thread.Message{
 			ID:    m.TS,
 			Text:  text,
-			Actor: envelope.Actor{ID: firstNonEmpty(m.User, m.BotID), Bot: m.BotID != ""},
+			Actor: event.Actor{ID: firstNonEmpty(m.User, m.BotID), Bot: m.BotID != ""},
 			Own:   c.own(m),
 		}
 		if at, ok := parseTS(m.TS); ok {

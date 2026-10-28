@@ -8,10 +8,10 @@
 //     no key and no network; a real one returns the team's own
 //     saige Provider.
 //   - an OpenAI-compatible endpoint named "fireworks", selected by the same
-//     spec field, with its key read from $FIREWORKS_API_KEY at run time.
+//     model.use field, with its key read from $FIREWORKS_API_KEY at run time.
 //   - a tool, "lookup_runbook", that any agent can be granted by name.
 //
-// It creates an agent on the house provider, raises one tag in process and
+// It stores the agent agents/oncall.agent.md defines, on the house provider, raises one tag in process and
 // prints the answer:
 //
 //	go run ./examples/downstream
@@ -19,23 +19,26 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"time"
 
-	"github.com/urmzd/saige/agent/agenttest"
-	saigetypes "github.com/urmzd/saige/agent/types"
-
 	"github.com/urmzd/fiber"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/registry"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
+	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
+
+// oncall is the agent, as a saige definition file.
+//
+//go:embed agents/oncall.agent.md
+var oncall string
 
 func main() {
 	if err := run(); err != nil {
@@ -54,7 +57,7 @@ func run() error {
 	app, err := fiber.New(ctx,
 		fiber.WithTenant(tenant),
 		fiber.WithModelProvider("house", houseProvider),
-		fiber.WithOpenAICompatible(agentrt.OpenAICompatible{
+		fiber.WithOpenAICompatible(native.OpenAICompatible{
 			Name:    "fireworks",
 			BaseURL: "https://api.fireworks.ai/inference/v1",
 			KeyEnv:  "FIREWORKS_API_KEY",
@@ -70,23 +73,34 @@ func run() error {
 	done := make(chan error, 1)
 	go func() { done <- app.Run(ctx) }()
 
-	if _, err := app.Registry().Create(ctx, tenant, agentspec.AgentSpec{
-		Name: "oncall", Provider: "house", Model: "house-1",
-		SystemPrompt: "Help the on-call engineer.", Tools: []string{"lookup_runbook"},
-	}, "downstream"); err != nil && !errors.Is(err, registry.ErrExists) {
+	// Put is insert-only: storing the same file again is a no-op.
+	if _, err := app.Definitions().Put(ctx, definition.Record{
+		Tenant: tenant, Content: oncall, CreatedBy: "downstream",
+	}); err != nil && !errors.Is(err, definition.ErrExists) {
 		return err
 	}
 
-	// Watch the agent's topic, then raise a tag the way any trigger would.
-	stream, err := app.Bus().Subscribe(ctx, envelope.Subscription{Topic: topic.MustParse("agent:oncall")})
+	// Watch the channel the request is posted on, then accept the run the
+	// way the dispatcher would for a member of that channel.
+	trigger := event.Envelope{
+		ID:      fmt.Sprintf("downstream-%d", time.Now().UnixNano()),
+		Source:  "downstream:" + tenant,
+		Type:    event.TypeMessagePosted,
+		Channel: "downstream://" + tenant + "/oncall",
+		Time:    time.Now().UTC(),
+		Tenant:  tenant,
+		Data:    event.MessagePosted{Request: event.Request{Text: "api is down", Mentions: []string{"oncall"}}},
+	}
+	stream, err := app.Bus().Subscribe(ctx, bus.Subscription{
+		Tenant:   trigger.Tenant,
+		Channels: []string{trigger.Channel},
+		Types:    []string{"run"},
+	})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stream.Close() }()
-	acc, err := app.Invoke(ctx, envelope.Tag{
-		ID: fmt.Sprintf("downstream-%d", time.Now().UnixNano()), Tenant: tenant,
-		Agent: "oncall", Origin: "downstream", Text: "api is down", At: time.Now(),
-	})
+	acc, err := app.Runtime().Accept(ctx, trigger, "oncall")
 	if err != nil {
 		return err
 	}
@@ -95,25 +109,23 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if e.RunID != acc.RunID {
+		if e.Run != acc.RunID {
 			continue
 		}
-		switch e.Kind {
-		case envelope.KindText:
-			if t, err := payload.Decode[payload.Text](e); err == nil {
-				fmt.Print(t.Text)
-			}
-		case envelope.KindCompleted, envelope.KindFailed, envelope.KindStopped:
-			fmt.Printf("\nrun %s: %s\n", acc.RunID, e.Kind)
+		switch b := e.Data.(type) {
+		case event.Text:
+			fmt.Print(b.Text)
+		case event.Completed, event.Failed, event.Stopped:
+			fmt.Printf("\nrun %s: %s\n", acc.RunID, e.Type)
 			cancel()
 			return <-done
 		}
 	}
 }
 
-// houseProvider builds the model client for one agent revision. It receives
+// houseProvider builds the model client for one agent version. It receives
 // the whole spec, so it can key on the model name or the agent.
-func houseProvider(spec agentrt.Spec) (saigetypes.Provider, error) {
+func houseProvider(spec native.Spec) (saigetypes.Provider, error) {
 	return &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 		agenttest.TextResponse(spec.Name + " answered on the house model (" + spec.Model + ")."),
 	}}, nil

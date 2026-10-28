@@ -1,16 +1,17 @@
 // Package author turns the agent control plane into tools an agent can call.
 //
 // Every other connector reaches outward, to Slack or GitHub or Jira. This one
-// reaches inward: its actions wrap pkg/registry, so an agent granted them can
-// list, read, compare, lint, draft and change the agents its own tenant runs.
-// The package also carries the built-in agent that uses those tools (see Spec
-// and Seed), and two model-free skills that are useful without any agent at
-// all: Review, a prompt linter, and Scaffold, which lays out a router and its
-// specialists.
+// reaches inward: its actions wrap a definition.Source, so an agent granted
+// them can list, read, compare, lint, draft and change the agents its own
+// tenant runs. An agent is a saige definition (an .agent.md file) and a fiber
+// Policy; the actions take and show both. The package also carries the
+// built-in agent that uses those tools (see Spec and Seed), and two
+// model-free skills that are useful without any agent at all: Review, a
+// prompt linter, and Scaffold, which lays out a router and its specialists.
 //
 // # Where the tenant comes from
 //
-// The registry is tenant-scoped and takes the tenant as an explicit argument.
+// The source is tenant-scoped and takes the tenant as an explicit argument.
 // The one thing this package must never do is let a model supply it. A tool
 // argument is text the model wrote, possibly while reading text an attacker
 // wrote, so a tenant taken from arguments is a tenant anyone can name.
@@ -36,7 +37,7 @@
 //
 //   - A propose action validates the change, renders the diff and the review
 //     findings, stages it, and returns a single-use token. It changes nothing
-//     in the registry.
+//     in the source.
 //   - author_apply takes that token and performs the change. It is the only
 //     action that writes.
 //
@@ -46,8 +47,15 @@
 // that run may apply. The pause is enforced by run identity, which the model
 // cannot forge, rather than by the prompt asking nicely.
 //
-// The revision's author is the actor of the run that applied the change: the
+// A version's author is the actor of the run that applied the change: the
 // person who approved it, not the model and not whoever drafted it.
+//
+// # Versions
+//
+// A definition is insert only. A revise is a new, higher version, proposed
+// against the latest version the model read (a compare-and-set checked again
+// at apply). A delete retires the name: it stops new runs and keeps every
+// version readable.
 //
 // Every action declares its Effect, and the three classes are also visible in
 // the name: author_propose_* stages, author_apply writes, everything else
@@ -76,9 +84,8 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
 )
 
 // Name is the connector's name and the prefix of every action it contributes.
@@ -93,7 +100,7 @@ var (
 	// ErrNoPrincipal reports a run whose tenant could not be resolved.
 	ErrNoPrincipal = errors.New("author: run has no resolvable tenant")
 	// ErrNoActor reports a write attempted by a run nobody identifiable
-	// raised, such as a schedule. A revision must say who made it.
+	// raised, such as a schedule. A version must say who made it.
 	ErrNoActor = errors.New("author: run has no identified actor")
 	// ErrInvalid reports arguments this package will not act on.
 	ErrInvalid = errors.New("author: invalid")
@@ -108,17 +115,17 @@ var (
 	ErrTooManyPending = errors.New("author: too many pending proposals")
 )
 
-// Effect classifies what an action does to the registry.
+// Effect classifies what an action does to the source.
 type Effect string
 
-// The three classes. Only EffectWrite changes the registry.
+// The three classes. Only EffectWrite changes the source.
 const (
 	// EffectRead observes and computes. It changes nothing anywhere.
 	EffectRead Effect = "read"
 	// EffectPropose stages a change in this connector and returns a token.
-	// The registry is untouched.
+	// The source is untouched.
 	EffectPropose Effect = "propose"
-	// EffectWrite changes the registry.
+	// EffectWrite changes the source.
 	EffectWrite Effect = "write"
 )
 
@@ -162,14 +169,14 @@ const (
 
 // Config assembles a Connector.
 type Config struct {
-	// Store is the control plane the actions wrap. Required.
-	Store registry.Store
+	// Source is where the tenant's definitions are kept. Required.
+	Source definition.Source
 	// Principals resolves a run to its tenant and actor. Required.
 	Principals Principals
-	// Providers is the provider table drafts are validated against. It must
-	// be the table the Store validates with, or a draft would pass here and
-	// fail at apply. Empty selects agentspec.KnownProviders.
-	Providers []string
+	// Checks are the deployment facts drafts are validated against. They
+	// must be the ones the Source validates with, or a draft would pass here
+	// and fail at apply.
+	Checks definition.Checks
 	// Catalog reports the tool names this deployment can resolve, which lets
 	// Review tell a granted tool from a misspelled one. It is a function
 	// because the connector registry is still being built when this
@@ -187,9 +194,9 @@ type Config struct {
 // Connector is the control plane as an Actor. It raises no tags and renders no
 // events, so it implements that one face only.
 type Connector struct {
-	store      registry.Store
+	src        definition.Source
 	principals Principals
-	providers  []string
+	checks     definition.Checks
 	catalog    func() []string
 	knowledge  Knowledge
 	pending    *pending
@@ -199,15 +206,11 @@ type Connector struct {
 // to resolve a tenant, because the second would otherwise surface as every
 // call being denied at runtime with nobody told why at startup.
 func New(cfg Config) (*Connector, error) {
-	if cfg.Store == nil {
-		return nil, fmt.Errorf("%w: no registry store", ErrInvalid)
+	if cfg.Source == nil {
+		return nil, fmt.Errorf("%w: no definition source", ErrInvalid)
 	}
 	if cfg.Principals == nil {
 		return nil, fmt.Errorf("%w: no Principals; without one no call can be scoped to a tenant", ErrInvalid)
-	}
-	providers := slices.Clone(cfg.Providers)
-	if len(providers) == 0 {
-		providers = agentspec.KnownProviders()
 	}
 	clock := cfg.Clock
 	if clock == nil {
@@ -218,9 +221,9 @@ func New(cfg Config) (*Connector, error) {
 		ttl = DefaultProposalTTL
 	}
 	return &Connector{
-		store:      cfg.Store,
+		src:        cfg.Source,
 		principals: cfg.Principals,
-		providers:  providers,
+		checks:     cfg.Checks,
 		catalog:    cfg.Catalog,
 		knowledge:  cfg.Knowledge,
 		pending:    newPending(clock, ttl),
@@ -295,7 +298,7 @@ func (c *Connector) resolve(ctx context.Context) (call, error) {
 	return call{Principal: p, runID: runID}, nil
 }
 
-// EffectOf reports what the named action does to the registry.
+// EffectOf reports what the named action does to the source.
 func EffectOf(action string) (Effect, bool) {
 	for _, d := range append(coreActions(), knowledgeAction()) {
 		if d.name == action {

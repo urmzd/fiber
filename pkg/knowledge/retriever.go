@@ -8,24 +8,24 @@ import (
 	"strconv"
 	"strings"
 
-	ragtypes "github.com/urmzd/saige/rag/types"
+	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 )
 
 // Retriever makes a Store the retrieval source for one agent's turn.
 //
-// It has the method pkg/agentrt's Retriever interface asks for, so it is
-// passed to agentrt.WithRetriever as it is. This package does not import
-// agentrt to say so: the dependency runs one way, from the runtime that
+// It has the method pkg/turn/native's Retriever interface asks for, so it is
+// passed to native.WithRetriever as it is. This package does not import
+// native to say so: the dependency runs one way, from the runtime that
 // composes the two.
 //
 // A Retriever is bound, at construction, to one tenant and to the source names
-// one agent declared. That binding is the access rule. agentrt's interface
+// one agent declared. That binding is the access rule. native's interface
 // carries only the query text, so nothing a model or a user writes can widen a
 // search to another tenant or to a corpus the agent's pinned revision does not
 // name. It also means a Retriever is built per run, from the run's tenant and
 // its revision's Sources, and never shared across tenants.
 //
-// An agentspec.Source is matched to a corpus by its Name: documents indexed
+// A policy corpus (definition.Corpus) is matched to a corpus by its Name: documents indexed
 // with Document.Source equal to that name are what the agent may read. The
 // source's URI and Options describe where the corpus is ingested from and are
 // not interpreted here.
@@ -78,9 +78,9 @@ const preamble = "Answer using the numbered passages below. Cite a passage by it
 
 // Retrieve searches the agent's sources and assembles what was found.
 //
-// The result is used twice by agentrt: Prompt goes in front of the user's
+// The result is used twice by native: Prompt goes in front of the user's
 // text, and Blocks become citation events. Nothing found is a nil context and
-// no error, which agentrt reads as "answer from the model alone".
+// no error, which native reads as "answer from the model alone".
 func (r *Retriever) Retrieve(ctx context.Context, query string) (*ragtypes.AssembledContext, error) {
 	if len(r.sources) == 0 || strings.TrimSpace(query) == "" {
 		return nil, nil

@@ -1,13 +1,14 @@
 package slack
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // eventEnvelope is the outer body of an Events API request. Only the fields the
@@ -19,7 +20,8 @@ type eventEnvelope struct {
 	Challenge string `json:"challenge"`
 	// TeamID is the workspace, and becomes the address workspace.
 	TeamID string `json:"team_id"`
-	// EventID is Slack's own identifier for this delivery and becomes Tag.ID.
+	// EventID is Slack's own identifier for this delivery and becomes the
+	// event's id.
 	// Slack reuses it across retries of the same event, which is exactly the
 	// property an idempotency key needs.
 	EventID string `json:"event_id"`
@@ -48,21 +50,24 @@ type innerEvent struct {
 	Files []File `json:"files"`
 }
 
-// tagFrom translates a Slack event into a Tag, or reports that this event raises
-// none.
+// eventFrom translates a Slack event into a message.posted.v1 event, or
+// reports that this event publishes nothing.
 //
-// Everything that decides "no tag" is here rather than spread through the
+// Everything that decides "nothing" is here rather than spread through the
 // handler, because "which events do we ignore" is a security-adjacent question:
 // the loop-prevention rule (never act on a bot's message) is the difference
 // between a mesh and a runaway.
-func (c *Connector) tagFrom(env eventEnvelope) (envelope.Tag, bool) {
+//
+// The event names the agents the message mentions (Config.Bots) and chooses
+// none of them: the members of its channel decide who answers.
+func (c *Connector) eventFrom(env eventEnvelope) (event.Envelope, bool) {
 	if env.Type != "event_callback" {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	// One app's signing secret can authenticate multiple installations. A
 	// verified delivery still has to belong to this connector's workspace.
 	if c.cfg.Team != "" && env.TeamID != c.cfg.Team {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	ev := env.Event
 
@@ -70,39 +75,39 @@ func (c *Connector) tagFrom(env eventEnvelope) (envelope.Tag, bool) {
 	case "app_mention":
 		// A mention in a channel: always a candidate.
 	case "message":
-		// A direct message to the app is a mention by context — there is nobody
+		// A direct message to the app is a mention by context: there is nobody
 		// else in the conversation. In a channel, a plain message is not:
 		// answering every message in a channel we are in is not what joining a
 		// channel means.
 		if ev.ChannelType != "im" {
-			return envelope.Tag{}, false
+			return event.Envelope{}, false
 		}
 		if ev.Subtype != "" && ev.Subtype != "file_share" {
 			// Joins, leaves, edits and the rest are not requests. A file
-			// shared with a message is one: its files ride on the tag.
-			return envelope.Tag{}, false
+			// shared with a message is one: its files ride on the event.
+			return event.Envelope{}, false
 		}
 	default:
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 
 	// Loop prevention, and the reason it is unconditional: this connector's sink
 	// posts into the same channels its trigger reads. A bot message that reached
 	// the agent would let the mesh answer itself.
 	if ev.BotID != "" || ev.User == "" {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	if env.TeamID == "" || ev.Channel == "" {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	if err := address.ValidWorkspace(env.TeamID); err != nil {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 
 	text, mentioned := decode(ev.Text, c.cfg.Bots)
-	agent, text, ok := c.agentFor(text, mentioned)
-	if !ok {
-		return envelope.Tag{}, false
+	mentions := unique(mentioned)
+	for _, agent := range mentions {
+		text = mention.Strip(text, agent)
 	}
 
 	// The thread the answer belongs in: the mention's own thread if it is in one,
@@ -112,13 +117,13 @@ func (c *Connector) tagFrom(env eventEnvelope) (envelope.Tag, bool) {
 	if thread == "" {
 		thread = ev.TS
 	}
-	source := address.Address{
+	channel := address.Address{
 		Connector: Name,
 		Workspace: env.TeamID,
 		Path:      []string{ev.Channel},
 	}
 	if thread != "" {
-		source = source.WithParam("thread", thread)
+		channel = channel.WithParam("thread", thread)
 	}
 
 	id := env.EventID
@@ -129,58 +134,40 @@ func (c *Connector) tagFrom(env eventEnvelope) (envelope.Tag, bool) {
 		id = ev.Channel + ":" + firstNonEmpty(ev.EventTS, ev.TS)
 	}
 
-	return envelope.Tag{
+	body := event.MessagePosted{
+		Request: event.Request{Text: text, Actor: event.Actor{ID: ev.User}, Mentions: mentions},
+		Slack: &event.SlackRef{
+			Team:        env.TeamID,
+			Channel:     ev.Channel,
+			User:        ev.User,
+			Event:       ev.Type,
+			TS:          ev.TS,
+			ThreadTS:    thread,
+			ChannelType: ev.ChannelType,
+			AppID:       env.APIAppID,
+		},
+	}
+	return event.Envelope{
 		ID:      id,
-		Agent:   agent,
-		Origin:  Name,
-		Source:  source,
-		Text:    text,
-		Actor:   envelope.Actor{ID: ev.User},
-		Deliver: c.cfg.Deliver,
-		Meta:    meta(env, thread),
-		At:      observedAt(env),
+		Source:  channel.String(),
+		Type:    body.Type(),
+		Subject: ev.Channel,
+		Channel: channel.String(),
+		Time:    observedAt(env),
+		Tenant:  c.cfg.Tenant,
+		Data:    body,
 	}, true
 }
 
-// agentFor resolves which agent was tagged. See the package doc for why the
-// text-based step is opt-in.
-func (c *Connector) agentFor(text string, mentioned []string) (agent, stripped string, ok bool) {
-	if len(mentioned) > 0 {
-		agent = mentioned[0]
-		return agent, mention.Strip(text, agent), true
-	}
-	if c.cfg.Agents != nil {
-		if agent, stripped, ok = mention.Find(text, c.cfg.Agents); ok {
-			return agent, stripped, true
+// unique keeps the first of each name, in order.
+func unique(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if !slices.Contains(out, n) {
+			out = append(out, n)
 		}
 	}
-	if c.cfg.DefaultAgent != "" {
-		return c.cfg.DefaultAgent, mention.Strip(text, c.cfg.DefaultAgent), true
-	}
-	return "", "", false
-}
-
-// meta carries the Slack context an agent's tools need. Keys are flat strings
-// because Tag.Meta is a string map by design: it is context for a tool call, not
-// a second payload format.
-func meta(env eventEnvelope, thread string) map[string]string {
-	m := map[string]string{
-		"slack_team":    env.TeamID,
-		"slack_channel": env.Event.Channel,
-		"slack_user":    env.Event.User,
-		"slack_event":   env.Event.Type,
-		"slack_ts":      env.Event.TS,
-	}
-	if thread != "" {
-		m["slack_thread_ts"] = thread
-	}
-	if env.Event.ChannelType != "" {
-		m["slack_channel_type"] = env.Event.ChannelType
-	}
-	if env.APIAppID != "" {
-		m["slack_app_id"] = env.APIAppID
-	}
-	return m
+	return out
 }
 
 // observedAt is when Slack saw the event. The message timestamp is preferred

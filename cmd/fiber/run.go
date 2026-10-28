@@ -14,11 +14,12 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber"
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"go.yaml.in/yaml/v3"
+
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // The scope and the person a local run belongs to. Both are fixed: nothing
@@ -31,7 +32,7 @@ const (
 )
 
 // actor is who a local run acts for and who asked.
-var actor = envelope.Actor{ID: "local", Display: "fiber run"}
+var actor = event.Actor{ID: "local", Display: "fiber run"}
 
 // defaultTimeout bounds a run when -timeout is not given. It is generous: an
 // agent's tool loop on a real model takes a while, and a retried attempt
@@ -49,6 +50,7 @@ const drainLimit = 2 * time.Second
 // runFlags are the run command's flags.
 type runFlags struct {
 	provider, model string
+	policy          string
 	offline, tools  bool
 	json            bool
 	timeout         time.Duration
@@ -60,8 +62,9 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	fs := flag.NewFlagSet("fiber run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { usage(stderr) }
-	fs.StringVar(&f.provider, "provider", "", "run on this model provider instead of the spec's")
-	fs.StringVar(&f.model, "model", "", "run on this model instead of the spec's")
+	fs.StringVar(&f.provider, "provider", "", "run on this model provider instead of the definition's")
+	fs.StringVar(&f.model, "model", "", "run on this model instead of the definition's")
+	fs.StringVar(&f.policy, "policy", "", "read the agent's policy from this JSON file")
 	fs.BoolVar(&f.offline, "offline", false, "run on the offline provider, which calls no model")
 	fs.BoolVar(&f.tools, "tools", false, "list the tools the agent would be granted, and run nothing")
 	fs.BoolVar(&f.json, "json", false, "print one JSON object per event")
@@ -81,14 +84,14 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		// Only a flag's own name: a MESSAGE may start with a dash.
 		name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
 		if strings.HasPrefix(a, "-") && fs.Lookup(name) != nil {
-			return bad("flag %s comes after SPEC; flags go before it", a)
+			return bad("flag %s comes after DEFINITION; flags go before it", a)
 		}
 	}
 	switch {
 	case len(rest) == 0:
-		return bad("no SPEC; usage: fiber run [flags] SPEC MESSAGE")
+		return bad("no DEFINITION; usage: fiber run [flags] DEFINITION MESSAGE")
 	case len(rest) == 1 && !f.tools:
-		return bad("no MESSAGE; usage: fiber run [flags] SPEC MESSAGE")
+		return bad("no MESSAGE; usage: fiber run [flags] DEFINITION MESSAGE")
 	case len(rest) > 2:
 		return bad("too many arguments; quote MESSAGE if it has spaces")
 	case f.offline && f.provider != "":
@@ -104,11 +107,20 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return bad("MESSAGE is empty")
 	}
 
-	spec, err := loadSpec(path, stdin)
+	content, err := loadDefinition(path, stdin)
 	if err != nil {
 		return bad("%v", err)
 	}
-	f.override(&spec)
+	policy, err := loadPolicy(f.policy)
+	if err != nil {
+		return bad("%v", err)
+	}
+	if content, err = f.override(content); err != nil {
+		return bad("%s: %v", path, err)
+	}
+	if f.offline {
+		policy.FallbackOn = nil
+	}
 
 	// The operator log: warnings only, such as a granted tool this
 	// composition cannot resolve. It goes to stderr, so stdout is the run's
@@ -124,26 +136,24 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 	defer func() { _ = app.Close() }()
 
-	rev, err := app.Registry().Create(ctx, tenant, spec, author)
+	rec, err := app.Definitions().Put(ctx, definition.Record{Tenant: tenant, Content: content, Policy: policy, CreatedBy: author})
 	if err != nil {
 		return bad("%s: %v", path, err)
 	}
-	tag := envelope.Tag{
-		ID:     "cli-" + strconv.FormatInt(time.Now().UnixNano(), 36),
-		Tenant: tenant,
-		Agent:  rev.Spec.Name,
-		Origin: origin,
-		Text:   message,
-		Actor:  actor,
-		At:     time.Now().UTC(),
+	// One file is the whole tree here, so a sub-agent it names cannot
+	// resolve, and that is the file's mistake.
+	checks := definition.Checks{Providers: app.Providers()}
+	if _, err := definition.NewResolver(app.Definitions(), checks).Resolve(ctx, tenant, rec.Name); err != nil {
+		return bad("%s: %v", path, err)
 	}
+	trigger := cliMessage(message, rec.Name)
 	if f.tools {
-		return listTools(ctx, app, tag, rev, f.json, stdout, stderr)
+		return listTools(ctx, app, trigger, rec, f.json, stdout, stderr)
 	}
 
 	// Delivery and execution, in this process, for as long as the command
-	// runs. The router has nothing to deliver: the tag names no route and no
-	// surface, and the events are read off the bus instead.
+	// runs. Nothing is delivered: the message has no surface, and the events
+	// are read off the bus instead.
 	runCtx, stopApp := context.WithCancel(ctx)
 	appDone := make(chan error, 1)
 	go func() { appDone <- app.Run(runCtx) }()
@@ -158,71 +168,175 @@ func runCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	if f.json {
 		out = &jsonRenderer{enc: json.NewEncoder(stdout)}
 	}
-	return follow(ctx, app, tag, f.timeout, out, stderr)
+	return follow(ctx, app, trigger, rec.Name, f.timeout, out, stderr)
 }
 
-// override applies the provider and model flags to spec.
-func (f runFlags) override(spec *agentspec.AgentSpec) {
-	if f.offline {
-		// Every model call goes to the offline provider, so a fallback
-		// that would need a key of its own is dropped with the rest.
-		spec.Provider = agentspec.ProviderOffline
-		spec.Fallbacks, spec.FallbackOn = nil, nil
+// cliMessage is the message.posted.v1 a local run answers. Its source is not an
+// address, so the run has no surface, and it publishes on cli://local/cli.
+func cliMessage(text, agent string) event.Envelope {
+	return event.Envelope{
+		ID:      "cli-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		Source:  origin + ":" + tenant,
+		Type:    event.TypeMessagePosted,
+		Channel: origin + "://" + tenant + "/" + origin,
+		Time:    time.Now().UTC(),
+		Tenant:  tenant,
+		Data:    event.MessagePosted{Request: event.Request{Text: text, Actor: actor, Mentions: []string{agent}}},
 	}
-	if f.provider != "" {
-		spec.Provider = f.provider
+}
+
+// override applies the provider and model flags to a definition file. It
+// edits model.use in the frontmatter and leaves the rest of the file as it
+// was written; -offline also drops the fallbacks, which would each need a key
+// of their own.
+func (f runFlags) override(content string) (string, error) {
+	provider := f.provider
+	if f.offline {
+		provider = definition.ProviderOffline
+	}
+	if provider == "" && f.model == "" {
+		return content, nil
+	}
+	front, body, err := splitFrontmatter(content)
+	if err != nil {
+		return "", err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(front), &doc); err != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return "", errors.New("the frontmatter is not a YAML mapping")
+	}
+	model := child(doc.Content[0], "model")
+	if model == nil || model.Kind != yaml.MappingNode {
+		return "", errors.New("no model to override; the definition must name one")
+	}
+	use := child(model, "use")
+	if use == nil || use.Kind != yaml.ScalarNode {
+		return "", errors.New("model.use is not set")
+	}
+	prov, name, _ := strings.Cut(use.Value, "/")
+	if provider != "" {
+		prov = provider
 	}
 	if f.model != "" {
-		spec.Model = f.model
+		name = f.model
 	}
+	use.Value, use.Style = prov+"/"+name, yaml.DoubleQuotedStyle
+	if f.offline {
+		for i := 0; i+1 < len(model.Content); i += 2 {
+			if model.Content[i].Value == "fallback" {
+				model.Content = append(model.Content[:i], model.Content[i+2:]...)
+				break
+			}
+		}
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return "", err
+	}
+	return "---\n" + string(out) + "---\n" + body, nil
 }
 
-// loadSpec reads one agent spec from path, or from stdin when path is "-".
-// It is strict: a field the spec format does not have is an error rather than
-// ignored, because a misspelt field is the mistake a local check is for.
-func loadSpec(path string, stdin io.Reader) (agentspec.AgentSpec, error) {
+// child is the value under key in a YAML mapping, or nil.
+func child(m *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// splitFrontmatter splits a definition file into its frontmatter and body.
+func splitFrontmatter(content string) (front, body string, err error) {
+	rest, ok := strings.CutPrefix(strings.TrimLeft(content, "\ufeff"), "---\n")
+	if !ok {
+		rest, ok = strings.CutPrefix(content, "---\r\n")
+	}
+	if !ok {
+		return "", "", errors.New("the file does not start with a --- line")
+	}
+	i := strings.Index(rest, "\n---")
+	if i < 0 {
+		return "", "", errors.New("the frontmatter has no closing --- line")
+	}
+	front = rest[:i+1]
+	body = strings.TrimPrefix(strings.TrimPrefix(rest[i+4:], "\r"), "\n")
+	return front, body, nil
+}
+
+// loadDefinition reads one .agent.md file from path, or from stdin when path
+// is "-".
+func loadDefinition(path string, stdin io.Reader) (string, error) {
 	r := stdin
 	if path != "-" {
 		f, err := os.Open(path)
 		if err != nil {
-			return agentspec.AgentSpec{}, err
+			return "", err
 		}
 		defer func() { _ = f.Close() }()
 		r = f
 	}
-	dec := json.NewDecoder(r)
-	dec.DisallowUnknownFields()
-	var spec agentspec.AgentSpec
-	if err := dec.Decode(&spec); err != nil {
-		if errors.Is(err, io.EOF) {
-			return agentspec.AgentSpec{}, fmt.Errorf("%s: empty, want an agent spec as JSON", path)
-		}
-		return agentspec.AgentSpec{}, fmt.Errorf("%s: not an agent spec: %w", path, err)
+	raw, err := io.ReadAll(io.LimitReader(r, maxDefinition+1))
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("%s: %w", path, err)
+	case len(raw) > maxDefinition:
+		return "", fmt.Errorf("%s: larger than %d bytes", path, maxDefinition)
+	case strings.TrimSpace(string(raw)) == "":
+		return "", fmt.Errorf("%s: empty, want an .agent.md definition", path)
 	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return agentspec.AgentSpec{}, fmt.Errorf("%s: more than one JSON value; a spec is one object", path)
-	}
-	return spec, nil
+	return string(raw), nil
 }
 
-// follow raises tag, prints its run's events as they stream, and returns the
-// exit status for how the run ended. It waits for the run for timeout, or
-// for as long as ctx lasts when timeout is zero; ctx ends on an interrupt.
+// maxDefinition bounds a definition file.
+const maxDefinition = 1 << 20
+
+// loadPolicy reads a policy from a JSON file. No path is the zero policy,
+// which grants nothing. It is strict: a field a policy does not have is an
+// error rather than ignored, because a misspelt field is the mistake a local
+// check is for.
+func loadPolicy(path string) (definition.Policy, error) {
+	if path == "" {
+		return definition.Policy{}, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return definition.Policy{}, err
+	}
+	defer func() { _ = f.Close() }()
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	var p definition.Policy
+	if err := dec.Decode(&p); err != nil {
+		if errors.Is(err, io.EOF) {
+			return definition.Policy{}, fmt.Errorf("%s: empty, want a policy as JSON", path)
+		}
+		return definition.Policy{}, fmt.Errorf("%s: not a policy: %w", path, err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return definition.Policy{}, fmt.Errorf("%s: more than one JSON value; a policy is one object", path)
+	}
+	return p, nil
+}
+
+// follow accepts the run of agent answering trigger, prints its events as
+// they stream, and returns the exit status for how the run ended. It waits
+// for the run for timeout, or for as long as ctx lasts when timeout is zero;
+// ctx ends on an interrupt.
 //
-// The events are read off the run's topic, subscribed before the tag is
-// raised, and the ledger decides how the run ended: a failed event on the
+// The events are read off the run's channel, subscribed before the run is
+// accepted, and the ledger decides how the run ended: a failed event on the
 // bus says what an attempt did, and only the ledger knows whether the run
 // will be attempted again.
-func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.Duration, out renderer, stderr io.Writer) int {
+func follow(ctx context.Context, app *fiber.App, trigger event.Envelope, agent string, timeout time.Duration, out renderer, stderr io.Writer) int {
 	wait := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		wait, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	runID := runtime.RunID(tag.Tenant, tag.ID)
-	tp, err := topic.Run(tag.Agent, runID)
-	if err != nil {
+	runID := runtime.RunKey(trigger.Tenant, trigger.ID, agent)
+	if err := runtime.CheckRun(agent, runID); err != nil {
 		fmt.Fprintf(stderr, "fiber run: %v\n", err)
 		return exitBadInput
 	}
@@ -235,12 +349,17 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 		}
 		return exitFailed
 	}
-	events := stream(wait, app.Bus(), tp, stderr)
-	if _, err := app.Invoke(wait, tag); err != nil {
+	events := stream(wait, app.Bus(), bus.Subscription{
+		Tenant:   trigger.Tenant,
+		Channels: []string{trigger.Channel},
+		Types:    []string{"run", "run.usage", "run.context"},
+		Run:      runID,
+	}, stderr)
+	if _, err := app.Runtime().Accept(wait, trigger, agent); err != nil {
 		if wait.Err() != nil {
 			return gaveUp()
 		}
-		fmt.Fprintf(stderr, "fiber run: raise the tag: %v\n", err)
+		fmt.Fprintf(stderr, "fiber run: accept the run: %v\n", err)
 		return exitFailed
 	}
 	type ending struct {
@@ -253,7 +372,7 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 		ended <- ending{o, err}
 	}()
 	var seen uint64 // the highest sequence printed
-	show := func(e envelope.Event) {
+	show := func(e event.Envelope) {
 		out.event(e)
 		seen = max(seen, e.Seq)
 	}
@@ -265,7 +384,7 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 				continue
 			}
 			show(e)
-			if e.Kind == envelope.KindParked {
+			if e.Type == event.TypeParked {
 				// Nothing here can answer it, and the run waits for an
 				// answer however long this command does.
 				out.close()
@@ -295,16 +414,16 @@ func follow(ctx context.Context, app *fiber.App, tag envelope.Tag, timeout time.
 	}
 }
 
-// stream delivers the events published to tp, in order, until ctx ends. A
+// stream delivers the events of one run, in order, until ctx ends. A
 // subscription that falls behind the bus's backlog resumes after the last
 // event it delivered, which is what an event's Seq is for; any other error
 // ends the stream, and the ledger still says how the run ended.
-func stream(ctx context.Context, b bus.Bus, tp topic.Topic, stderr io.Writer) <-chan envelope.Event {
-	sub, err := b.Subscribe(ctx, envelope.Subscription{Topic: tp})
-	events := make(chan envelope.Event)
+func stream(ctx context.Context, b bus.Bus, want bus.Subscription, stderr io.Writer) <-chan event.Envelope {
+	sub, err := b.Subscribe(ctx, want)
+	events := make(chan event.Envelope)
 	if err != nil {
 		if ctx.Err() == nil {
-			fmt.Fprintf(stderr, "fiber run: subscribe to %s: %v\n", tp, err)
+			fmt.Fprintf(stderr, "fiber run: subscribe to run %s: %v\n", want.Run, err)
 		}
 		close(events)
 		return events
@@ -316,14 +435,15 @@ func stream(ctx context.Context, b bus.Bus, tp topic.Topic, stderr io.Writer) <-
 			e, err := sub.Recv(ctx)
 			if errors.Is(err, bus.ErrSlowConsumer) {
 				_ = sub.Close()
-				if sub, err = b.Subscribe(ctx, envelope.Subscription{Topic: tp, From: last}); err == nil {
+				want.From = last
+				if sub, err = b.Subscribe(ctx, want); err == nil {
 					continue
 				}
 			}
 			if err != nil {
 				_ = sub.Close()
 				if ctx.Err() == nil {
-					fmt.Fprintf(stderr, "fiber run: read %s: %v\n", tp, err)
+					fmt.Fprintf(stderr, "fiber run: read run %s: %v\n", want.Run, err)
 				}
 				return
 			}
@@ -341,7 +461,7 @@ func stream(ctx context.Context, b bus.Bus, tp topic.Topic, stderr io.Writer) <-
 
 // drain prints what is left on events once the run has ended: until done
 // holds, until nothing arrives for quiet, or until the stream ends.
-func drain(events <-chan envelope.Event, show func(envelope.Event), quiet time.Duration, done func() bool) {
+func drain(events <-chan event.Envelope, show func(event.Envelope), quiet time.Duration, done func() bool) {
 	if events == nil || done() {
 		return
 	}

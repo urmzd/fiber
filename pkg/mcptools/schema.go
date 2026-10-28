@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	saigetypes "github.com/urmzd/saige/agent/types"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // parameterSchema decodes an accepted JSON schema into saige's form: an

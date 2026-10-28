@@ -9,15 +9,15 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/knowledge"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // retrieverFor binds the store to one run's tenant and to the sources its
 // pinned revision declares. An agent with no sources gets no retriever at all,
 // so it is never grounded in a corpus it did not ask for.
-func retrieverFor(store knowledge.Store) func(tenant string, sources []string) agentrt.Retriever {
-	return func(tenant string, sources []string) agentrt.Retriever {
+func retrieverFor(store knowledge.Store) func(tenant string, sources []string) native.Retriever {
+	return func(tenant string, sources []string) native.Retriever {
 		if len(sources) == 0 {
 			return nil
 		}

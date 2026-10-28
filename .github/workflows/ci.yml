@@ -102,7 +102,7 @@ jobs:
           # suite on Redis and Postgres, and fiber.New puts every store family
           # on one Postgres pool. pkg/runtime runs its stop, usage and park tests on
           # the Postgres ledger, queue and journal and the Redis bus.
-          go test -race -count=1 -json ./pkg/registry ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/toolprovider ./pkg/bus ./pkg/runtime ./pkg/internal/pgrename . | tee integration-results.jsonl
+          go test -race -count=1 -json ./pkg/definition ./pkg/durable ./pkg/knowledge ./pkg/thread ./pkg/toolprovider ./pkg/bus ./pkg/runtime ./pkg/internal/pgrename . | tee integration-results.jsonl
       - name: Reject skipped integration tests
         run: |
           # The Postgres queue does not implement the optional DeltaLog face.
@@ -116,7 +116,8 @@ jobs:
           jq -s -e '. as $events | [
             ["internal/pgrename", "TestADatabaseFromBeforeTheRenameKeepsItsData"],
             ["internal/pgrename", "TestAnOldTableRecreatedAfterTheUpgradeFailsTheMigrationNamingBoth"],
-            ["registry", "TestPostgresConformance"],
+            ["definition", "TestPostgresSource"],
+            ["definition", "TestPostgresSourceWithANanosecondClock"],
             ["knowledge", "TestPostgresConformance"],
             ["thread", "TestPostgresConformance"],
             ["toolprovider", "TestPostgresConformance"],
@@ -124,7 +125,7 @@ jobs:
             ["bus", "TestPostgresIsSharedAcrossBusesOnOneDatabase"],
             ["..", "TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore/postgres"],
             ["..", "TestEachPersonsRunReachesAPersonScopedProviderWithTheirOwnCredential/postgres"],
-            ["registry", "TestPostgresMigrateIsIdempotentAndConcurrent"],
+            ["definition", "TestPostgresImportsTheRegistryOnce"],
             ["durable", "TestLedgerConformanceOnFiberSchema"],
             ["durable", "TestQueueConformanceOnFiberSchema"],
             ["knowledge", "TestPostgresMigrateIsIdempotentAndConcurrent"],
@@ -133,7 +134,7 @@ jobs:
             ["toolprovider", "TestPostgresAProviderFromBeforeCredentialScopesIsShared"],
             ["bus", "TestRedisConformance"],
             ["runtime", "TestStopTestsRunOnPostgresAndRedis"],
-            ["runtime", "TestARunFromBeforeTheRenameFailsWithAReasonEverySurfaceSees"],
+            ["runtime", "TestLegacyTurnFailsTerminally"],
             ["runtime", "TestAStopReachesARunExecutingOnAnotherWorker"],
             ["runtime", "TestAStopBeforeTheTurnStartsIsNotLost"],
             ["runtime", "TestAnotherTenantsFloodCannotEvictAPendingStop"],

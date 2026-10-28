@@ -5,15 +5,20 @@
 > designed but not yet finished, it is called out in
 > [Limitations](#limitations) rather than described as though it exists.
 
-fiber is an agent platform and a low-latency pub/sub bus. Create an agent from
-a spec, tag it from anywhere, get its events streamed to anyone and delivered
-anywhere.
+fiber is an agent library and a low-latency pub/sub bus. Store an agent as a
+saige definition, make it a member of a channel, publish an event on that
+channel, and the run's events stream to anyone subscribed and are delivered
+wherever the channel leads.
 
-The single idea the whole design turns on: **where a tag is raised and where its
-answer lands are independent.** A tag raised in GitHub can answer into Jira. A
-schedule nobody watched can answer into both. That independence is what makes
+The single idea the whole design turns on: **where an event arrives and where
+its answer lands are independent.** A GitHub comment can be answered into Jira.
+A schedule nobody watched can answer into both. That independence is what makes
 this a mesh rather than a collection of integrations, and almost every decision
 below follows from it.
+
+The event union, the channel bus, definitions and the `Runtime` seam are
+specified in [events.md](events.md). This document covers how a run behaves:
+delivery, durability, stopping, compaction, usage, parking and credentials.
 
 ## What each layer owns
 
@@ -21,140 +26,177 @@ fiber composes three libraries and adds the parts that make them a product.
 
 | Concern | Owner |
 |---------|-------|
-| The agent loop, typed deltas, RAG and citations | [saige](https://github.com/urmzd/saige) |
+| The agent loop, typed deltas, RAG, citations, versioned agent definitions | [saige](https://github.com/urmzd/saige) |
 | Durability, replay, exactly-once effects, per-run journal | [anchor](https://github.com/urmzd/anchor) |
 | Sandboxed execution nodes, NGAC access control | [playscape](https://github.com/urmzd/playscape) |
-| Agent specs, revisions, registry | fiber |
-| Topics, the bus, delivery routing, transports | fiber |
-| Connectors: triggers, sinks, and native actions | fiber |
+| The event union and its catalog, the channel bus, membership, dispatch, delivery | fiber |
+| Definition storage, pins and the Policy sidecar | fiber |
+| Ingress and egress adapters, and native actions | fiber |
 
 The division is strict. anchor owns whether work survives a crash; playscape
-owns what a tool is allowed to touch; saige owns what the model does. fiber
-owns addressing, distribution, and the control plane, and delegates the rest.
+owns what a tool is allowed to touch; saige owns what the model does and what
+an agent is. fiber owns addressing, distribution, and the control plane, and
+delegates the rest.
 
-## Topics: one namespace, matched by prefix
+## One envelope, one catalog
 
-The mental model is one line: **users listen to an agent.**
+Every event is an `event.Envelope` whose `Data` is a typed `event.Body`. The
+envelope's `type` is the only discriminator and carries the version:
+`message.posted.v1`, `github.pull_request.opened.v1`, `cron.tick.v1`,
+`run.delta.text.v1`, `run.completed.v1`, `run.usage.v1`. Every type is
+registered once in the catalog with its decoder, a renderer that turns the body
+into model input, and a sensitivity flag. A test fails when a type has no
+renderer. A type this build does not know decodes to `event.Unknown`, which
+keeps its bytes and is never an error for a subscriber that did not ask for it.
 
+A run is started by an event, not by free text. A chat message is
+`message.posted.v1` with a `text` field; the model reads the catalog rendering
+of whatever event started the run.
+
+## Channels and subscriptions
+
+The bus carries every event on a channel: a URI such as `slack://T01/C02`,
+`github://acme/handbook/issues/42` or `cron://acme/nightly`. A subscriber names
+a tenant, channel prefixes and type prefixes:
+
+```go
+bus.Subscription{
+    Tenant:   "acme",                       // from the principal, never a request
+    Channels: []string{"github://acme/"},   // channel prefixes
+    Types:    []string{"run.completed"},    // type prefixes
+}
 ```
-agent                     every agent (an audit or dashboard consumer)
-agent:docs-bot            every run of one agent
-agent:docs-bot:run_01J    one run
-```
 
-Events are always published to the most specific form. Subscribing to any prefix
-receives them. There is no wildcard language, because prefix containment already
-expresses every subscription the mesh needs and it cannot be got wrong.
+Subscriptions are default deny. An empty tenant, channel list or type list
+matches nothing, so there is no "everything" subscription. Prefixes are segment
+aware: `slack://T01/C0` does not cover `slack://T01/C02`, and `run.delta` does
+not cover `run.deltas.v1`. Opt-in families (`run.usage`, `run.context`) reach a
+subscription only when it names them. A control channel
+(`control://<tenant>/<verb>/<hash>`) matches only a subscription that names it
+exactly.
 
-Containment is segment-wise, not string-wise: `agent:docs` does not cover
-`agent:docs-bot`. A naive `strings.HasPrefix` would leak one agent's events into
-another agent's subscription, so the property is pinned by a test.
+Some things are deliberately not part of a channel:
 
-### What is deliberately not a topic
-
-An earlier design put tenant, origin, agent, revision, and event kind all in the
-address, with a wildcard matcher over them. It was collapsed on purpose. Each
-token that came out went somewhere better:
-
-| Was going to be a topic token | Is now | Why |
+| Not in the channel | Is instead | Why |
 |---|---|---|
-| Event kind | A field, filtered | All events stream the same way. Splitting kinds across topics forces a consumer who wants the whole conversation to fan in from several topics and re-order them. |
-| Agent revision | A field, filtered | Canary observation is a filter on one topic, not a second topic that appears and disappears as agents are revised. |
-| Tenant | An authorization scope | A subscriber never names its own tenant in a topic. fiber authenticates nothing (see [No transport](#no-transport)): the program composing it sets the tenant from the caller's credential, so a subscriber cannot ask for another tenant's traffic by spelling it. |
-| Destination | A route on the run | The same agent answers into Slack for one tag and GitHub for the next. Neither destination should exist in the topic namespace. |
+| Event type | A type prefix on the subscription | All events of a conversation stream the same way. A consumer who wants the whole conversation should not fan in from several channels and re-order them. |
+| Agent and version | Fields on the envelope (`agent`, `version`, `digest`) | Watching one version is a filter, not a channel that appears and disappears as agents change. |
+| Tenant | An authorization scope | fiber authenticates nothing (see [No transport](#no-transport)): the program composing it sets the tenant from the caller's credential, so a subscriber cannot ask for another tenant's traffic by spelling it. |
 
-The result is that a consumer only ever needs to know an agent's name to listen
-to it, and no topic name has to be discovered at runtime.
+## Members wake, adapters carry
 
-## Triggers, sinks, and actors
+An agent is woken only by channels it is a member of. `pkg/membership` records
+`(tenant, channel prefix, agent, Rule)`; a `Rule` lists the type prefixes the
+member wakes for and, by default, wakes it only when the event names it (a
+mention, a review requested from it, an issue assigned to it, a direct
+message that names no other agent). A store with no rows wakes nobody.
 
-A connector is a peer, not a client. It may implement up to three faces, and the
-faces are independent:
+`pkg/dispatch` listens to the tenant's ingress events and starts one run per
+matching member. It drops the event for the subscriber that produced it, so an
+agent's own output never wakes itself, and drops an event at the hop limit
+(`bus.DefaultMaxHops`), so two agents cannot answer each other forever. The run
+id is `runtime.RunKey(tenant, event id, member)`: delivery is at-least-once,
+and a redelivered event joins the run it already started.
+
+Surfaces are adapters on either side of the bus:
 
 | Face | Role |
 |------|------|
-| `Trigger` | Raises tags into the mesh |
-| `Sink` | Renders events onto a native surface |
-| `Actor` | Contributes native verbs the agent can call as tools |
+| `Trigger` (ingress) | Verifies a request, translates it into one typed event, publishes it on the surface's channel. It picks no agent. |
+| `Sink` (egress) | Subscribes by channel and type prefix and renders what arrives onto its surface. |
+| `Actor` | Contributes native verbs the agent can call as tools. |
 
-Which faces a connector implements is what gives the mesh its shape, and the
-asymmetry is real rather than incidental:
-
-| Connector | Trigger | Sink | Actor |
-|-----------|:-------:|:----:|:-----:|
+| Connector | Ingress | Egress | Actor |
+|-----------|:-------:|:------:|:-----:|
 | slack | yes | yes | yes |
 | github | yes | yes | yes |
 | jira | yes | yes | yes |
 | cron | yes | no | no |
 | webhook | no | yes | no |
+| author | no | no | yes |
 
-A schedule has no surface to deliver to, so cron only triggers. An outbound POST
-raises nothing, so webhook only sinks. Roles are derived by type assertion in
-`connector.RolesOf` rather than declared, so a connector cannot advertise a face
-it does not have, and `Registry.Sink(cron://...)` returns `ErrUnsupported`
-instead of silently dropping an event.
+A schedule has no surface to deliver to, so cron only publishes. An outbound
+POST raises nothing, so webhook only delivers. Roles are derived by type
+assertion in `connector.RolesOf` rather than declared, so a connector cannot
+advertise a face it does not have.
 
-No connector ever calls another connector. Sources publish, sinks subscribe, and
-the bus is the only thing in between. Adding a destination is adding a
-subscriber.
+No connector ever calls another connector. Ingress publishes, egress
+subscribes, and the bus is the only thing in between. Adding a destination is
+adding a subscriber.
 
 The `Actor` face is what turns "the agent replied" into "the work got done".
 Actions run under the agent's NGAC policy rather than freely, and each one that
-fires emits an `action.taken` event, so the work is auditable on the same bus as
-the conversation that caused it.
+fires emits a `run.action.taken.v1` event, so the work is auditable on the same
+bus as the conversation that caused it.
 
 ## N:M delivery
 
-One tag fans out to many sinks; one sink serves many agents. Each route chooses
-its own event kinds, so granularity is per destination.
+One event fans out to many egress adapters; one adapter serves many agents.
+Each adapter chooses its own types, so granularity is per destination.
 
 The worked example, which is what `examples/local` demonstrates:
 
 ```
-Tag raised in:  github://acme/handbook/issues/42        origin "github"
+Event:     github.issue_comment.created.v1 on github://acme/handbook/issues/42
 
-Route 1:  slack://T01/C02?thread=1699.001     kinds: (all)
-Route 2:  webhook://acme/deploys              kinds: lifecycle.completed
+Egress 1:  Slack sink   channels: github://acme/handbook/   types: run
+Egress 2:  webhook      channels: github://acme/handbook/   types: run.completed
 ```
 
 Slack receives every delta and edits one message as the answer arrives. The
 webhook receives exactly one event and learns only that the work landed. Same
-run, same bus, same events. Selectivity is a field on the route, not a separate
-topic and not a separate run, which is why adding the webhook costs nothing on
-the agent side.
+run, same bus, same events. Selectivity is a type prefix on the subscription,
+not a separate channel and not a separate run, which is why adding the webhook
+costs nothing on the agent side.
 
 Delivery is at-least-once, so sinks must be idempotent. The shape that makes
 that natural is one message per run, edited as deltas arrive, keyed by run id.
 Posting a message per delta would be correct and unusable.
 
-The router preserves ordering per `(run, target)` pair and parallelises across
+Egress preserves ordering per `(run, target)` pair and parallelises across
 targets and runs. Ordering within a pair matters concretely: a Slack message
 edited out of order shows the wrong final text.
 
-## Agent revisions are pinned per run
+## Definitions are pinned per run
 
-An `AgentSpec` is immutable. Revising appends revision N+1 and never modifies
-what is already there. A run pins its revision at accept time and executes
-against that revision forever.
+Agents are saige definitions (`.agent.md`) plus a fiber `Policy` sidecar, kept
+per tenant in an insert-only `definition.Source`. A version, once written,
+never changes. At accept time a run resolves the highest version and writes a
+`definition.Pin` into its durable input: the name, the exact version, saige's
+resolved digest, the exact version of every sub-agent and the policy hash.
 
 This is a correctness requirement, not bookkeeping. anchor replays a workflow
 from the top on every attempt. If a run resolved "latest" inside its workflow
-body and someone revised the agent between attempts, the replay would run
-against a different prompt and diverge, which anchor detects as
-`ErrNonDeterministic`. Pinning the revision in the run's durable input is what
-makes replay safe.
-
-The runtime goes one step further and pins the revision's content hash too, so a
-revision whose content moved under a fixed number fails terminally rather than
-silently executing something else.
+body and someone published a new version between attempts, the replay would
+run against a different prompt and diverge, which anchor detects as
+`ErrNonDeterministic`. Every attempt verifies the pin instead: it reloads the
+pinned versions and recomputes both hashes, and any mismatch, missing row or
+empty digest fails the run terminally. A newer prompt never runs under an old
+pin.
 
 Two consequences worth knowing:
 
-- Deleting an agent is a tombstone, not an erase. The name stops accepting new
-  tags, but `Get(name, rev)` still resolves, because a run pinned to that
-  revision must remain replayable and explicable after the name is retired.
-- Canary and A/B become subscription concerns. Watching revision 7 is
-  `--rev 7` on one subscription, not a deploy.
+- Retiring an agent stops new runs, not old ones. Every version stays readable,
+  because a run pinned to one must remain replayable and explicable.
+- Canary and A/B become subscription concerns. Watching one version is a filter
+  on `version`, not a deploy.
+
+## One Runtime seam
+
+A turn executes through one interface, `turn.Runtime`:
+
+```go
+type Runtime interface {
+    Turn(ctx context.Context, def Pinned, in Input, emit func(context.Context, event.Body) error) (Result, error)
+}
+```
+
+It runs one turn of a pinned definition for the event in `Input.Trigger` and
+emits catalog bodies. The host stamps run identity (channel, sequence, tenant,
+version) on each body; the Runtime never sees it. `pkg/turn/native` is the
+default and wraps saige. `pkg/turn/sandbox` wraps any Runtime and runs each
+turn as a playscape task under the pinned policy, so isolation does not depend
+on which Runtime is inside. Pass your own with `fiber.WithTurnRuntime`.
 
 ## Durability
 
@@ -163,7 +205,7 @@ its current beta, so a node that dies mid-task drops it. That is acceptable here
 only because the durable run wrapping the task is anchor's, and anchor
 replays it.
 
-Each event is published twice, to two systems with different jobs:
+Each run event is published twice, to two systems with different jobs:
 
 - `anchor.Emit` writes the durable per-run journal, which is what replay and
   cursor resume are built on.
@@ -172,8 +214,8 @@ Each event is published twice, to two systems with different jobs:
 
 The journal is truth; the bus is flow.
 
-`Tag.ID` is the run's idempotency key. Every surface that raises tags
-redelivers on timeout, so a Slack retry or a GitHub redelivery joins the run
+The event id is the run's idempotency key. Every surface redelivers on
+timeout, so a Slack retry or a GitHub redelivery keeps its id and joins the run
 that already exists rather than starting a second one and answering twice.
 
 ## Stopping a run
@@ -185,11 +227,11 @@ point, and a stopped run is its own outcome: not a failure, not a completion.
 ```
 App.Stop / runtime.Stop
   -> the run ledger                the request is recorded on the run (truth)
-  -> control.stop                  then published to the asker's stop stream (fast path)
+  -> control.stop.v1               then published on the run's stop channel (fast path)
      -> the executing attempt      reads the ledger before its turn, listens on the bus
                                    during it, and polls the ledger as a backstop
         -> saige stream.Stop       the model call and running tools are cancelled
-           -> lifecycle.stopped    terminal: the reason, who asked, the partial answer
+           -> run.stopped.v1       terminal: the reason, who asked, the partial answer
 ```
 
 ### The guarantee
@@ -201,7 +243,7 @@ caller's tenant and has not ended:
 - a turn already running is asked to wrap up at once over the bus, or within
   the stop poll interval (`runtime.WithStopPoll`, two seconds by default) if
   the bus lost the request;
-- the run ends with `lifecycle.stopped` and is never retried, unless its turn
+- the run ends with `run.stopped.v1` and is never retried, unless its turn
   finished its answer before the request took effect, in which case it ends
   completed.
 
@@ -229,42 +271,42 @@ attempt's workflow body claims it, so anchor does not report it as a record
 no call read; one recorded during an attempt is not in that attempt's replay
 set and needs no claim.
 
-**The bus is the fast path.** After recording, `Stop` publishes `control.stop`
-to `agent:_control:stop-<key>`, where the key is a hash of the caller's tenant
-and the run id. It does not go on the run's own topic, because that topic has
-one writer: the attempt chooses its own sequence numbers and the bus keeps the
-first write of a sequence. `_control` is the one name no agent may take, the
-router never delivers what is published under it, and a host that lets
-callers publish must refuse it, so the only way to write a request is
-`Runtime.Stop`, called with the tenant and asker the host took from the
-caller's credential. Because the tenant is part of the
-key, one tenant's requests can never land in the stream another tenant's run
+**The bus is the fast path.** After recording, `Stop` publishes
+`control.stop.v1` on `event.ControlChannel(tenant, "stop", run)`:
+`control://<tenant>/stop/<hash>`, where the hash covers the caller's tenant
+and the run id. It does not go on the run's own events, because a run has one
+writer: the attempt chooses its own sequence numbers and the bus keeps the
+first write of a sequence. Egress never delivers a control channel, and a host
+that lets callers publish must refuse the `control` scheme, so the only way to
+write a request is `Runtime.Stop`, called with the tenant and asker the host
+took from the caller's credential. Because the tenant is part of the channel,
+one tenant's requests can never land in the channel another tenant's run
 reads, so they cannot push that tenant's own request out of it.
 
 | The request arrives | What happens |
 |---|---|
-| Before a worker has started the turn | The attempt reads it from the ledger and ends the turn without calling the executor. |
+| Before a worker has started the turn | The attempt reads it from the ledger and ends the turn without calling the turn runtime. |
 | While the turn runs | It is delivered over the bus at once, or read from the ledger at the next poll. |
 | Between two attempts | The next attempt reads it from the ledger before its turn. |
 | After the process restarts | The ledger survived, and the next attempt stops. |
 | After the run ended | Nothing is published. Nothing is recorded either, unless the run ends between `Stop`'s check and its write, in which case the request is recorded on the finished run, where no attempt reads it and `StopRequested` reports it. |
-| While the run is parked on a person | Recorded, and the question it waits on is resolved as stopped. The run is woken and ends `lifecycle.stopped` without resuming its turn: see [Parking a run on a person](#parking-a-run-on-a-person). |
+| While the run is parked on a person | Recorded, and the question it waits on is resolved as stopped. The run is woken and ends `run.stopped.v1` without resuming its turn: see [Parking a run on a person](#parking-a-run-on-a-person). |
 | A second time | The first recorded request is the one the run honours. |
 
 **Tenant isolation does not rest on secret ids.** Run ids are derived from the
-tenant and the tag id by an exported function, and tag ids are often
-predictable (a schedule's occurrence, a Slack event id), so a run id is not a
+tenant, the event id and the agent by an exported function, and event ids are
+often predictable (a schedule's occurrence, a Slack event id), so a run id is not a
 secret. Isolation comes from the checks: `Stop` records and publishes only for
-the caller's own run, the stop stream is keyed by the caller's tenant, and an
+the caller's own run, the stop channel is keyed by the caller's tenant, and an
 attempt ignores any request not made under its run's tenant. `Stop` answers
-the same nil (and the route the same 202) for an unknown run, a finished run
+the same nil (and a host's route the same 202) for an unknown run, a finished run
 and another tenant's run, so its answer never says whether a run exists.
 
 Its timing can. For an id the ledger holds, `Stop` reads the run and checks
 its tenant before deciding to do nothing; for an unknown id it returns after
 one missed read. Someone who can time the call closely can tell whether a run
 with that id exists in some tenant, though not whose it is or what it holds.
-Because run ids are computable, that can reveal whether a known tag (a
+Because run ids are computable, that can reveal whether a known event (a
 schedule's occurrence, say) started a run in another tenant. Closing it needs
 a ledger lookup keyed by tenant, which anchor's ledger does not have.
 
@@ -289,7 +331,7 @@ The deploy failed because
 
 The marker is a constant and the reason is not written there, because the
 journal is replayed byte for byte to every later run in the thread. The reason
-and who asked travel on `lifecycle.stopped`, on the run's output, and on
+and who asked travel on `run.stopped.v1`, on the run's output, and on
 `App.Status` (`stopped`, with `StopReason` and `StoppedBy`). A request
 with no reason is given saige's default, "Stopped on request", once, so every
 path reports the same words. Sinks render a stopped run as stopped: the shared
@@ -306,10 +348,10 @@ it was called with end with a `*runtime.StoppedError` cause (matching
 and with the ordinary cause otherwise, so it can stop the run it started with
 the same words.
 
-**Stop requests are not agent output.** The root topic `agent` does not cover
-the control namespace, so a consumer of everything (a dashboard, a host
-relaying every event) never receives a `control.stop`. An audit of requests
-subscribes to `agent:_control` by name.
+**Stop requests are not agent output.** A control channel matches only a
+subscription that names it exactly, so a consumer of every channel prefix (a
+dashboard, a host relaying every event) never receives a `control.stop.v1`.
+An audit of one run's requests subscribes to its control channel by name.
 
 ### How long the bus keeps a request
 
@@ -317,29 +359,25 @@ This only decides whether the fast path delivers a request; with the ledger it
 never decides whether a run stops. A host that builds a runtime without
 `runtime.WithStopLedger` has only the bus, and these are its exact bounds:
 
-- A run's stop stream keeps the newest `bus.WithRetention` requests (1024).
+- A run's stop channel keeps the newest `bus.WithRetention` requests (1024).
   Only the run's own tenant writes there, so depth cannot lose a stop; it only
   decides which request's reason survives.
-- The in-memory bus keeps the `bus.WithMaxRuns` streams written most recently
-  (4096), run streams and stop streams alike. A pending request is lost once
-  that many other streams have been written after it, the run's own stream
-  among them.
-- On Redis a run-scoped subscription reads the stream key directly, so the
-  discovery index TTL does not apply, and stop stream keys have no expiry. A
-  request lasts until Redis evicts or loses the key.
+- The in-memory bus keeps the `bus.WithMaxRuns` rings written most recently
+  (4096), run rings and channel rings alike. A pending request is lost once
+  that many other rings have been written after it, the run's own among them.
+- Redis and Postgres forget an event `bus.WithIndexTTL` after it was published
+  (24 hours by default), control requests included.
 
-The control state the bus holds is bounded by the runs that were asked: a
-stop stream exists only for a live run of the asker's tenant that was asked to
-stop, at most one per (tenant, run), each at most `WithRetention` entries. In
-memory they are evicted with every other stream. On Redis they never expire,
-which is the same as every run's own stream today (the bus sets no TTL on run
-keys); a deployment that needs Redis bounded sets an eviction policy.
+The control state the bus holds is bounded by the runs that were asked: a stop
+channel exists only for a live run of the asker's tenant that was asked to
+stop, at most one per (tenant, run), each at most `WithRetention` entries, and
+it ages out with every other event.
 
 ## Compacting a run on request
 
 A host can ask a running turn to summarize the older part of its history now,
 instead of waiting for the deployment's budget (`Compaction.MaxInputTokens`). The
-deployment has to take requests (`agentrt.Compaction.OnRequest` on its agents
+deployment has to take requests (`native.Compaction.OnRequest` on its agents
 and `runtime.WithCompactRequests` on the runtime, both set by
 `fiber.WithCompaction` with `OnRequest`). A turn of a runtime that takes them holds a
 second control subscription, beside the stop one, for as long as it runs;
@@ -348,10 +386,10 @@ for both.
 
 ```
 App.Compact / runtime.Compact
-  -> control.compact               published to the asker's compact stream
-     -> the executing attempt      listens on the bus for as long as its turn runs
-        -> the next model call     is preceded by the compaction the budget would make
-           -> context.compacted    trigger "requested", who asked, tokens before and after
+  -> control.compact.v1              published on the run's compact channel
+     -> the executing attempt       listens on the bus for as long as its turn runs
+        -> the next model call      is preceded by the compaction the budget would make
+           -> run.context.compacted.v1  trigger "requested", who asked, tokens before and after
 ```
 
 The compaction is saige's, with the strategy, the cut and the anti-thrash
@@ -360,9 +398,9 @@ before the next model call fold into one. A request is live only: it is not
 recorded in the ledger, and one made while the run is queued, parked, between
 attempts or over does nothing, because the turn it would compact is not the
 one that runs. A turn with nothing older than `KeepTurns` turns has nothing to
-summarize, and a request then does nothing either. `context.compacted` is
-published for every compaction, budgeted ones included, and is opt-in for
-routes like `usage`.
+summarize, and a request then does nothing either. `run.context.compacted.v1` is
+published for every compaction, budgeted ones included, and is opt-in like
+`run.usage`.
 
 ## Usage
 
@@ -375,35 +413,32 @@ twice.
 
 | Where | What |
 |---|---|
-| `usage.call` | One model call, published the moment saige reports it: `accounting_id`, `saige_accounting_id` when saige gave one, the `agent` whose model made it, its delegation `depth`, `model`, `requests`, `prompt_tokens` (all input), `cached_prompt_tokens`, `cache_write_tokens`, `completion_tokens`, `cost`, `context_window` |
-| `usage.child` | A child run a host carried out for a delegation, once it ended: its run id, agent and whole total, read from the ledger |
-| `lifecycle.completed`, `lifecycle.stopped` | The run's total as `usage` |
+| `run.usage.v1` | One model call, published the moment saige reports it: `accounting_id`, `saige_accounting_id` when saige gave one, the `agent` whose model made it, its delegation `depth`, `model`, `requests`, `prompt_tokens` (all input), `cached_prompt_tokens`, `cache_write_tokens`, `completion_tokens`, `cost`, `context_window` |
+| `run.usage.child.v1` | A child run a host carried out for a delegation, once it ended: its run id, agent and whole total, read from the ledger |
+| `run.completed.v1`, `run.stopped.v1` | The run's total as `usage` |
 | `runtime.Output.Usage` | The same total, in the ledger with the rest of the output, so it survives a restart |
 | `App.Status` | `Run.Usage` (`RunUsage`): `own`, `children`, `total`, `context` |
 | `runtime.RecordedUsage` | A failed run's total, from its ledger records |
 
-The total is a `payload.RunUsage`. `Own` is the run's own agent, `Children` is
+The total is a `event.RunUsage`. `Own` is the run's own agent, `Children` is
 everything it delegated at every depth, and `Total` is the two added: the
 figure to hold against a limit. `Context` is the run's own agent at its latest
 model call: the model, its context window, and how many tokens that call's
 prompt was.
 
-**Usage is opt-in for delivery.** It is its own kind family, `usage`, and a
-route receives it only by naming the family or one of its kinds: a route with
-no kind filter, like one selecting `delta` or `lifecycle`, never does. Routes
-with no filter were delivering to receivers that knew a fixed set of kinds
-before usage existed, and an event per model call that such a receiver
-refuses, or fails on and has retried in the run's ordered delivery lane, would
-delay its `lifecycle.completed`. "Everything" does not cover accounting, as
-the root topic does not cover the control namespace. Subscriptions are not
-routes: a subscription with no filter sees usage like
-any other kind.
+**Usage is opt-in.** `run.usage` is an opt-in family in the catalog: a
+subscription receives it only with a type prefix that names it (`run.usage`,
+or `run.usage.v1`), and a subscription to `run` never does. Receivers that knew
+a fixed set of types would otherwise get an event per model call, and one they
+refuse, or fail on and have retried in the run's ordered delivery lane, would
+delay its `run.completed.v1`. "Every run event" does not cover accounting, as
+no channel prefix covers a control channel.
 
-Sinks that render a chat surface (Slack, GitHub, Jira) ignore usage even when a
-route names it: token counts and cost are for whoever pays, not for everyone
-in a channel or on an issue. A webhook route that selects `usage` receives it.
-Only the attempt that spent the tokens writes them; a host that lets callers
-publish must refuse the family.
+Sinks that render a chat surface (Slack, GitHub, Jira) ignore usage even when
+they name it: token counts and cost are for whoever pays, not for everyone in
+a channel or on an issue. A webhook endpoint whose `Types` name `run.usage`
+receives it. Only the attempt that spent the tokens writes them; a host that
+lets callers publish must refuse the family.
 
 ### Cost and money
 
@@ -417,7 +452,7 @@ reported no tokens gets no cost: its tokens are counted, the call is counted in
 response cache sent nothing to a provider and is reported with no tokens and
 no cost.
 
-Money is `payload.Cost{Micros, Currency, AsOf}`: integer millionths of an ISO
+Money is `event.Cost{Micros, Currency, AsOf}`: integer millionths of an ISO
 currency, saige's `types.Cost`. One US dollar is 1,000,000 micros with currency
 `USD`, the int64 micro-USD convention a host enforcing spend limits uses. Each
 call's cost is rounded to the micro once, by saige, and a total is the integer
@@ -456,11 +491,11 @@ and a delivery can repeat any event. The rule:
   any delegation can share. saige's own `AccountingID` is carried as
   `saige_accounting_id` and never counted by, because saige keeps it stable
   across a durable replay of its own. A child run is keyed `run:<child run
-  id>`. `payload.Tally` counts each key once, so a consumer summing the stream
+  id>`. `event.Tally` counts each key once, so a consumer summing the stream
   at least once gets the same total the run records.
 
 The total is counted from the usage events the attempts relayed, never from a
-figure an executor returns. It equals the sum of the run's call events
+figure a turn runtime returns. It equals the sum of the run's call events
 whenever every attempt that called a model returned, which is every case but
 two, both in Limitations: an attempt that dies without returning, and a
 superseded attempt that records after the outcome was decided.
@@ -472,7 +507,7 @@ exactly one run's `Own`.
 
 - **In-turn sub-tasks** (the `tag_<agent>` tool without a host Delegator) are
   not runs. Their calls are relayed onto the parent run's stream as
-  `usage.call` one level deeper (`depth` 1), as they happen, and counted in the
+  `run.usage.v1` one level deeper (`depth` 1), as they happen, and counted in the
   parent's `Children`, whether the sub-task answers, fails or is aborted. The
   relay carries any depth, but the sandbox gives a sub-task no spawn grant of
   its own, so in practice a sub-task's own delegation is refused by policy and
@@ -485,11 +520,11 @@ exactly one run's `Own`.
   of the parent's tenant, not the parent, that has ended (another tenant's run
   is refused in the same words as one that does not exist), and takes its
   agent and total from the child's own record. The parent's stream carries a
-  `usage.child` and the parent counts it in `Children`, once per child run
+  `run.usage.child.v1` and the parent counts it in `Children`, once per child run
   however many times it is reported or however many parent attempts delegated
   to it. A child's total already includes what it delegated, so three levels
   of runs roll up with each call counted once at the origin.
-- **A tag raised at another agent** is an unrelated run and does not roll up.
+- **An event that wakes another agent** starts an unrelated run, which does not roll up.
 
 ## Parking a run on a person
 
@@ -502,20 +537,20 @@ host shows the question and answers it, and the run resumes with the answer.
 
 | Question | Raised by | The answer |
 |---|---|---|
-| `approval` | A call to a tool the spec lists in `approvals`, or any tool the host's catalog wrapped with a saige marker (`types.MarkedTool`) | `approve` (optionally with edited arguments) or `deny` (optionally with a note the model is shown) |
+| `approval` | A call to a tool the definition lists in `approval.ask`, or any tool the host's catalog wrapped with a saige marker (`types.MarkedTool`) | `approve` (optionally with edited arguments) or `deny` (optionally with a note the model is shown) |
 | `choice` | The built-in `ask_person` tool with `options` | One of the options |
 | `reply` | `ask_person` without `options` | Free text |
 
 Both are saige's own vocabulary. An approval is saige's marker: saige stops
-at the call and asks. `ask_person` is a tool the agent calls when its spec
-lists it; its result is the answer. A spec may name the person or role it
+at the call and asks. `ask_person` is a tool the agent calls when its
+definition grants it; its result is the answer. A definition may name the person or role it
 wants an answer from (`asked_of`, a hint for routing, never an
 authorization) and, for `ask_person`, a `default`.
 
-The question is typed (`payload.Question`): its id, kind, prompt, options,
+The question is typed (`event.Question`): its id, kind, prompt, options,
 for an approval the tool, the call id, the arguments and the tool's schema,
 `asked_of`, when it expires and what it defaults to. It travels on
-`lifecycle.parked` (`Lifecycle.Question`), and `App.Status` reports a parked
+`run.parked.v1` (`Parked.Question`), and `App.Status` reports a parked
 run as `parked` with `Run.Question`, read from the run's records
 (`Runtime.PendingQuestion`).
 
@@ -525,7 +560,7 @@ The model's message can ask for several tool calls at once. When one of them
 needs a person and has no answer, none of them runs: an unmarked call next to
 the question would otherwise take effect before the person decided, and again
 when the batch is continued. The turn ends at that message
-(`agentrt.Result.Parked`) with the question, the message itself, and the
+(`native.Result.Parked`) with the question, the message itself, and the
 conversation up to it exactly as saige holds it. What the turn had said so
 far is published and kept.
 
@@ -533,7 +568,7 @@ far is published and kept.
 
 ```
 agent activity (memoized)        returns the parked turn
-  -> step fiber.question.<id>   announces lifecycle.parked once; the record is the question
+  -> step fiber.question.<id>   announces run.parked.v1 once; the record is the question
   -> event fiber.answer.<id>    the resolution: absent, the body returns ErrParked and the run waits
 Runtime.Answer                   checks the answer, writes the resolution (first write wins), wakes the run
   -> next attempt replays         the turn and the question from records, reads the resolution
@@ -546,7 +581,7 @@ an expiry writes it; each reads back whichever was first. That is what makes
 an answer exactly-once under concurrent answers (every caller is told the
 recorded answer; one is told it was theirs), and a replay decide the same way
 whatever has been asked since. A replay announces nothing it announced before:
-an attempt opens (`lifecycle.started` or `resumed`) only when it has something
+an attempt opens (`run.started.v1` or `resumed`) only when it has something
 new to publish, so a parked run polled by the worker's janitor with no answer
 publishes nothing at all. An attempt runs at most one turn: the attempt that
 asked parks even when an answer lands a moment later, and the answer's
@@ -556,7 +591,7 @@ record and accounting keys stay its own.
 `Runtime.Answer` (`App.Answer`) is scoped to the
 caller's tenant: a question of another tenant's run is reported exactly like
 one that does not exist. Who answered comes from the host, taken from the
-caller's credential, as for a tag or a stop (see "Who may answer" below). An answer is checked against its question before it is recorded:
+caller's credential, as for an event or a stop (see "Who may answer" below). An answer is checked against its question before it is recorded:
 a decision is `approve` or `deny` and only an approval carries arguments,
 which must satisfy the tool's schema (saige's validator); a choice must be one
 of the options; a reply must have text. Answer wakes the run through the queue
@@ -564,30 +599,30 @@ of the options; a reply must have text. Answer wakes the run through the queue
 poll wakes it.
 
 A tool can decide per call whether it needs approval by implementing
-`agentrt.Approving`: `Approval(call) (ApprovalRequest, bool)` sees the call's
+`native.Approving`: `Approval(call) (ApprovalRequest, bool)` sees the call's
 name and arguments and returns the prompt, the `asked_of` hint, and
 optionally the approvers and self-approval for that one call. A delegation
 tool uses it to apply the callee's policy, asking only for the callees that
 require it. saige is told through a tool gate, so the call stops and asks
 exactly as a marked tool does: it runs only once approved, a denial or an
 expiry reaches the model as a refusal, and a turn that cannot park refuses
-it. A tool also listed in `approvals` is asked about once, with the per-call
+it. A tool also listed in `approval.ask` is asked about once, with the per-call
 question when there is one.
 
 ### Who may answer
 
 Being in the tenant is not enough to approve a call. The rules are decided
-from the run's pinned revision, so revising an agent does not change who may
-answer a question its run already asked:
+from the run's pinned definition and policy, so a new version of an agent
+does not change who may answer a question its run already asked:
 
 | Question | Who may answer |
 |---|---|
-| `approval` | Anyone in the tenant except the requester, unless the spec sets `self_approval`. With `approvers` set, only those people: principals as the host names them (`ana`, `slack:U1`) or `role:<name>` entries, which the host resolves (`runtime.WithRoles`; without it a role admits nobody). |
-| `approval` asked per call | When the tool that asked names approvers of its own on the question (`approvers`, `self_approval`), those replace the spec's: only they may answer, named as above, and the requester only with the question's `self_approval`. A question without them follows the row above. |
+| `approval` | Anyone in the tenant except the requester, unless the policy sets `self_approval`. With `approvers` set, only those people: principals as the host names them (`ana`, `slack:U1`) or `role:<name>` entries, which the host resolves (`runtime.WithRoles`; without it a role admits nobody). |
+| `approval` asked per call | When the tool that asked names approvers of its own on the question (`approvers`, `self_approval`), those replace the policy's: only they may answer, named as above, and the requester only with the question's `self_approval`. A question without them follows the row above. |
 | `choice`, `reply` | Anyone in the tenant, the requester included. With `answerers` set, only those people, named as approvers are. |
 
-The requester is the actor on the tag that raised the run, under its id and
-its id qualified by the trigger (`ana`, `github:ana`). The answerer is the
+The requester is the actor on the event that started the run, under its id
+and its id qualified by its surface (`ana`, `github:ana`). The answerer is the
 credential's subject, or, for a credential marked `ActAs` (a surface that
 authenticated the person itself), the person it names. `ActAs` is trusted to
 say who is answering and is checked like anyone else: a Slack surface may
@@ -599,10 +634,10 @@ A refusal is `runtime.ErrNotAllowed`, `PERMISSION_DENIED` on the wire, and
 records nothing. A question's `asked_of` is a routing hint and admits nobody.
 
 A call that runs with the credential of the person the run acts for, a tool
-of a person-scoped provider (`agentrt.PersonScoped`), says so on its question
+of a person-scoped provider (`native.PersonScoped`), says so on its question
 (`tool.acts_for_person`). Anyone who may approve it may approve or deny it as
 asked, but only that person may approve it with edited arguments: the
-actor's `user` when the tag names one, and otherwise the requester. Anyone
+actor's `user` when the event names one, and otherwise the requester. Anyone
 else's edit would act as them, with their credential, on something they did
 not ask for, so it is refused with `runtime.ErrNotAllowed` and records
 nothing. A host shows such a question to anyone else without its edit.
@@ -628,7 +663,7 @@ continuation carries both answers, and the batch runs once, after both.
 
 A parked turn's record stores the transcript it continues from. A run that
 parks again stores only what its turn added since the previous park
-(`agentrt.Parked.Since`), and the workflow body rebuilds the whole from the
+(`native.Parked.Since`), and the workflow body rebuilds the whole from the
 recorded parks before it continues, so a long conversation with many
 questions is stored once. Each park still stores the message it waits on, and
 a turn that compacted stores its whole conversation.
@@ -655,7 +690,7 @@ default; what the run does is decided by the record.
 
 - **Stop ends a parked run without resuming it.** `Stop` records the request,
   then resolves the pending question as stopped and wakes the run, which ends
-  `lifecycle.stopped` with what it said before it asked and what it had spent.
+  `run.stopped.v1` with what it said before it asked and what it had spent.
   Its turn is not continued, no model is called, and the question then
   refuses answers (`ErrQuestionClosed`, `FAILED_PRECONDITION`). A stop
   recorded while the turn ran, before it parked, is found the same way.
@@ -666,14 +701,14 @@ default; what the run does is decided by the record.
 - **A delegation can park the parent on its child.** With
   `runtime.WithChildRuns`, a durable run's delegation (`tag_<agent>`) is a
   run of its own that the parent parks on: the turn ends at the call, the
-  workflow body starts the child as a recorded step (its tag id derived from
+  workflow body starts the child as a recorded step (its event id derived from
   the parent and the wait, so a retried start joins it; the parent's tenant,
-  requester and files, no thread), and publishes `lifecycle.parked` with a
+  requester and files, no thread), and publishes `run.parked.v1` with a
   question of kind `delegation` naming the child run. The parent holds no
   worker while the child runs or waits on a person. When the child ends, it
   writes the parent's resolution (its answer, or why it has none) and wakes
   the parent, whose continuation runs the call with that answer and rolls
-  the child's usage up as `usage.child`. A child whose retries run out ends
+  the child's usage up as `run.usage.child.v1`. A child whose retries run out ends
   without writing it; the parent's janitor poll reads the child's record
   instead. Stopping the parent stops the child with the same words. A
   delegation question is not answered by a person: `Answer` refuses it.
@@ -686,7 +721,7 @@ default; what the run does is decided by the record.
   child stretches this to its question's deadline and beyond). Use
   `WithChildRuns` instead; it takes precedence over a Delegator. A Delegator
   that does wait can show the child's questions on the parent's stream with
-  `runtime.WatchChildQuestions(ctx, childRunID)` (`lifecycle.child.parked`,
+  `runtime.WatchChildQuestions(ctx, childRunID)` (`run.child.parked.v1`,
   read once a second from the child's run row and its question records).
 
 ### What surfaces show
@@ -716,16 +751,16 @@ being one.
 
 ### Who a run acts for
 
-A run acts for the actor on the tag it was accepted with, as recorded in the
-ledger: the same actor approvals are decided on, which the program composing
+A run acts for the actor on the event it was accepted with, as recorded in
+the ledger: the same actor approvals are decided on, which the program composing
 fiber sets from the caller's credential (a surface marked `ActAs` names the
 person it authenticated). The runtime puts that actor on every turn's context
-(`envelope.WithActor`, read with `envelope.ActorFrom`) from the run's record
+(`event.WithActor`, read with `event.ActorFrom`) from the run's record
 and from nothing else, so no tool argument, no trigger metadata and no text a
 model wrote can name someone else. The sandbox carries it in process to the
 playscape task, which sets it whatever the node's own context held; a
 delegated sub-task acts for its parent's actor, a child run keeps its parent's
-actor on its own tag, and a run raised for nobody (a schedule) acts for
+actor on its own trigger, and a run started for nobody (a schedule) acts for
 nobody. `runtime.ToolGroupSource` keeps its signature: a source reads the
 actor from the context it is given.
 
@@ -748,7 +783,7 @@ When the person has no credential, the run acts for nobody, or no resolver is
 configured, the grant expands to nothing with `mcptools.ErrNoPersonCredential`.
 The runtime drops the group as unavailable, the operator log names the
 provider and the actor, and the model is told why through
-`agentrt.ModelNote`: a sentence written for the model ("they have not
+`native.ModelNote`: a sentence written for the model ("they have not
 connected one for issues") that follows the group's name in its prompt, where
 every other reason stays the operator's. Nothing is dialled for that person,
 and no other credential is tried.
@@ -766,41 +801,46 @@ Dependencies run one way. Leaves are stdlib-only and know nothing about
 transports, storage, or agents.
 
 ```
-leaves (stdlib only)
-  pkg/topic        agent:name[:run], prefix containment, the control namespace
-  pkg/address      github://urmzd/fiber/issues/42, slack://T01/C02?thread=...
-  pkg/envelope     Tag, Event, Kind, Route, Filter, Subscription, the actor a context acts for
-  pkg/signature    HMAC verification for inbound webhooks
-  pkg/agentspec    immutable specs, content-addressed revisions
+leaves
+  pkg/address        github://urmzd/fiber/issues/42, slack://T01/C02?thread=...
+  pkg/signature      HMAC verification for inbound webhooks
+  pkg/event          the envelope, the sealed Body union, Unknown and the catalog
+  pkg/event/legacy   reads JSON written before the union, maps old kinds to types
 
 seams
-  pkg/connector    Trigger / Sink / Actor faces, registry
-  pkg/bus          Bus interface, Memory, Redis Streams and Postgres, bustest
-  pkg/registry     agent store, Memory and Postgres, registrytest
+  pkg/bus            channel bus: Memory, Redis Streams and Postgres, bustest
+  pkg/connector      Trigger / Sink / Subscriber / Actor faces, registry of sinks
+  pkg/definition     saige definitions, Policy, insert-only Source, Resolver and pins
+  pkg/membership     which agents are members of which channels, and what wakes them
+  pkg/turn           the Runtime interface, Pinned, Input and Result
 
 composition
-  pkg/agentrt      builds a saige agent from a pinned revision; citations
-  pkg/runtime      the durable anchor turn, playscape sandbox, stop, usage, parking
-  pkg/router       delivery fan-out to sinks
-  pkg/connectors   slack, github, jira, cron, webhook
-  fiber (root)     the composition root, composed in Go
+  pkg/turn/native    the default Runtime, on saige; tools, citations, usage, parking
+  pkg/turn/sandbox   any Runtime inside playscape, under the pinned policy
+  pkg/runtime        the durable anchor turn: accept, pin, stop, usage, parking
+  pkg/dispatch       wakes channel members for ingress events
+  pkg/egress         delivery to sinks by channel and type prefix
+  pkg/connectors     slack, github, jira, cron, webhook, author, mention
+  fiber (root)       the composition root, composed in Go
 ```
 
-`app.go` at the module root (`fiber.New`) is the composition root and the fastest way to
-understand how the system fits together: it assembles the bus, registry,
-router, runtime, sandbox and connectors in the order data flows through them.
-Every backend is a constructed value passed by an option (`WithPostgres(pool)`
-for every store family, `WithBus`, or one store at a time), and anything not
-given is memory. The composition reads no configuration file and no
-`FIBER_*` variable (model providers still read their vendor's key, such as
-`ANTHROPIC_API_KEY`, when an agent is built); the program composing it owns
-configuration, and each backend family has
-a conformance suite (`bustest`, `registrytest`, `knowledgetest`,
+`app.go` at the module root (`fiber.New`) is the composition root and the
+fastest way to understand how the system fits together: it assembles the bus,
+dispatch, runtime, sandbox, egress and connectors in the order data flows
+through them. Every backend is a constructed value passed by an option
+(`WithPostgres(pool)` for every store family, `WithBus`, or one store at a
+time), and anything not given is memory. The composition reads no
+configuration file and no `FIBER_*` variable (model providers still read their
+vendor's key, such as `ANTHROPIC_API_KEY`, when an agent is built); the program
+composing it owns configuration, and each backend family has a conformance
+suite (`bustest`, `definitiontest`, `membershiptest`, `knowledgetest`,
 `threadtest`, `toolprovidertest`, `blobtest`) every implementation passes.
+Only `pkg/turn/native` and `pkg/definition` import saige directly;
+`pkg/turn/imports_test.go` keeps it that way.
 
 ## No transport
 
-fiber serves nothing. A program composing fiber calls `App.Invoke`,
+fiber serves nothing. A program composing fiber calls `App.Publish`,
 `Status`, `Stop`, `Compact` and `Answer` in process, subscribes with
 `App.Bus().Subscribe`, and mounts `App.WebhookHandler()` (or the handlers in
 `App.Webhooks()`) wherever it serves HTTP; each webhook connector verifies its
@@ -819,13 +859,14 @@ a missing, empty, or duplicated header.
 
 Slack signs a timestamp inside its base string, so a replay window is
 enforceable and is enforced. GitHub does not, so a captured GitHub request stays
-valid as long as the secret does. That defense lives downstream in `Tag.ID`
+valid as long as the secret does. That defense lives downstream in event id
 idempotency instead, and the package documents this rather than implying a
 protection it cannot provide.
 
-**The NGAC policy path** is playscape's. An agent's `Access` block compiles into a
-policy graph enforced by the sandbox with default deny, covering both workspace
-areas and the spawn allowlist that governs agent-tags-agent.
+**The NGAC policy path** is playscape's. An agent's sub-agents and its Policy's
+workspace areas compile into a policy graph enforced by the sandbox with
+default deny, covering both workspace areas and the spawn allowlist that
+governs one agent delegating to another.
 
 ## Limitations
 
@@ -839,7 +880,7 @@ Verified against the code, and honest.
   per-run delta journal is not written; the bus carries every event.
 - **playscape's queue is at-most-once** in beta. Durability comes from anchor.
 - **Citations are derived from retrieval.** Citations are extracted from RAG
-  `AssembledContext` blocks and emitted as fiber's own `delta.citation`
+  `AssembledContext` blocks and emitted as fiber's own `run.delta.citation.v1`
   events. saige's `CitationDelta`, which reports what a model or tool cited, is
   not translated into events yet.
 - **anchor v1 workflow bodies are single-goroutine.** Parallelism belongs
@@ -848,7 +889,9 @@ Verified against the code, and honest.
   cursors cover real-time consumers. If durable competing consumers with
   independent offsets become a requirement, the honest answer is NATS JetStream
   behind the `Bus` interface rather than growing a broker here.
-- **Agent specs are JSON**, not YAML, so fiber carries no parser dependency.
+- **Definitions are saige's.** fiber refuses the definition fields it cannot
+  honor (dials, skills, memory, guardrails, compaction, harness tools, MCP allow
+  lists) rather than ignoring them. See [events.md](events.md#7-definitions).
 - **A stop is reliable only with the ledger.** `runtime.WithStopLedger` must
   be given the ledger the runs execute from, as `fiber.New` does. A host without it
   falls back to the bus alone, with the bounds in "How long the bus keeps a
@@ -875,21 +918,21 @@ Verified against the code, and honest.
   the asking process's clock against when that attempt began to listen; a
   request within a clock skew of an attempt starting can be dropped. The
   summary is model output, so a retried turn does not reproduce it.
-- **Tool arguments are published.** The executing `delta.tool.call` and
-  `delta.tool.done` carry the call's arguments as compact JSON, up to
-  `payload.MaxToolArguments` (8 KiB); larger arguments are left out whole and
-  sized in `arguments_bytes`. They go to every subscriber and route, chat
-  sinks render a short prefix of them, and only `agentrt.WithToolArguments`
+- **Tool arguments are published.** The executing `run.delta.tool.call.v1` and
+  `run.delta.tool.done.v1` carry the call's arguments as compact JSON, up to
+  `event.MaxToolArguments` (8 KiB); larger arguments are left out whole and
+  sized in `arguments_bytes`. They go to every subscriber, chat
+  sinks render a short prefix of them, and only `native.WithToolArguments`
   scrubs them first. fiber emits no tracing spans of its own.
 - **A stop wraps up the turn, not its side effects.** Tool calls already
   finished stay done, and a tool that ignores its context delays the stop until
   the grace period (ten seconds by default) cancels the turn. A turn that is
   cancelled this way ends stopped with the text it had published.
-- **A route that selects only `lifecycle.completed` is not told about a stop.**
-  Select `lifecycle`, or add `lifecycle.stopped`, to hear every ending.
+- **A subscription that selects only `run.completed` is not told about a stop.**
+  Select `run`, or add `run.stopped`, to hear every ending.
 - **Earlier attempts' usage needs the ledger.** An attempt's calls are
   recorded on the run through `runtime.WithStopLedger`. Without it, the total
-  counts the attempt that produced the outcome, and the `usage.call` events
+  counts the attempt that produced the outcome, and the `run.usage.v1` events
   still report every call. If the record cannot be written, it is logged, and
   if that attempt is executed again its calls are left out of the total.
 - **A crash mid-turn loses that attempt's calls from the total.** An attempt
@@ -903,7 +946,7 @@ Verified against the code, and honest.
   calls are then on the bus and in the ledger, and not in the total.
 - **Rolling up a delegated run needs the ledger and the Sandbox.**
   `ReportChildUsage` reads the child from the run ledger, so a runtime without
-  `WithStopLedger`, or an executor other than `Sandbox`, refuses every report.
+  `WithStopLedger`, or a turn runtime other than `Sandbox`, refuses every report.
 - **A call a turn never finishes may not be counted.** saige reports a call's
   usage when the call completes, or when a stop wraps it up. A call cancelled
   outright (a worker shutting down, a stop whose grace period ran out, a
@@ -974,26 +1017,28 @@ Verified against the code, and honest.
 
 ## Host-constructed invocation input
 
-A sandbox request can carry an explicit `History` of user and assistant messages
-and trusted host-generated `Instructions`. The runner preserves their roles and
-order, appends the new request, and supplements the pinned system rules with the
-invocation instruction. Neither value mutates the pinned revision or grants
-access. Hosts must freeze resolved input before durable acceptance and must not
+A turn's `turn.Input` can carry an explicit `History` of user and assistant
+messages and trusted host-generated `Instructions`. The native Runtime preserves
+their roles and order, appends the rendered trigger, and supplements the pinned
+system prompt with the instruction. Neither value changes the pinned
+definition or grants access. Hosts must freeze resolved input before durable acceptance and must not
 use arbitrary caller text as privileged instructions.
 
-`WithCallTool` lets a host replace per-target tag tools with one catalog tool
-for agents with `Access.Spawn`. The host tool must check the caller's pinned
-spawn grant. Without that option, fiber retains its existing per-target tools.
+`runtime.WithCallTool` lets a host replace the per-target `tag_<agent>` tools
+with one catalog tool for agents with sub-agents. The host tool must check the
+caller's pinned spawn grant. Without that option, fiber retains its existing per-target tools.
 The runtime still owns execution, streaming and sandboxing; the host owns its
 input references, output contracts and answer delivery policy.
 
-### Trigger metadata and the host's own keys
+### Trigger context and private host data
 
-A tag's `Meta` reaches the model as "Context from the trigger", one line per
-key in sorted order, ahead of the request. A key that starts with `_`
-(`envelope.PrivateMetaPrefix`) is the host's own: a decision it pinned on the
-run, such as which knowledge sources ground it. Such a key stays on the tag,
-in the ledger and in events, and is never written into anything a model is
-sent: not the turn's request, not the request a stopped turn records, and so
-not the thread journal later turns replay. A tag whose keys are all private
-sends no trigger context.
+An ingress body's `Request.Context` reaches the model as "Context from the
+trigger", one line per key in sorted order, ahead of the request, as part of
+the body's catalog rendering. A key that starts with `_` is never rendered: it
+is the host's own, such as which knowledge sources ground the run, and is never
+written into anything a model is sent (not the turn's request, not the request
+a stopped turn records, and so not the thread journal later turns replay). A
+context whose keys are all private sends no trigger context. Data a model and
+an egress adapter must never see at all, such as a Slack bot user id or a
+GitHub installation id, belongs in `Envelope.Private`, which is never
+serialized.

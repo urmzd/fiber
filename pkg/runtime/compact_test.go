@@ -13,26 +13,25 @@ import (
 	"github.com/urmzd/saige/agent/agenttest"
 	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // listener is an executor that waits, once it is running, for a request to
 // compact, and records the first one it hears.
 type listener struct {
 	waiting chan struct{}
-	heard   chan agentrt.CompactRequest
+	heard   chan native.CompactRequest
 	once    sync.Once
 }
 
 func newListener() *listener {
-	return &listener{waiting: make(chan struct{}), heard: make(chan agentrt.CompactRequest, 1)}
+	return &listener{waiting: make(chan struct{}), heard: make(chan native.CompactRequest, 1)}
 }
 
-func (l *listener) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (l *listener) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	signal := runtime.CompactSignal(ctx)
 	l.once.Do(func() { close(l.waiting) })
 	select {
@@ -106,11 +105,11 @@ func TestCompactRefusesWhatItCannotCarry(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("published %d events, want the one request", len(events))
 	}
-	want, _ := runtime.CompactTopic("acme", "r0123")
-	if e := events[0]; e.Topic.String() != want.String() || e.Kind != envelope.KindCompact || e.Tenant != "acme" {
-		t.Errorf("request published as topic %s kind %s tenant %q, want %s %s acme", e.Topic, e.Kind, e.Tenant, want, envelope.KindCompact)
+	want, _ := runtime.CompactChannel("acme", "r0123")
+	if e := events[0]; e.Channel != want || e.Type != event.TypeCompact || e.Tenant != "acme" || e.Run != "r0123" {
+		t.Errorf("request published on %s type %s tenant %q, want %s %s acme", e.Channel, e.Type, e.Tenant, want, event.TypeCompact)
 	}
-	if stop, _ := runtime.StopTopic("acme", "r0123"); want.String() == stop.String() {
+	if stop, _ := runtime.StopChannel("acme", "r0123"); want == stop {
 		t.Error("requests to compact share a stream with requests to stop")
 	}
 }
@@ -187,16 +186,14 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 	w := newWorld(t)
 	lookup := &heldLookup{running: make(chan struct{}), release: make(chan struct{})}
 	model := &loopModel{turns: 30}
-	w.specs.mu.Lock()
-	w.specs.revs["docs-bot"][0].Spec.Tools = []string{"lookup"}
-	w.specs.mu.Unlock()
+	w.specs.edit("docs-bot", func(s *native.Spec) { s.Tools = []string{"lookup"} })
 	exec := sandboxOf(t, w.specs, map[string]saigetypes.Provider{"docs-bot": model},
-		runtime.WithCatalog(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
-			return agentrt.StaticTools(lookup), nil
+		runtime.WithCatalog(func(runtime.Request, func(event.Action) error) (native.Tools, error) {
+			return native.StaticTools(lookup), nil
 		}),
 		runtime.WithAgentOptions(
-			agentrt.WithMaxIter(40),
-			agentrt.WithCompaction(agentrt.Compaction{OnRequest: true, KeepTurns: 1}),
+			native.WithMaxIter(40),
+			native.WithCompaction(native.Compaction{OnRequest: true, KeepTurns: 1}),
 		))
 	rt := w.runtime(t, exec, runtime.WithCompactRequests())
 	w.work(t, rt, nil)
@@ -215,21 +212,21 @@ func TestARequestedCompactionIsMadeByTheRunningTurnAndPublished(t *testing.T) {
 	if out := w.result(t, rt, runID); out.Text != "done" {
 		t.Fatalf("Output.Text = %q, want the run to finish its loop", out.Text)
 	}
-	var compactions []payload.Compaction
+	var compactions []event.Compaction
 	for _, e := range w.bus.of(runID) {
-		if e.Kind != envelope.KindCompacted {
+		if e.Type != event.TypeCompacted {
 			continue
 		}
-		body, err := payload.Decode[payload.Compaction](e)
+		body, err := decode[event.Compaction](e)
 		if err != nil {
-			t.Fatalf("decode %s: %v", e.Kind, err)
+			t.Fatalf("decode %s: %v", e.Type, err)
 		}
 		compactions = append(compactions, body)
 	}
 	if len(compactions) != 1 {
-		t.Fatalf("the run published %d %s events, want 1: %v", len(compactions), envelope.KindCompacted, kindsOf(w.bus.of(runID)))
+		t.Fatalf("the run published %d %s events, want 1: %v", len(compactions), event.TypeCompacted, kindsOf(w.bus.of(runID)))
 	}
-	if c := compactions[0]; c.Trigger != agentrt.TriggerRequested || c.By != "U1" || c.Summarized == 0 {
+	if c := compactions[0]; c.Trigger != native.TriggerRequested || c.By != "U1" || c.Summarized == 0 {
 		t.Errorf("compaction = %+v, want a requested one by U1 that summarized something", c)
 	}
 }
@@ -244,9 +241,9 @@ type droppingBus struct {
 	resubscribed chan struct{}
 }
 
-func (d *droppingBus) Subscribe(ctx context.Context, sub envelope.Subscription) (bus.Stream, error) {
+func (d *droppingBus) Subscribe(ctx context.Context, sub bus.Subscription) (bus.Stream, error) {
 	s, err := d.Bus.Subscribe(ctx, sub)
-	if err != nil || !strings.HasPrefix(sub.Topic.String(), "agent:_control:compact-") {
+	if err != nil || controlVerb(sub) != "compact" {
 		return s, err
 	}
 	d.mu.Lock()
@@ -267,9 +264,9 @@ type droppingStream struct {
 	delivered bool
 }
 
-func (s *droppingStream) Recv(ctx context.Context) (envelope.Event, error) {
+func (s *droppingStream) Recv(ctx context.Context) (event.Envelope, error) {
 	if s.delivered {
-		return envelope.Event{}, errors.New("connection lost")
+		return event.Envelope{}, errors.New("connection lost")
 	}
 	e, err := s.Stream.Recv(ctx)
 	s.delivered = err == nil
@@ -280,12 +277,12 @@ func (s *droppingStream) Recv(ctx context.Context) (envelope.Event, error) {
 // until the test lets it finish.
 type counting struct {
 	waiting chan struct{}
-	heard   chan agentrt.CompactRequest
+	heard   chan native.CompactRequest
 	finish  chan struct{}
 	once    sync.Once
 }
 
-func (c *counting) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (c *counting) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	signal := runtime.CompactSignal(ctx)
 	c.once.Do(func() { close(c.waiting) })
 	for {
@@ -306,7 +303,7 @@ func (c *counting) Execute(ctx context.Context, req runtime.Request, _ func(cont
 func TestARequestToCompactIsRelayedOnceAcrossAReconnect(t *testing.T) {
 	broker := &droppingBus{Bus: newBroker(t), resubscribed: make(chan struct{})}
 	w := newWorldOn(t, broker)
-	exec := &counting{waiting: make(chan struct{}), heard: make(chan agentrt.CompactRequest, 8), finish: make(chan struct{})}
+	exec := &counting{waiting: make(chan struct{}), heard: make(chan native.CompactRequest, 8), finish: make(chan struct{})}
 	rt := w.runtime(t, exec, runtime.WithCompactRequests())
 	w.work(t, rt, nil)
 
@@ -338,6 +335,19 @@ func TestARequestToCompactIsRelayedOnceAcrossAReconnect(t *testing.T) {
 	w.result(t, rt, runID)
 }
 
+// controlVerb is the verb of the one control channel a subscription is to,
+// or empty when it is to anything else.
+func controlVerb(sub bus.Subscription) string {
+	if len(sub.Channels) != 1 || !event.IsControl(sub.Channels[0]) {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(sub.Channels[0], event.ControlScheme+"://"), "/")
+	if len(parts) != 3 {
+		return ""
+	}
+	return parts[1]
+}
+
 // subscriptionCounter is a bus that counts the control subscriptions open at
 // once, by verb, and the most of each it ever saw.
 type subscriptionCounter struct {
@@ -347,12 +357,12 @@ type subscriptionCounter struct {
 	peak map[string]int
 }
 
-func (c *subscriptionCounter) Subscribe(ctx context.Context, sub envelope.Subscription) (bus.Stream, error) {
+func (c *subscriptionCounter) Subscribe(ctx context.Context, sub bus.Subscription) (bus.Stream, error) {
 	s, err := c.Bus.Subscribe(ctx, sub)
-	if err != nil || !sub.Topic.IsControl() {
+	verb := controlVerb(sub)
+	if err != nil || verb == "" {
 		return s, err
 	}
-	verb, _, _ := strings.Cut(strings.TrimPrefix(sub.Topic.String(), "agent:_control:"), "-")
 	c.mu.Lock()
 	c.open[verb]++
 	c.peak[verb] = max(c.peak[verb], c.open[verb])
@@ -387,7 +397,7 @@ type held struct {
 	release chan struct{}
 }
 
-func (h *held) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (h *held) Execute(ctx context.Context, req runtime.Request, _ func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	h.started <- struct{}{}
 	select {
 	case <-h.release:

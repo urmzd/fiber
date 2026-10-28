@@ -11,7 +11,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/attachment/intake"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 )
 
@@ -37,7 +37,7 @@ var _ thread.Lister = (*Connector)(nil)
 
 // Messages implements thread.Lister: the conversation comments of the issue
 // or pull request surface names, oldest first, with the comment id as the
-// stable id (which is what a tag's github_comment_id meta carries). A comment
+// stable id (which is what an event's comment_id carries). A comment
 // by one of the logins in Config.Bots is this deployment's own. Files in a
 // comment are read from its rendered body, whose signed URLs work for public
 // and private repositories alike, and are fetched only when the journal first
@@ -69,7 +69,7 @@ func (c *Connector) Messages(ctx context.Context, tenant string, surface address
 		msg := thread.Message{
 			ID:    strconv.FormatInt(cm.ID, 10),
 			Text:  cm.Body,
-			Actor: envelope.Actor{ID: cm.User.Login, Bot: cm.User.Type == "Bot"},
+			Actor: event.Actor{ID: cm.User.Login, Bot: cm.User.Type == "Bot"},
 			At:    cm.CreatedAt,
 			Own:   own,
 		}

@@ -3,27 +3,25 @@
 // # Trigger
 //
 // Slack delivers events over a signed HTTP POST, so the connector is both an
-// http.Handler and a pkg/connector.Trigger: Ingest holds the channel and parks,
-// and each request turns into at most one Tag. Nothing is parsed before the
+// http.Handler and a pkg/connector.Trigger: Ingest holds the publish function
+// and parks, and each request turns into at most one event. Nothing is parsed before the
 // signature is checked (see internal/inbound), and nothing downstream re-checks,
 // because nothing downstream can.
 //
-// Two event types raise tags: app_mention, which is a mention in a channel, and
-// a direct message, which is a mention by context rather than by text. Everything
-// else is acknowledged and dropped. A slash command an agent registered in a
-// code channel raises one too; it arrives on CommandsPath, signed the same way
+// Two event types publish message.posted.v1: app_mention, which is a mention in
+// a channel, and a direct message, which is a mention by context rather than by
+// text. Everything else is acknowledged and dropped. A slash command an agent
+// registered in a code channel publishes slack.command.invoked.v1; it arrives on CommandsPath, signed the same way
 // (see command.go). Messages from a bot are always dropped: a
 // mesh whose sink posts into the same channel its trigger reads would otherwise
 // answer itself, forever, at whatever rate the model can produce tokens.
 //
-// # Which agent was tagged
+// # Who is named
 //
-// A Slack mention is <@U08BOT> — an opaque id, not a name — so the connector
-// cannot read the agent's name out of the text the way GitHub can. Resolution is
-// in three documented steps (see Config.Bots, Config.Agents, Config.DefaultAgent),
-// and text-based resolution is off unless Config.Agents is set, because with an
-// open name set the mention of a colleague would look exactly like the mention of
-// an agent.
+// A Slack mention is <@U08BOT>, an opaque id rather than a name, so the
+// connector reads the agents a message names from Config.Bots alone and lists
+// them as the event's mentions. It never chooses an agent: the members of the
+// event's channel decide who answers (pkg/membership).
 //
 // # Sink
 //
@@ -31,19 +29,21 @@
 // chat.update's rate limit. That behaviour and its rationale live in
 // internal/sink; this package supplies the Slack surface and mrkdwn rendering.
 //
-// The answer threads under the mention by default: Tag.Source carries the
-// mention's own timestamp as ?thread=, so a channel that tags an agent fifty
-// times has fifty threads rather than one flat conversation.
+// The answer threads under the mention: the event's channel carries the
+// mention's own timestamp as ?thread=, and egress renders a run on its
+// channel, so a channel that tags an agent fifty times has fifty threads
+// rather than one flat conversation.
 //
 // # Sessions
 //
 // AgentAPI exposes session status and command registration. Applications decide
 // how their run lifecycle maps to those capabilities. A person pressing stop on
-// a session arrives as StopEvent and is handed to Config.Stopped (see stop.go).
+// a session arrives as StopEvent and is published as slack.session.stopped.v1
+// (see stop.go).
 //
 // # Files and threads
 //
-// With Config.Files set, the files on a triggering message become the tag's
+// With Config.Files set, the files on a triggering message become the event's
 // attachments (see files.go): downloaded from FileHost with the bot token,
 // stored under the connector's tenant, and carried as references. The
 // connector also lists a thread for reconciliation (see thread.go), so a run
@@ -73,7 +73,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/internal/render"
 	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Name is the address scheme this connector owns.
@@ -117,31 +117,9 @@ type Config struct {
 	// agent maps its own bot user id to that agent.
 	Bots map[string]string
 
-	// Agents enables naming an agent in the text alongside the app's own
-	// mention: "@fiber @docs-bot summarize". Slack leaves "@docs-bot" as
-	// literal text when no such Slack user exists, which is exactly the case
-	// for an agent, so the shared @name grammar applies.
-	//
-	// Nil disables it entirely: without a set of known agent names, "@urmzd"
-	// and "@docs-bot" are indistinguishable, and guessing would start a run
-	// every time someone mentioned a colleague.
-	Agents mention.Set
-
-	// DefaultAgent answers a mention that named no agent. Empty means such a
-	// mention raises no tag.
-	DefaultAgent string
-
-	// Deliver overrides where a tag's events go. Empty answers in the thread the
-	// mention came from, which is what a human expects.
-	Deliver []envelope.Route
-
-	// Prepare applies application policy to a verified tag before handoff.
-	Prepare func(context.Context, *envelope.Tag) error
-
-	// Stopped handles a person pressing stop on an agent session. Nil
-	// acknowledges and ignores the event. Subscribe the app to StopEvent only
-	// when this is set: the subscription is what shows the button.
-	Stopped func(context.Context, Stop) error
+	// Prepare applies application policy to a verified event before it is
+	// published. An error refuses the request.
+	Prepare func(context.Context, *event.Envelope) error
 
 	// Interval coalesces edits. Zero means sink.DefaultInterval.
 	Interval time.Duration
@@ -152,14 +130,14 @@ type Config struct {
 	// MaxBody bounds an inbound request body. Zero means inbound.DefaultMaxBody.
 	MaxBody int64
 
-	// Tenant is the authorization scope this connector's tags belong to. It
-	// is stamped on every tag it raises, files are stored under it, and a
+	// Tenant is the authorization scope this connector's events belong to. It
+	// is stamped on every event it publishes, files are stored under it, and a
 	// thread listing (Messages) for any other tenant is refused, because the
 	// bot token answers for this tenant's workspace and no other.
 	Tenant string
 
 	// Files brings in the files on a triggering message (event.files[]) as
-	// the tag's attachments. Needs Tenant and FileToken.
+	// the event's attachments. Needs Tenant and FileToken.
 	Files connectors.Files
 
 	// FileToken is the bot token (xoxb-...) file downloads are made with. It
@@ -210,9 +188,6 @@ func New(cfg Config) (*Connector, error) {
 			return nil, fmt.Errorf("slack: bots[%q] = %q is not a usable agent name", id, agent)
 		}
 	}
-	if cfg.DefaultAgent != "" && !mention.Valid(cfg.DefaultAgent) {
-		return nil, fmt.Errorf("slack: default agent %q is not a usable agent name", cfg.DefaultAgent)
-	}
 
 	c := &Connector{cfg: cfg}
 	if cfg.Files.Enabled() {
@@ -242,14 +217,14 @@ func intervalOr(d time.Duration) time.Duration {
 func (c *Connector) Name() string { return Name }
 
 // Ingest implements connector.Trigger. It parks until ctx is cancelled while
-// ServeHTTP feeds out.
-func (c *Connector) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
-	return c.pipe.Serve(ctx, out)
+// ServeHTTP publishes.
+func (c *Connector) Ingest(ctx context.Context, publish connector.Publish) error {
+	return c.pipe.Serve(ctx, publish)
 }
 
 // Ingesting reports whether an Ingest is running and this connector can
 // therefore accept events. A server answers its readiness probe with it: a
-// webhook endpoint that is listening but has nowhere to send tags is not ready,
+// webhook endpoint that is listening but has nowhere to publish is not ready,
 // and saying so keeps a load balancer from sending it traffic it will 503.
 func (c *Connector) Ingesting() bool { return c.pipe.Ingesting() }
 
@@ -258,7 +233,7 @@ func (c *Connector) Ingesting() bool { return c.pipe.Ingesting() }
 //
 // Slack expects an answer within three seconds and retries otherwise, so the
 // handler does exactly three things: authenticate, translate, hand off. The
-// handoff blocks on the router's channel, bounded by the request context, which
+// handoff blocks on publishing to the bus, bounded by the request context, which
 // is back pressure rather than a queue we would then have to make durable.
 func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, ok := c.gate.Body(w, r)
@@ -286,28 +261,28 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if stop, ok := c.stopFrom(env); ok {
+		stop.Time = orRequested(stop.Time, r.Header)
 		c.serveStop(r.Context(), w, stop)
 		return
 	}
 
-	tag, ok := c.tagFrom(env)
+	e, ok := c.eventFrom(env)
 	if !ok {
 		// Not for us: acknowledge, or Slack retries it three more times.
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if c.cfg.Tenant != "" {
-		tag.Tenant = c.cfg.Tenant
-	}
+	e.Time = orRequested(e.Time, r.Header)
 	if c.cfg.Prepare != nil {
-		if err := c.cfg.Prepare(r.Context(), &tag); err != nil {
+		if err := c.cfg.Prepare(r.Context(), &e); err != nil {
 			http.Error(w, "request refused", http.StatusForbidden)
 			return
 		}
 	}
-	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, tag.Tenant, &tag, c.candidates(env.TeamID, env.Event.Files))
+	origin, _ := address.Parse(e.Source)
+	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, e.Tenant, origin, &e, c.candidates(env.TeamID, env.Event.Files))
 	defer cancel()
-	if err := c.pipe.Send(ctx, tag); err != nil {
+	if err := c.pipe.Send(ctx, e); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
 		return
 	}
@@ -315,7 +290,7 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Deliver implements connector.Sink.
-func (c *Connector) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (c *Connector) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	if err := c.reachable(target); err != nil {
 		return err
 	}
@@ -349,7 +324,7 @@ func (c *Connector) reachable(target address.Address) error {
 // surface adapts the Slack API to the sink engine.
 type surface struct{ c *Connector }
 
-// Create posts the one message this run owns, in the thread the tag came from.
+// Create posts the one message this run owns, in the thread on its channel.
 func (s surface) Create(ctx context.Context, target address.Address, body string) (string, error) {
 	thread, _ := target.Param("thread")
 	return s.c.cfg.API.PostMessage(ctx, Message{

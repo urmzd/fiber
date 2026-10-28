@@ -238,7 +238,7 @@ func altOf(alt string) string {
 // hosts take either no credential (public storage) or a signature in the URL.
 func noHeaders(*url.URL) http.Header { return nil }
 
-// bodyOf names the body that raised a tag: the comment or review when the
+// bodyOf names the body that raised an event: the comment or review when the
 // event is one, otherwise the issue or pull request itself.
 func bodyOf(event string, h hook) (kind string, id int64, text string) {
 	switch {

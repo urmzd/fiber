@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"sync"
 
-	saigetypes "github.com/urmzd/saige/agent/types"
-
-	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // ErrClosed reports an expansion after Grants.Close.
@@ -31,7 +30,10 @@ func Dialer(opts ...Option) Dial {
 
 // Grants expands an agent's MCP group grants against a toolprovider.Store. A
 // grant is "mcp:<provider>" (read tools) or "mcp:<provider>:write" (read and
-// write tools), parsed by agentspec.ParseMCPGrant. It expands, in one tenant,
+// write tools), parsed by definition.ParseMCPGrant. A definition lists the
+// server under tools.mcp and its pinned Policy decides the class
+// (Policy.MCPWrite); definition.Parse compiles the two into the grant, so the
+// write class reaches here from the policy and from nothing else. It expands, in one tenant,
 // to the tools of the provider's current accepted snapshot that the server
 // still offers unchanged and the grant's class permits, each named by
 // toolprovider.QualifiedName. Held-back tools never appear, and every member
@@ -40,8 +42,8 @@ func Dialer(opts ...Option) Dial {
 //
 // It is the store-backed source of tool groups: pkg/runtime's
 // WithToolGroupSource takes a *Grants and hands what it expands to
-// pkg/agentrt as an agentrt.ToolGroup named by the grant, whose members the
-// runner registers. This package does not import agentrt.
+// pkg/turn/native as a native.ToolGroup named by the grant, whose members the
+// runner registers. This package does not import native.
 //
 // Sessions are kept open per tenant and provider, for the provider record's
 // version, so a stdio server is not started per turn, and a record that
@@ -53,7 +55,7 @@ func Dialer(opts ...Option) Dial {
 //
 // A person-scoped provider (toolprovider.ScopePerson) is expanded for the
 // person the run acts for: the actor pkg/runtime puts on the turn's context
-// from the run's record (envelope.ActorFrom). Each expansion asks the
+// from the run's record (event.ActorFrom). Each expansion asks the
 // PersonResolver (WithPersonResolver) for that person's credential and
 // expands on a session of their own, kept per provider record version and
 // person and opened with exactly that credential; a credential the resolver
@@ -62,7 +64,7 @@ func Dialer(opts ...Option) Dial {
 // credential, the grant is not expanded: Expand reports
 // ErrNoPersonCredential, which a runtime drops as an unavailable group, the
 // operator log names the provider and the person, and the model is told (as
-// an agentrt.ModelNote) that the person has not connected one. The shared
+// an native.ModelNote) that the person has not connected one. The shared
 // credential is never used, and no person's session is ever handed to
 // another. At most WithPersonSessions person sessions are kept open; past
 // that the one expanded longest ago is closed.
@@ -142,7 +144,7 @@ type person struct {
 // personFor resolves the credential of the person ctx acts for on p. Every
 // way of having none is ErrNoPersonCredential, with a note for the model.
 func (g *Grants) personFor(ctx context.Context, p toolprovider.Provider) (*person, error) {
-	actor, ok := envelope.ActorFrom(ctx)
+	actor, ok := event.ActorFrom(ctx)
 	if !ok {
 		return nil, actingForNobody(p.Name)
 	}
@@ -167,7 +169,7 @@ func (g *Grants) personFor(ctx context.Context, p toolprovider.Provider) (*perso
 // expanded right now (no such provider in this tenant, the server
 // unreachable).
 func (g *Grants) Expand(ctx context.Context, tenant, grant string) (tools []saigetypes.Tool, ok bool, err error) {
-	parsed, ok, err := agentspec.ParseMCPGrant(grant)
+	parsed, ok, err := definition.ParseMCPGrant(grant)
 	if !ok || err != nil || !toolprovider.ValidName(parsed.Provider) {
 		return nil, false, nil
 	}

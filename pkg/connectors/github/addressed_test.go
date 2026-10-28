@@ -4,20 +4,20 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/urmzd/fiber/pkg/connectors/github"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // addressed is a connector whose app comments as fiber[bot] and runs
-// docs-bot, with triage answering what is addressed to the app alone.
-func addressed(t *testing.T) (*github.Connector, <-chan envelope.Tag) {
+// docs-bot.
+func addressed(t *testing.T) (*github.Connector, <-chan event.Envelope) {
 	t.Helper()
-	return start(t, github.Config{Agents: mention.NewNames("docs-bot"), Login: "fiber[bot]", DefaultAgent: "triage"})
+	return start(t, github.Config{Agents: mention.NewNames("docs-bot"), Login: "fiber[bot]"})
 }
 
 // comment is issueComment with its body replaced.
@@ -41,53 +41,52 @@ func serve(t *testing.T, c *github.Connector, event, delivery, body string) {
 	}
 }
 
-func silent(t *testing.T, tags <-chan envelope.Tag) {
+func silent(t *testing.T, tags <-chan event.Envelope) {
 	t.Helper()
 	select {
-	case tag := <-tags:
-		t.Errorf("raised a tag for %q: %q", tag.Agent, tag.Text)
+	case e := <-tags:
+		t.Errorf("published %s: %+v", e.Type, e.Data)
 	default:
 	}
 }
 
 // A comment that mentions the app and names no agent is addressed to the app,
-// as Slack delivers a mention of its app, and the default agent answers it
-// without the app's mention in its text.
-func TestACommentToTheAppThatNamesNoAgentIsTheDefaultAgents(t *testing.T) {
+// as Slack delivers a mention of its app. It is published naming no agent,
+// without the app's mention in its text: the issue's members decide who
+// answers.
+func TestACommentToTheAppThatNamesNoAgentIsPublishedNamingNone(t *testing.T) {
 	c, tags := addressed(t)
 	serve(t, c, "issue_comment", "d-app", comment("@fiber what changed here?"))
-	tag := receive(t, tags)
-	if tag.Agent != "triage" || tag.Text != "what changed here?" {
-		t.Fatalf("tag is %q with %q, want triage with the app's mention taken out", tag.Agent, tag.Text)
+	e := receive(t, tags)
+	r := request(t, e)
+	if len(r.Mentions) != 0 || r.Text != "what changed here?" {
+		t.Fatalf("mentions %v with %q, want none with the app's mention taken out", r.Mentions, r.Text)
 	}
-	if tag.Source.String() != "github://urmzd/fiber/issues/42" || tag.Actor.ID != "urmzd" || tag.Meta["github_comment_id"] != "2201234567" {
-		t.Fatalf("tag is %+v", tag)
-	}
-	if err := tag.Validate(); err != nil {
-		t.Fatal(err)
+	if e.Channel != "github://urmzd/fiber/issues/42" || r.Actor.ID != "urmzd" || e.Data.(event.GitHubIssueCommentCreated).CommentID != 2201234567 {
+		t.Fatalf("event is %+v", e)
 	}
 }
 
-// An agent the comment names answers it, wherever the app is mentioned, and
-// the app's mention leaves the text as the agent's does.
-func TestAnAgentNamedBesideTheAppAnswers(t *testing.T) {
+// An agent the comment names is mentioned, wherever the app is mentioned,
+// and the app's mention leaves the text as the agent's does.
+func TestAnAgentNamedBesideTheAppIsMentioned(t *testing.T) {
 	c, tags := addressed(t)
 	for delivery, body := range map[string]string{
 		"d-first": "@fiber @docs-bot summarize",
 		"d-after": "@docs-bot summarize, @fiber",
 	} {
 		serve(t, c, "issue_comment", delivery, comment(body))
-		tag := receive(t, tags)
-		if tag.Agent != "docs-bot" || !strings.HasPrefix(tag.Text, "summarize") || strings.Contains(tag.Text, "@") {
-			t.Fatalf("%q raised %q with %q, want docs-bot without either mention", body, tag.Agent, tag.Text)
+		r := request(t, receive(t, tags))
+		if !slices.Equal(r.Mentions, []string{"docs-bot"}) || !strings.HasPrefix(r.Text, "summarize") || strings.Contains(r.Text, "@") {
+			t.Fatalf("%q published %v with %q, want docs-bot without either mention", body, r.Mentions, r.Text)
 		}
 	}
 }
 
 // Every human event that reads text reads it the same way: a review, a
 // review comment, a new issue and a new pull request addressed to the app are
-// the default agent's.
-func TestEveryHumanEventAddressedToTheAppIsTheDefaultAgents(t *testing.T) {
+// published.
+func TestEveryHumanEventAddressedToTheAppIsPublished(t *testing.T) {
 	pull := map[string]any{
 		"number": 7, "title": "Coalesce edits", "body": "@fiber does this look right?", "state": "open",
 		"user": map[string]string{"login": "urmzd", "type": "User"}, "head": map[string]string{"ref": "x", "sha": "deadbeef"},
@@ -110,21 +109,21 @@ func TestEveryHumanEventAddressedToTheAppIsTheDefaultAgents(t *testing.T) {
 		"pull_request": {"action": "opened", "pull_request": pull, "repository": repo, "sender": sender},
 	}
 	c, tags := addressed(t)
-	for event, body := range cases {
+	for name, body := range cases {
 		raw, _ := json.Marshal(body)
-		serve(t, c, event, "d-"+event, string(raw))
-		tag := receive(t, tags)
-		if tag.Agent != "triage" || !strings.HasSuffix(tag.Text, "does this look right?") || strings.Contains(tag.Text, "@fiber") {
-			t.Fatalf("%s raised %q with %q", event, tag.Agent, tag.Text)
+		serve(t, c, name, "d-"+name, string(raw))
+		r := request(t, receive(t, tags))
+		if len(r.Mentions) != 0 || !strings.HasSuffix(r.Text, "does this look right?") || strings.Contains(r.Text, "@fiber") {
+			t.Fatalf("%s published %v with %q", name, r.Mentions, r.Text)
 		}
 	}
 }
 
-// Nothing is raised for a comment that addresses neither the app nor an
-// agent, so a busy repository wakes nobody; nor for one addressed to the app
-// with no default to answer it, or by a connector that does not know its own
-// login; nor for the app's own comments, however they mention it.
-func TestACommentAddressedToNobodyRaisesNothing(t *testing.T) {
+// Nothing is published for a comment that addresses neither the app nor an
+// agent, so a busy repository wakes nobody; nor by a connector that does not
+// know its own login; nor for the app's own comments, however they mention
+// it.
+func TestACommentAddressedToNobodyPublishesNothing(t *testing.T) {
 	c, tags := addressed(t)
 	serve(t, c, "issue_comment", "d-nobody", comment("@urmzd can you take a look? fiber@example.com knows"))
 	silent(t, tags)
@@ -132,33 +131,16 @@ func TestACommentAddressedToNobodyRaisesNothing(t *testing.T) {
 		`"sender": {"login": "urmzd", "type": "User"}`, `"sender": {"login": "fiber[bot]", "type": "Bot"}`, 1))
 	silent(t, tags)
 
-	for name, cfg := range map[string]github.Config{
-		"no default": {Agents: mention.NewNames("docs-bot"), Login: "fiber[bot]"},
-		"no login":   {Agents: mention.NewNames("docs-bot"), DefaultAgent: "triage"},
-	} {
-		c, tags := start(t, cfg)
-		serve(t, c, "issue_comment", "d-"+name, comment("@fiber what changed?"))
-		silent(t, tags)
-	}
+	c, tags = start(t, github.Config{Agents: mention.NewNames("docs-bot")})
+	serve(t, c, "issue_comment", "d-no-login", comment("@fiber what changed?"))
+	silent(t, tags)
 }
 
-// A host that decides who answers once the tag reaches it gives a name of its
-// own as the default. fiber's control name is one no agent can take, so a tag
-// for it can only be resolved by the host before the run is accepted.
-func TestAHostMayLeaveTheDefaultForItselfToResolve(t *testing.T) {
-	c, tags := start(t, github.Config{Agents: mention.NewNames("docs-bot"), Login: "fiber", DefaultAgent: topic.ControlName})
-	serve(t, c, "issue_comment", "d-host", comment("@Fiber what changed?"))
-	if tag := receive(t, tags); tag.Agent != topic.ControlName || tag.Text != "what changed?" {
-		t.Fatalf("tag is %q with %q", tag.Agent, tag.Text)
-	}
-}
-
-func TestALoginOrDefaultThatCannotBeUsedIsRefused(t *testing.T) {
+func TestALoginThatCannotBeUsedIsRefused(t *testing.T) {
 	for name, cfg := range map[string]github.Config{
-		"a login with a space":       {Login: "fiber bot"},
-		"a login with a slash":       {Login: "acme/fiber"},
-		"a bare suffix":              {Login: "[bot]"},
-		"a default that is no agent": {Login: "fiber", DefaultAgent: "docs bot"},
+		"a login with a space": {Login: "fiber bot"},
+		"a login with a slash": {Login: "acme/fiber"},
+		"a bare suffix":        {Login: "[bot]"},
 	} {
 		cfg.API = github.NewFake()
 		if _, err := github.New(cfg); err == nil {
@@ -168,21 +150,20 @@ func TestALoginOrDefaultThatCannotBeUsedIsRefused(t *testing.T) {
 }
 
 // A login in Bots names its agent wherever it is mentioned, the app's own
-// too. So when Bots maps the app's login, its mention is a tag for that agent
-// and DefaultAgent is not asked, also when another agent is named after it:
-// the first agent the text names answers.
-func TestTheAppsLoginInBotsIsATagForItsAgent(t *testing.T) {
+// too. So when Bots maps the app's login, its mention names that agent, in
+// the order the text names agents.
+func TestTheAppsLoginInBotsMentionsItsAgent(t *testing.T) {
 	c, tags := start(t, github.Config{
 		Agents: mention.NewNames("docs-bot"), Bots: map[string]string{"fiber[bot]": "ops"},
-		Login: "fiber[bot]", DefaultAgent: "triage",
+		Login: "fiber[bot]",
 	})
 	for delivery, body := range map[string]string{
 		"d-alone":  "@fiber what changed?",
 		"d-before": "@fiber @docs-bot summarize",
 	} {
 		serve(t, c, "issue_comment", delivery, comment(body))
-		if tag := receive(t, tags); tag.Agent != "ops" || strings.Contains(tag.Text, "@fiber") {
-			t.Fatalf("%q raised %q with %q, want ops without the app's mention", body, tag.Agent, tag.Text)
+		if r := request(t, receive(t, tags)); len(r.Mentions) == 0 || r.Mentions[0] != "ops" || strings.Contains(r.Text, "@fiber") {
+			t.Fatalf("%q published %v with %q, want ops first without the app's mention", body, r.Mentions, r.Text)
 		}
 	}
 }

@@ -17,8 +17,8 @@ import (
 
 	"github.com/urmzd/fiber/pkg/attachment"
 	"github.com/urmzd/fiber/pkg/blob"
-	"github.com/urmzd/saige/agent/types"
-	"github.com/urmzd/saige/rag/extractor"
+	"github.com/urmzd/fiber/pkg/turn/native/ragtypes"
+	types "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // Media is a recording or document handed to a derivation backend.
@@ -256,7 +256,7 @@ func NewExtract(name, version string, byType map[string]types.Extractor) Extract
 // one saige's RAG ingestion uses, one section per page.
 func DefaultExtract() Extract {
 	return NewExtract("saige-extract", "1", map[string]types.Extractor{
-		attachment.TypePDF: extractor.NewAuto().PartExtractor(),
+		attachment.TypePDF: ragtypes.AutoExtractor(),
 	})
 }
 
@@ -299,7 +299,7 @@ func extractText(ctx context.Context, ex types.Extractor, data []byte, mediaType
 	switch {
 	case errors.Is(err, ErrUnavailable), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "", err
-	case errors.Is(err, extractor.ErrNoText):
+	case errors.Is(err, ragtypes.ErrNoText):
 		return "", Decline("it contains no extractable text, which usually means it is a scan")
 	case err != nil:
 		return "", Decline("its text could not be extracted")

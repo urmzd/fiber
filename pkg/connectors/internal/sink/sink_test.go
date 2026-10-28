@@ -2,7 +2,9 @@ package sink_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,8 +13,7 @@ import (
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/internal/render"
 	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // fakeSurface is a complete in-memory surface: it holds a body per handle, just
@@ -97,21 +98,33 @@ func layout(v render.View) string { return sink.Layout(plain{}, v) }
 
 var target = address.MustParse("slack://T01/C02?thread=1699.1")
 
-func ev(seq uint64, kind envelope.Kind, payload string) envelope.Event {
-	return envelope.Event{
+// channel is the channel ev publishes on.
+const channel = "slack://T01/C02"
+
+func ev(seq uint64, typ, data string) event.Envelope {
+	if data == "" {
+		data = "{}"
+	}
+	body, err := event.Decode(typ, json.RawMessage(data))
+	if err != nil {
+		panic(err)
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("run_1:%d", seq),
+		Source:  "fiber://run/run_1",
+		Type:    typ,
+		Channel: channel,
+		Tenant:  "acme",
+		Run:     "run_1",
 		Seq:     seq,
-		Topic:   topic.MustParse("agent:docs-bot:run_1"),
-		RunID:   "run_1",
 		Agent:   "docs-bot",
-		Origin:  "slack",
-		Kind:    kind,
-		Payload: []byte(payload),
-		At:      time.Unix(1700000000, 0).Add(time.Duration(seq) * time.Second),
+		Time:    time.Unix(1700000000, 0).Add(time.Duration(seq) * time.Second),
+		Data:    body,
 	}
 }
 
-func text(seq uint64, s string) envelope.Event {
-	return ev(seq, envelope.KindText, `{"text":"`+s+`"}`)
+func text(seq uint64, s string) event.Envelope {
+	return ev(seq, event.TypeText, `{"text":"`+s+`"}`)
 }
 
 func TestDeliveringTheSameEventTwiceLeavesOneMessageEdited(t *testing.T) {
@@ -119,11 +132,11 @@ func TestDeliveringTheSameEventTwiceLeavesOneMessageEdited(t *testing.T) {
 	eng := sink.New(surface, layout, sink.WithInterval(0))
 	ctx := context.Background()
 
-	events := []envelope.Event{
-		ev(1, envelope.KindAccepted, ""),
+	events := []event.Envelope{
+		ev(1, event.TypeAccepted, ""),
 		text(2, "hello "),
 		text(3, "world"),
-		ev(4, envelope.KindCompleted, ""),
+		ev(4, event.TypeCompleted, ""),
 	}
 	for _, e := range events {
 		for range 3 { // every event delivered three times
@@ -136,7 +149,7 @@ func TestDeliveringTheSameEventTwiceLeavesOneMessageEdited(t *testing.T) {
 	if got := surface.count(); got != 1 {
 		t.Fatalf("surface holds %d messages, want exactly 1", got)
 	}
-	handle, ok := eng.Handle("run_1", target)
+	handle, ok := eng.Handle("run_1", channel)
 	if !ok {
 		t.Fatal("engine forgot the message handle")
 	}
@@ -170,10 +183,10 @@ func TestOutOfOrderDeliveryNeverRendersStaleTextOverFreshText(t *testing.T) {
 
 	// The tail of the answer arrives before its head, which is what a
 	// resubscribe after a slow-consumer disconnect can produce.
-	for _, e := range []envelope.Event{
+	for _, e := range []event.Envelope{
 		text(3, "world"),
 		text(2, "hello "),
-		ev(4, envelope.KindCompleted, ""),
+		ev(4, event.TypeCompleted, ""),
 		text(2, "hello "), // and then the head is redelivered
 	} {
 		if err := eng.Deliver(ctx, target, e); err != nil {
@@ -181,7 +194,7 @@ func TestOutOfOrderDeliveryNeverRendersStaleTextOverFreshText(t *testing.T) {
 		}
 	}
 
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	body := surface.body(handle)
 	if !strings.Contains(body, "hello world") {
 		t.Errorf("body = %q, want %q assembled in sequence order", body, "hello world")
@@ -201,7 +214,7 @@ func TestFirstAndTerminalEventsJumpTheCoalescingInterval(t *testing.T) {
 	ctx := context.Background()
 
 	// The first event is acknowledged immediately: a human is waiting.
-	if err := eng.Deliver(ctx, target, ev(1, envelope.KindStarted, "")); err != nil {
+	if err := eng.Deliver(ctx, target, ev(1, event.TypeStarted, "")); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(surface.calls()); got != 1 {
@@ -226,13 +239,13 @@ func TestFirstAndTerminalEventsJumpTheCoalescingInterval(t *testing.T) {
 	if got := len(surface.calls()); got != 2 {
 		t.Errorf("after the interval: %d calls, want 2", got)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if body := surface.body(handle); !strings.Contains(body, strings.Repeat("x", 18)+"y") {
 		t.Errorf("body = %q, want every buffered delta", body)
 	}
 
 	// A terminal event is never left buffered, however recently we wrote.
-	if err := eng.Deliver(ctx, target, ev(21, envelope.KindCompleted, "")); err != nil {
+	if err := eng.Deliver(ctx, target, ev(21, event.TypeCompleted, "")); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(surface.calls()); got != 3 {
@@ -252,13 +265,13 @@ func TestFlushWritesWhatCoalescingIsStillHolding(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	if err := eng.Deliver(ctx, target, ev(1, envelope.KindStarted, "")); err != nil {
+	if err := eng.Deliver(ctx, target, ev(1, event.TypeStarted, "")); err != nil {
 		t.Fatal(err)
 	}
 	if err := eng.Deliver(ctx, target, text(2, "buffered")); err != nil {
 		t.Fatal(err)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if strings.Contains(surface.body(handle), "buffered") {
 		t.Fatal("the delta was written despite the interval")
 	}
@@ -297,7 +310,7 @@ func TestAFailedWriteIsRetriedRatherThanLosingTheAnswer(t *testing.T) {
 	if err := eng.Deliver(ctx, target, text(2, " second")); err != nil {
 		t.Fatalf("Deliver after failure: %v", err)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if body := surface.body(handle); !strings.Contains(body, "first second") {
 		t.Errorf("body = %q, want both fragments", body)
 	}
@@ -307,7 +320,7 @@ func TestAFailedWriteIsRetriedRatherThanLosingTheAnswer(t *testing.T) {
 
 	// A failed update leaves the run dirty, so Flush can complete it.
 	surface.failN = 1
-	if err := eng.Deliver(ctx, target, ev(3, envelope.KindCompleted, "")); !errors.Is(err, errSurface) {
+	if err := eng.Deliver(ctx, target, ev(3, event.TypeCompleted, "")); !errors.Is(err, errSurface) {
 		t.Fatalf("Deliver error = %v, want the surface error", err)
 	}
 	if err := eng.Flush(ctx); err != nil {
@@ -318,26 +331,27 @@ func TestAFailedWriteIsRetriedRatherThanLosingTheAnswer(t *testing.T) {
 	}
 }
 
-func TestOneRunDeliveringToTwoTargetsOwnsOneMessageOnEach(t *testing.T) {
+func TestOneRunOnTwoChannelsOwnsOneMessageOnEach(t *testing.T) {
 	surface := newFakeSurface()
 	eng := sink.New(surface, layout, sink.WithInterval(0))
 	ctx := context.Background()
 
 	other := address.MustParse("slack://T01/C99")
 	for _, tgt := range []address.Address{target, other} {
-		for _, e := range []envelope.Event{text(1, "hi"), ev(2, envelope.KindCompleted, "")} {
+		for _, e := range []event.Envelope{text(1, "hi"), ev(2, event.TypeCompleted, "")} {
+			e.Channel = tgt.String()
 			if err := eng.Deliver(ctx, tgt, e); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 	if got := surface.count(); got != 2 {
-		t.Fatalf("surface holds %d messages, want one per target", got)
+		t.Fatalf("surface holds %d messages, want one per channel", got)
 	}
-	h1, _ := eng.Handle("run_1", target)
-	h2, _ := eng.Handle("run_1", other)
+	h1, _ := eng.Handle("run_1", target.String())
+	h2, _ := eng.Handle("run_1", other.String())
 	if h1 == h2 {
-		t.Errorf("both targets share handle %q", h1)
+		t.Errorf("both channels share handle %q", h1)
 	}
 }
 
@@ -346,13 +360,13 @@ func TestAnUnrenderableEventCostsNoRoundTrip(t *testing.T) {
 	eng := sink.New(surface, layout, sink.WithInterval(0))
 	ctx := context.Background()
 
-	if err := eng.Deliver(ctx, target, ev(1, envelope.Kind("delta.unheard-of"), `{"x":1}`)); err != nil {
+	if err := eng.Deliver(ctx, target, ev(1, "run.delta.unheard-of.v1", `{"x":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(surface.calls()); got != 0 {
 		t.Errorf("%d calls for an unrenderable event, want 0", got)
 	}
-	if _, ok := eng.Handle("run_1", target); ok {
+	if _, ok := eng.Handle("run_1", channel); ok {
 		t.Error("a message was created for an event with nothing to show")
 	}
 }
@@ -377,7 +391,7 @@ func TestConcurrentDeliveriesForOneRunStillCreateOneMessage(t *testing.T) {
 	if got := surface.count(); got != 1 {
 		t.Fatalf("surface holds %d messages, want 1", got)
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	if got := strings.Count(surface.body(handle), "x"); got != 32 {
 		t.Errorf("body holds %d fragments, want 32", got)
 	}
@@ -390,17 +404,16 @@ func TestEvictionIsBoundedAndKeepsTheNewestRuns(t *testing.T) {
 
 	for _, run := range []string{"a", "b", "c"} {
 		e := text(1, "hi")
-		e.RunID = run
-		e.Topic = topic.MustParse("agent:docs-bot:" + run)
+		e.Run = run
 		if err := eng.Deliver(ctx, target, e); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, ok := eng.Handle("a", target); ok {
+	if _, ok := eng.Handle("a", channel); ok {
 		t.Error("the oldest run was not evicted")
 	}
 	for _, run := range []string{"b", "c"} {
-		if _, ok := eng.Handle(run, target); !ok {
+		if _, ok := eng.Handle(run, channel); !ok {
 			t.Errorf("run %q was evicted before the oldest", run)
 		}
 	}
@@ -408,18 +421,18 @@ func TestEvictionIsBoundedAndKeepsTheNewestRuns(t *testing.T) {
 
 func TestLayoutOmitsEmptySectionsAndNumbersFootnotes(t *testing.T) {
 	d := render.New()
-	d.Apply(ev(1, envelope.KindStarted, ""))
+	d.Apply(ev(1, event.TypeStarted, ""))
 	got := layout(d.View())
 	if got != "docs-bot (working)" {
 		t.Errorf("layout of a bare run = %q, want just the header", got)
 	}
 
-	d.Apply(ev(2, envelope.KindToolCall, `{"id":"t1","name":"search","args":{"q":"x"}}`))
-	d.Apply(ev(3, envelope.KindToolDone, `{"id":"t1","result":"3 hits"}`))
+	d.Apply(ev(2, event.TypeToolCall, `{"id":"t1","name":"search","arguments":{"q":"x"}}`))
+	d.Apply(ev(3, event.TypeToolDone, `{"id":"t1","result":"3 hits"}`))
 	d.Apply(text(4, "the answer"))
-	d.Apply(ev(5, envelope.KindCitation, `{"title":"Design","uri":"https://example.com/d"}`))
-	d.Apply(ev(6, envelope.KindActionTaken, `{"summary":"commented","address":"github://urmzd/fiber/issues/42"}`))
-	d.Apply(ev(7, envelope.KindCompleted, ""))
+	d.Apply(ev(5, event.TypeCitation, `{"source":{"document_title":"Design","source_uri":"https://example.com/d"}}`))
+	d.Apply(ev(6, event.TypeAction, `{"summary":"commented","address":"github://urmzd/fiber/issues/42"}`))
+	d.Apply(ev(7, event.TypeCompleted, ""))
 
 	want := strings.Join([]string{
 		"docs-bot (done)",
@@ -475,13 +488,13 @@ func TestAStoppedRunIsFlushedAndRenderedAsStopped(t *testing.T) {
 		sink.WithClock(func() time.Time { return now }),
 	)
 	ctx := context.Background()
-	if err := eng.Deliver(ctx, target, ev(1, envelope.KindStarted, "")); err != nil {
+	if err := eng.Deliver(ctx, target, ev(1, event.TypeStarted, "")); err != nil {
 		t.Fatal(err)
 	}
 	if err := eng.Deliver(ctx, target, text(2, "Half an answer")); err != nil {
 		t.Fatal(err)
 	}
-	stopped := ev(3, envelope.KindStopped, `{"text":"Half an answer","reason":"Stopped\nby a user","by":"slack:U1"}`)
+	stopped := ev(3, event.TypeStopped, `{"text":"Half an answer","reason":"Stopped\nby a user","by":"slack:U1"}`)
 	if err := eng.Deliver(ctx, target, stopped); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +509,7 @@ func TestAStoppedRunIsFlushedAndRenderedAsStopped(t *testing.T) {
 	if got := len(surface.calls()); got != 2 {
 		t.Fatalf("%d writes, want the first event and the stop: %v", got, surface.calls())
 	}
-	handle, _ := eng.Handle("run_1", target)
+	handle, _ := eng.Handle("run_1", channel)
 	want := "docs-bot (stopped)\n\nHalf an answer\n\nstopped: Stopped by a user"
 	if body := surface.body(handle); body != want {
 		t.Fatalf("body = %q\nwant   %q", body, want)
@@ -512,8 +525,8 @@ func TestAStoppedRunIsFlushedAndRenderedAsStopped(t *testing.T) {
 // stopped rather than as an empty message or one that looks unfinished.
 func TestAStoppedRunWithNothingToShowStillSaysItStopped(t *testing.T) {
 	d := render.New()
-	d.Apply(ev(1, envelope.KindStarted, ""))
-	d.Apply(ev(2, envelope.KindStopped, `{}`))
+	d.Apply(ev(1, event.TypeStarted, ""))
+	d.Apply(ev(2, event.TypeStopped, `{}`))
 	if got, want := layout(d.View()), "docs-bot (stopped)\n\nstopped"; got != want {
 		t.Fatalf("layout = %q, want %q", got, want)
 	}

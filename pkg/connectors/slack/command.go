@@ -1,7 +1,6 @@
 package slack
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -10,7 +9,8 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/internal/inbound"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/connectors/mention"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/signature"
 )
 
@@ -21,39 +21,27 @@ const CommandsPath = "/commands"
 // serveCommand handles one slash command invocation, already authenticated.
 //
 // A command is a mention by another route: the human picked this app's command
-// in a code channel, so the request is for an agent and there is no mention to
-// read one from. The agent may still be named in the text; otherwise the
-// default agent answers. The invocation is handed over as the text a human
-// would have typed, "/create-pr fix the login test", so an agent needs no
-// second input format to act on it.
+// in a code channel. The invocation is handed over as the text a human would
+// have typed, "/create-pr fix the login test", so an agent needs no second
+// input format to act on it. The members of the channel decide who answers.
 func (c *Connector) serveCommand(w http.ResponseWriter, r *http.Request, body []byte) {
 	form, err := url.ParseQuery(string(body))
 	if err != nil {
 		http.Error(w, "malformed payload", http.StatusBadRequest)
 		return
 	}
-	tag, ok := c.tagFromCommand(form, r.Header)
+	e, ok := c.eventFromCommand(form, r.Header)
 	if !ok {
 		http.Error(w, "malformed payload", http.StatusBadRequest)
 		return
 	}
-	if tag.Agent == "" {
-		// Slack shows this to the invoker alone. Silence would look like a
-		// command that worked.
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"response_type": "ephemeral",
-			"text":          "No agent is configured to answer " + form.Get("command") + ".",
-		})
-		return
-	}
 	if c.cfg.Prepare != nil {
-		if err := c.cfg.Prepare(r.Context(), &tag); err != nil {
+		if err := c.cfg.Prepare(r.Context(), &e); err != nil {
 			http.Error(w, "command refused", http.StatusForbidden)
 			return
 		}
 	}
-	if err := c.pipe.Send(r.Context(), tag); err != nil {
+	if err := c.pipe.Send(r.Context(), e); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
 		return
 	}
@@ -62,54 +50,63 @@ func (c *Connector) serveCommand(w http.ResponseWriter, r *http.Request, body []
 	w.WriteHeader(http.StatusOK)
 }
 
-// tagFromCommand translates an invocation into a Tag. ok is false when the
-// payload is not a usable invocation; a Tag with no Agent means it is one that
-// nobody is configured to answer.
-func (c *Connector) tagFromCommand(form url.Values, header http.Header) (envelope.Tag, bool) {
+// eventFromCommand translates an invocation into slack.command.invoked.v1. ok
+// is false when the payload is not a usable invocation.
+func (c *Connector) eventFromCommand(form url.Values, header http.Header) (event.Envelope, bool) {
 	team, channel, user := form.Get("team_id"), form.Get("channel_id"), form.Get("user_id")
 	command, trigger := form.Get("command"), form.Get("trigger_id")
 	if team == "" || channel == "" || user == "" || trigger == "" || !strings.HasPrefix(command, "/") {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	if c.cfg.Team != "" && team != c.cfg.Team {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 	if err := address.ValidWorkspace(team); err != nil {
-		return envelope.Tag{}, false
+		return event.Envelope{}, false
 	}
 
-	agent, args, _ := c.agentFor(strings.TrimSpace(form.Get("text")), nil)
+	args, mentioned := decode(strings.TrimSpace(form.Get("text")), c.cfg.Bots)
+	mentions := unique(mentioned)
+	for _, agent := range mentions {
+		args = mention.Strip(args, agent)
+	}
 	text := command
 	if args != "" {
 		text += " " + args
 	}
 
-	meta := map[string]string{
-		"slack_team":    team,
-		"slack_channel": channel,
-		"slack_user":    user,
-		"slack_event":   "slash_command",
-		"slack_command": command,
+	// No thread: a code channel is the conversation, and its answers are
+	// top-level messages.
+	at := address.Address{Connector: Name, Workspace: team, Path: []string{channel}}.String()
+	body := event.SlackCommandInvoked{
+		Request: event.Request{Text: text, Actor: event.Actor{ID: user}, Mentions: mentions},
+		Command: command,
+		Team:    team,
+		Channel: channel,
+		User:    user,
+		AppID:   form.Get("api_app_id"),
 	}
-	if app := form.Get("api_app_id"); app != "" {
-		meta["slack_app_id"] = app
-	}
-
-	return envelope.Tag{
+	return event.Envelope{
 		// trigger_id is unique per invocation, so a replayed request is the
-		// same tag.
-		ID:     "command:" + trigger,
-		Agent:  agent,
-		Origin: Name,
-		// No thread: a code channel is the conversation, and its answers are
-		// top-level messages.
-		Source:  address.Address{Connector: Name, Workspace: team, Path: []string{channel}},
-		Text:    text,
-		Actor:   envelope.Actor{ID: user},
-		Deliver: c.cfg.Deliver,
-		Meta:    meta,
-		At:      requestedAt(header),
+		// same event.
+		ID:      "command:" + trigger,
+		Source:  at,
+		Type:    body.Type(),
+		Subject: channel,
+		Channel: at,
+		Time:    requestedAt(header),
+		Tenant:  c.cfg.Tenant,
+		Data:    body,
 	}, true
+}
+
+// orRequested is t, or when Slack sent the request when the event carried no
+// time of its own, as a code channel's stop does not.
+func orRequested(t time.Time, header http.Header) time.Time {
+	if t.IsZero() {
+		return requestedAt(header)
+	}
+	return t
 }
 
 // requestedAt is when Slack sent the request. An invocation carries no

@@ -15,17 +15,16 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/urmzd/saige/agent/agenttest"
-	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn/native"
+	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // A program built on fiber registers a model provider, a tool source and a
@@ -34,7 +33,7 @@ import (
 // connector receives the run's events.
 func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	lookup := &agenttest.MockTool{Def: saigetypes.ToolDef{Name: "lookup_runbook", Parameters: saigetypes.ParameterSchema{Type: "object"}}, Result: "restart it"}
-	house := func(spec agentrt.Spec) (saigetypes.Provider, error) {
+	house := func(spec native.Spec) (saigetypes.Provider, error) {
 		return &agenttest.ScriptedProvider{Responses: [][]saigetypes.Delta{
 			agenttest.ToolCallResponse("c1", "lookup_runbook", map[string]any{"service": "api"}),
 			agenttest.TextResponse("house says: restart it"),
@@ -43,21 +42,20 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	box := &inbox{}
 	c := newApp(t, WithTenant("acme"),
 		WithModelProvider("house", house),
-		WithToolSource(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
-			return agentrt.StaticTools(lookup), nil
+		WithToolSource(func(runtime.Request, func(event.Action) error) (native.Tools, error) {
+			return native.StaticTools(lookup), nil
 		}),
 		WithConnector(box),
 	)
 	start(t, c.Run)
 	ctx := context.Background()
 
-	spec := agentspec.AgentSpec{Name: "oncall", Model: "house-1", Provider: "house", SystemPrompt: "Help.", Tools: []string{"lookup_runbook"}}
-	if _, err := c.Registry().Create(ctx, "acme", spec, "test"); err != nil {
+	spec := definition.AgentSpec{Name: "oncall", Model: "house-1", Provider: "house", SystemPrompt: "Help.", Tools: []string{"lookup_runbook"}}
+	if _, err := createAgent(c.Definitions(), ctx, "acme", spec, "test"); err != nil {
 		t.Fatalf("the registry refused an agent on the registered provider: %v", err)
 	}
 	target, _ := address.Parse("inbox://acme/out")
-	if _, err := c.Invoke(ctx, envelope.Tag{ID: "Ev-1", Tenant: "acme", Agent: "oncall", Origin: "test",
-		Text: "api is down", Deliver: []envelope.Route{{Target: target}}, At: time.Now()}); err != nil {
+	if _, err := ask(ctx, c, posted("Ev-1", "acme", "oncall", target.String(), "api is down")); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(15 * time.Second)
@@ -70,11 +68,11 @@ func TestExtensionsReachEveryLayerOfTheCore(t *testing.T) {
 	var text string
 	var toolDone bool
 	for _, e := range box.at(target.String()) {
-		switch e.Kind {
-		case envelope.KindText:
-			text += string(e.Payload)
-		case envelope.KindToolDone:
-			toolDone = strings.Contains(string(e.Payload), "restart it")
+		switch b := e.Data.(type) {
+		case event.Text:
+			text += b.Text
+		case event.ToolDone:
+			toolDone = strings.Contains(b.Result, "restart it")
 		}
 	}
 	if !strings.Contains(text, "house says") {
@@ -138,7 +136,7 @@ func declaredReachTheStores(t *testing.T, pool *pgxpool.Pool) {
 	_, url := fakeMCP(t)
 	opts := []Option{
 		WithTenant(tenant),
-		WithOpenAICompatible(agentrt.OpenAICompatible{Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1", KeyEnv: "FIREWORKS_API_KEY"}),
+		WithOpenAICompatible(native.OpenAICompatible{Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1", KeyEnv: "FIREWORKS_API_KEY"}),
 		issues(t, url),
 	}
 	if pool != nil {
@@ -147,7 +145,7 @@ func declaredReachTheStores(t *testing.T, pool *pgxpool.Pool) {
 	c := newApp(t, opts...)
 	ctx := context.Background()
 
-	if _, err := c.Registry().Create(ctx, tenant, agentspec.AgentSpec{Name: "a", Model: "m", Provider: "fireworks", SystemPrompt: "x"}, "test"); err != nil {
+	if _, err := createAgent(c.Definitions(), ctx, tenant, definition.AgentSpec{Name: "a", Model: "m", Provider: "fireworks", SystemPrompt: "x"}, "test"); err != nil {
 		t.Errorf("an agent on the declared model endpoint was refused: %v", err)
 	}
 	snap, err := c.ToolProviders().Snapshot(ctx, tenant, "issues", 0)

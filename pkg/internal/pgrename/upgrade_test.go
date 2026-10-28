@@ -2,7 +2,6 @@ package pgrename_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -14,11 +13,9 @@ import (
 	"github.com/urmzd/anchor/adapters/postgres/pgledger"
 	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/durable"
 	"github.com/urmzd/fiber/pkg/internal/pgrename"
 	"github.com/urmzd/fiber/pkg/knowledge"
-	"github.com/urmzd/fiber/pkg/registry"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
@@ -56,40 +53,10 @@ func pool(t *testing.T) *pgxpool.Pool {
 }
 
 // downgrade turns the current schema into what a database written before the
-// rename looks like: every fiber_ object under the old prefix, and every
-// revision hashed under the old domain.
+// rename looks like: every fiber_ object under the old prefix.
 func downgrade(t *testing.T, ctx context.Context, p *pgxpool.Pool) {
 	t.Helper()
-	rows, err := p.Query(ctx, `SELECT tenant, name, rev, spec FROM fiber_agent_revisions`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	type old struct {
-		tenant, name, hash string
-		rev                int
-	}
-	var olds []old
-	for rows.Next() {
-		var o old
-		var body []byte
-		if err := rows.Scan(&o.tenant, &o.name, &o.rev, &body); err != nil {
-			t.Fatal(err)
-		}
-		var spec agentspec.AgentSpec
-		if err := json.Unmarshal(body, &spec); err != nil {
-			t.Fatal(err)
-		}
-		o.hash = spec.HashIn(pgrename.LegacyAgentSpecDomain)
-		olds = append(olds, o)
-	}
-	rows.Close()
-	for _, o := range olds {
-		if _, err := p.Exec(ctx, `UPDATE fiber_agent_revisions SET hash = $4 WHERE tenant = $1 AND name = $2 AND rev = $3`,
-			o.tenant, o.name, o.rev, o.hash); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_, err = p.Exec(ctx, `
+	_, err := p.Exec(ctx, `
 DO $$
 DECLARE r record;
 BEGIN
@@ -134,7 +101,6 @@ SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relna
 }
 
 type stores struct {
-	agents  *registry.Postgres
 	threads *thread.Postgres
 	docs    *knowledge.Postgres
 	tools   *toolprovider.Postgres
@@ -144,13 +110,12 @@ type stores struct {
 func migrate(t *testing.T, ctx context.Context, p *pgxpool.Pool) stores {
 	t.Helper()
 	s := stores{
-		agents:  registry.NewPostgres(p),
 		threads: thread.NewPostgres(p),
 		docs:    knowledge.NewPostgres(p, knowledge.NewHashing(0)),
 		tools:   toolprovider.NewPostgres(p),
 	}
 	for name, m := range map[string]func(context.Context) error{
-		"registry": s.agents.Migrate, "threads": s.threads.Migrate, "knowledge": s.docs.Migrate, "tool providers": s.tools.Migrate,
+		"threads": s.threads.Migrate, "knowledge": s.docs.Migrate, "tool providers": s.tools.Migrate,
 	} {
 		if err := m(ctx); err != nil {
 			t.Fatalf("migrate %s: %v", name, err)
@@ -173,10 +138,6 @@ func TestADatabaseFromBeforeTheRenameKeepsItsData(t *testing.T) {
 
 	// Written by fiber, then made to look as it would have before the rename.
 	before := migrate(t, ctx, p)
-	spec := agentspec.AgentSpec{Name: "docs-bot", Model: "m", Provider: agentspec.ProviderOffline, SystemPrompt: "Answer."}
-	if _, err := before.agents.Create(ctx, "acme", spec, "ada"); err != nil {
-		t.Fatal(err)
-	}
 	key := thread.Key{Tenant: "acme", Agent: "docs-bot", Surface: "slack://T01/C02?thread=1"}
 	if _, err := before.threads.Append(ctx, key, thread.Entry{Role: thread.RoleUser, Text: "hello", RunID: "r1"}); err != nil {
 		t.Fatal(err)
@@ -194,16 +155,6 @@ func TestADatabaseFromBeforeTheRenameKeepsItsData(t *testing.T) {
 	if named(t, ctx, p, "fiber_") != 0 || named(t, ctx, p, pgrename.LegacyPrefix) == 0 {
 		t.Fatalf("the downgrade left %d fiber_ objects and %d old ones", named(t, ctx, p, "fiber_"), named(t, ctx, p, pgrename.LegacyPrefix))
 	}
-	// Before the migration the old revisions do not verify under the new
-	// domain: this is what the migration has to fix.
-	var stored string
-	if err := p.QueryRow(ctx, `SELECT hash FROM `+pgrename.LegacyPrefix+`agent_revisions`).Scan(&stored); err != nil {
-		t.Fatal(err)
-	}
-	if stored == spec.Hash() {
-		t.Fatal("the downgraded revision already carries the new hash")
-	}
-
 	// The upgrade, twice: it is idempotent.
 	migrate(t, ctx, p)
 	after := migrate(t, ctx, p)
@@ -211,16 +162,6 @@ func TestADatabaseFromBeforeTheRenameKeepsItsData(t *testing.T) {
 		t.Errorf("%d objects still carry the old prefix", n)
 	}
 
-	rev, err := after.agents.Get(ctx, "acme", "docs-bot", 1)
-	if err != nil {
-		t.Fatalf("the agent did not survive the upgrade: %v", err)
-	}
-	if rev.Hash != spec.Normalize().Hash() {
-		t.Errorf("revision hash %s, want it re-addressed to %s", rev.Hash, spec.Normalize().Hash())
-	}
-	if again, err := after.agents.Revise(ctx, "acme", spec, 1, "ada"); err != nil || again.Rev != 1 {
-		t.Errorf("resubmitting the same definition after the upgrade = rev %d, %v; want the no-op revision 1", again.Rev, err)
-	}
 	entries, err := after.threads.History(ctx, key, 1)
 	if err != nil || len(entries) != 1 || entries[0].Text != "hello" {
 		t.Errorf("thread after the upgrade = %+v, %v", entries, err)
@@ -245,16 +186,16 @@ func TestAnOldTableRecreatedAfterTheUpgradeFailsTheMigrationNamingBoth(t *testin
 	ctx := context.Background()
 	p := pool(t)
 	migrate(t, ctx, p)
-	old := pgrename.LegacyPrefix + "agents"
-	if _, err := p.Exec(ctx, `CREATE TABLE `+old+` (LIKE fiber_agents INCLUDING ALL)`); err != nil {
+	old := pgrename.LegacyPrefix + "threads"
+	if _, err := p.Exec(ctx, `CREATE TABLE `+old+` (LIKE fiber_threads INCLUDING ALL)`); err != nil {
 		t.Fatal(err)
 	}
 
-	err := registry.NewPostgres(p).Migrate(ctx)
+	err := thread.NewPostgres(p).Migrate(ctx)
 	if err == nil {
-		t.Fatalf("migrating with both %s and fiber_agents present succeeded", old)
+		t.Fatalf("migrating with both %s and fiber_threads present succeeded", old)
 	}
-	for _, name := range []string{old, "fiber_agents"} {
+	for _, name := range []string{old, "fiber_threads"} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("the migration error %q does not name %s", err, name)
 		}
@@ -263,16 +204,16 @@ func TestAnOldTableRecreatedAfterTheUpgradeFailsTheMigrationNamingBoth(t *testin
 	if n := named(t, ctx, p, old); n == 0 {
 		t.Errorf("%s is gone after the refused migration", old)
 	}
-	var fiberAgents *string
-	if err := p.QueryRow(ctx, `SELECT to_regclass('fiber_agents')::text`).Scan(&fiberAgents); err != nil || fiberAgents == nil {
-		t.Errorf("fiber_agents after the refused migration = %v, %v", fiberAgents, err)
+	var fiberThreads *string
+	if err := p.QueryRow(ctx, `SELECT to_regclass('fiber_threads')::text`).Scan(&fiberThreads); err != nil || fiberThreads == nil {
+		t.Errorf("fiber_threads after the refused migration = %v, %v", fiberThreads, err)
 	}
 
 	// Once the old table is gone, the migration goes through again.
 	if _, err := p.Exec(ctx, `DROP TABLE `+old); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.NewPostgres(p).Migrate(ctx); err != nil {
+	if err := thread.NewPostgres(p).Migrate(ctx); err != nil {
 		t.Errorf("migrating after dropping %s: %v", old, err)
 	}
 }

@@ -1,5 +1,5 @@
 // Package fiber is an agent library you compose in Go. New assembles the
-// agent registry, the bus, the router, the durable runtime, the sandbox,
+// agent definitions, the bus, dispatch, egress, the durable runtime, the sandbox,
 // knowledge, thread journals, files, MCP tool providers, the author agent and
 // the connectors into an App, and Run drives it in process. It is a library:
 // there is no service, no configuration file and no environment variable,
@@ -20,7 +20,9 @@
 //	if err != nil { ... }
 //	defer app.Close()
 //	go app.Run(ctx)
-//	acc, err := app.Invoke(ctx, tag)
+//	_ = app.Memberships().Join(ctx, "acme", "slack://T01/C02", "docs-bot",
+//		membership.Rule{Types: []string{"message"}})
+//	err = app.Publish(ctx, msg) // a message.posted.v1 naming docs-bot
 //
 // Code-shaped extensions are options too: a model provider, a tool source, a
 // connector, an MCP tool provider. Configuration from files or the
@@ -43,21 +45,24 @@ import (
 	dqueue "github.com/urmzd/anchor/pkg/queue"
 	"github.com/urmzd/anchor/pkg/worker"
 	"github.com/urmzd/playscape/pkg/metrics"
-	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/cron"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/egress"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // Option is one choice New is given.
@@ -76,13 +81,13 @@ func apply(opts []Option) options {
 // Deployment.
 
 // WithTenant sets the authorization scope this deployment serves. It is
-// stamped onto every tag a connector raises (a trigger has no credential to
-// derive one from), mentions on Slack, GitHub and Jira resolve agents in it,
-// the author agent is seeded for it, and tool providers declared without a
-// tenant are recorded under it. There is no default: without it nothing is
-// seeded, and WithSlack, WithGitHub and WithJira are ErrConfig, since they
-// would raise nothing a run could be accepted for. A schedule carries its own
-// tenant.
+// stamped onto every event a connector publishes (a trigger has no credential
+// to derive one from), mentions on GitHub and Jira resolve agents in it, Run
+// dispatches and delivers its events, the author agent is seeded for it, and
+// tool providers declared without a tenant are recorded under it. There is no
+// default: without it nothing is seeded, and WithSlack, WithGitHub and
+// WithJira are ErrConfig, since they would publish nothing a run could be
+// accepted for. A schedule carries its own tenant.
 func WithTenant(tenant string) Option { return func(o *options) { o.Tenant = tenant } }
 
 // WithWorkspace sets the directory the sandbox writes agent artifacts under.
@@ -102,7 +107,7 @@ func WithConcurrency(n int) Option { return func(o *options) { o.Concurrency = n
 // WithCompaction sets the history compaction every agent runs with. The zero
 // value never compacts; OnRequest lets a host ask a running turn to compact
 // (App.Compact).
-func WithCompaction(c agentrt.Compaction) Option { return func(o *options) { o.Compaction = c } }
+func WithCompaction(c native.Compaction) Option { return func(o *options) { o.Compaction = c } }
 
 // WithAuthor chooses what the built-in author agent runs on. Without it the
 // agent is seeded on the offline provider.
@@ -113,8 +118,9 @@ func WithAuthor(provider, model string) Option {
 // Backends. Each replaces the in-memory default; the App never closes what
 // it is given.
 
-// WithPostgres puts every store family on pool: the agent registry, the run
-// ledger and queue, knowledge, thread journals and MCP tool providers. New
+// WithPostgres puts every store family on pool: the agent definitions, the run
+// ledger and queue, knowledge, thread journals, memberships and MCP tool
+// providers. New
 // migrates each. A store passed by its own option wins over this one. The
 // bus is chosen separately (WithBus with bus.NewPostgres or bus.NewRedis).
 func WithPostgres(pool *pgxpool.Pool) Option { return func(o *options) { o.Postgres = pool } }
@@ -123,16 +129,21 @@ func WithPostgres(pool *pgxpool.Pool) Option { return func(o *options) { o.Postg
 // bus.NewPostgres, or any implementation that passes bustest.
 func WithBus(b bus.Bus) Option { return func(o *options) { o.Bus = b } }
 
-// WithRegistry sets the agent store. The store decides which providers it
-// accepts (registry.WithProviders); App.Providers lists the names this App
-// can run.
-func WithRegistry(s registry.Store) Option { return func(o *options) { o.Registry = s } }
+// WithDefinitions sets the agent store. The store decides which providers it
+// accepts (definition.WithProviders or WithChecks); App.Providers lists the
+// names this App can run.
+func WithDefinitions(s definition.Source) Option { return func(o *options) { o.Definitions = s } }
 
 // WithDurable sets the run ledger and queue runs execute from, for example
 // the two durable.Open returns. Both are required.
 func WithDurable(l Ledger, q dqueue.Queue) Option {
 	return func(o *options) { o.Ledger, o.Queue = l, q }
 }
+
+// WithMemberships sets which agents are members of which channels, which is
+// what decides who an event published with App.Publish wakes. Without it,
+// and without WithPostgres, memberships live in memory and start empty.
+func WithMemberships(s membership.Store) Option { return func(o *options) { o.Memberships = s } }
 
 // WithThreads sets the conversation journal.
 func WithThreads(s thread.Store) Option { return func(o *options) { o.Threads = s } }
@@ -151,10 +162,10 @@ func WithBlobs(s blob.Store) Option { return func(o *options) { o.Blobs = s } }
 // WithToolProviders sets the MCP tool provider store.
 func WithToolProviders(s toolprovider.Store) Option { return func(o *options) { o.Tools = s } }
 
-// WithExecutor replaces the playscape sandbox a turn runs in. Model
+// WithTurnRuntime replaces the playscape sandbox a turn runs in. Model
 // providers, tool sources, compaction and knowledge are wired into the
-// sandbox, so an executor passed here brings its own.
-func WithExecutor(x runtime.Executor) Option { return func(o *options) { o.Executor = x } }
+// sandbox, so a turn runtime passed here brings its own.
+func WithTurnRuntime(rt turn.Runtime) Option { return func(o *options) { o.Runtime = rt } }
 
 // WithRuntimeOptions adds options to the durable runtime, after the App's
 // own, so they can override them.
@@ -168,19 +179,24 @@ func WithWorkerOptions(opts ...worker.Option) Option {
 	return func(o *options) { o.WorkerOpts = append(o.WorkerOpts, opts...) }
 }
 
+// WithEgressOptions adds options to the egress engine, after the App's own.
+func WithEgressOptions(opts ...egress.Option) Option {
+	return func(o *options) { o.EgressOpts = append(o.EgressOpts, opts...) }
+}
+
 // Extensions.
 
 // WithModelProvider makes a model provider selectable by name: a spec whose
 // provider is name runs on what fn builds. The registry New builds accepts
 // specs naming it, and a built-in of the same name is replaced.
-func WithModelProvider(name string, fn agentrt.ProviderFunc) Option {
+func WithModelProvider(name string, fn native.ProviderFunc) Option {
 	return func(o *options) {
 		if name == "" || fn == nil {
 			return
 		}
 		o.Providers = maps.Clone(o.Providers)
 		if o.Providers == nil {
-			o.Providers = map[string]agentrt.ProviderFunc{}
+			o.Providers = map[string]native.ProviderFunc{}
 		}
 		o.Providers[name] = fn
 	}
@@ -189,7 +205,7 @@ func WithModelProvider(name string, fn agentrt.ProviderFunc) Option {
 // WithOpenAICompatible registers an OpenAI-compatible endpoint under ep.Name.
 // It is WithModelProvider with ep.Provider(); the key is read from the
 // environment variable ep.KeyEnv names when an agent is built.
-func WithOpenAICompatible(ep agentrt.OpenAICompatible) Option {
+func WithOpenAICompatible(ep native.OpenAICompatible) Option {
 	return WithModelProvider(ep.Name, ep.Provider())
 }
 
@@ -207,8 +223,8 @@ func WithToolSource(c runtime.Catalog) Option {
 // WithTools adds a fixed set of tools, resolved by name for every turn. It is
 // WithToolSource for tools that need nothing from the run.
 func WithTools(tools ...saigetypes.Tool) Option {
-	static := agentrt.StaticTools(tools...)
-	return WithToolSource(func(runtime.Request, func(payload.Action) error) (agentrt.Tools, error) {
+	static := native.StaticTools(tools...)
+	return WithToolSource(func(runtime.Request, func(event.Action) error) (native.Tools, error) {
 		return static, nil
 	})
 }
@@ -246,7 +262,7 @@ func WithToolProvider(p toolprovider.Provider, accept ...toolprovider.Tool) Opti
 
 // WithPersonCredentials sets how a person-scoped MCP tool provider
 // (toolprovider.ScopePerson) finds the credential of the person a run acts
-// for. That person is the actor on the run's tag as it was accepted, which
+// for. That person is the actor on the run's trigger as it was accepted, which
 // the program composing fiber sets from the caller's credential (a surface
 // marked ActAs names the person it authenticated) and which no model output
 // can change. A reference the resolver returns is resolved like a provider's

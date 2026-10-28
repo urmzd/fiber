@@ -11,22 +11,24 @@ import (
 	dqueue "github.com/urmzd/anchor/pkg/queue"
 	"github.com/urmzd/anchor/pkg/worker"
 	"github.com/urmzd/playscape/pkg/metrics"
-	saigetypes "github.com/urmzd/saige/agent/types"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/cron"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/egress"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
 	"github.com/urmzd/fiber/pkg/mcptools"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // options are everything New is given: what a program built on fiber adds to
@@ -36,7 +38,7 @@ import (
 type options struct {
 	// Providers are model providers by the name a spec's provider field
 	// selects. A name already built in is replaced.
-	Providers map[string]agentrt.ProviderFunc
+	Providers map[string]native.ProviderFunc
 	// Catalogs resolve tool names a spec grants, after the connectors'
 	// actions and in order: the first that resolves a name wins.
 	Catalogs []runtime.Catalog
@@ -52,25 +54,27 @@ type options struct {
 
 	// Backends. Nil is memory, except where Postgres fills them.
 	Bus         bus.Bus
-	Registry    registry.Store
+	Definitions definition.Source
 	Ledger      Ledger
 	Queue       dqueue.Queue
 	Threads     thread.Store
+	Memberships membership.Store
 	Knowledge   knowledge.Store
 	Embedder    knowledge.Embedder
 	Blobs       blob.Store
 	Tools       toolprovider.Store
-	Executor    runtime.Executor
+	Runtime     turn.Runtime
 	Postgres    *pgxpool.Pool
 	Workspace   string
 	RuntimeOpts []runtime.Option
 	WorkerOpts  []worker.Option
+	EgressOpts  []egress.Option
 
 	// Deployment.
 	Tenant         string
 	AuthorProvider string
 	AuthorModel    string
-	Compaction     agentrt.Compaction
+	Compaction     native.Compaction
 	Concurrency    int
 	Schedules      []cron.Schedule
 	Slack          Slack
@@ -94,7 +98,7 @@ type toolProviderSeed struct {
 // providerNames is the provider table definitions are validated against: the
 // built-in names plus every extension's, sorted.
 func (e options) providerNames() []string {
-	names := agentspec.KnownProviders()
+	names := definition.KnownProviders()
 	for name := range e.Providers {
 		if !slices.Contains(names, name) {
 			names = append(names, name)
@@ -104,10 +108,15 @@ func (e options) providerNames() []string {
 	return names
 }
 
+// checks are the deployment facts definitions are validated against.
+func (e options) checks() definition.Checks {
+	return definition.Checks{Providers: e.providerNames()}
+}
+
 // catalog chains the connectors' actions with the extensions' catalogs. A
 // name none of them resolves fails with every reason, so the operator log
 // says where it was looked for. A catalog that also supplies tool groups
-// (agentrt.ToolGroups) keeps doing so through the chain; "mcp:" grants of
+// (native.ToolGroups) keeps doing so through the chain; "mcp:" grants of
 // the tool provider store are supplied ahead of all of them by the sandbox's
 // group source.
 func catalog(first runtime.Catalog, rest []runtime.Catalog) runtime.Catalog {
@@ -115,7 +124,7 @@ func catalog(first runtime.Catalog, rest []runtime.Catalog) runtime.Catalog {
 		return first
 	}
 	all := append([]runtime.Catalog{first}, rest...)
-	return func(req runtime.Request, action func(payload.Action) error) (agentrt.Tools, error) {
+	return func(req runtime.Request, action func(event.Action) error) (native.Tools, error) {
 		resolved := make(chained, 0, len(all))
 		for _, c := range all {
 			t, err := c(req, action)
@@ -131,7 +140,7 @@ func catalog(first runtime.Catalog, rest []runtime.Catalog) runtime.Catalog {
 }
 
 // chained is one turn's catalogs, asked in order.
-type chained []agentrt.Tools
+type chained []native.Tools
 
 func (c chained) Lookup(name string) (saigetypes.Tool, error) {
 	var errs []error
@@ -145,10 +154,10 @@ func (c chained) Lookup(name string) (saigetypes.Tool, error) {
 	return nil, errors.Join(errs...)
 }
 
-func (c chained) ToolGroup(name string) (agentrt.ToolGroup, error) {
-	errs := []error{fmt.Errorf("%w: %q", agentrt.ErrNoSuchToolGroup, name)}
+func (c chained) ToolGroup(name string) (native.ToolGroup, error) {
+	errs := []error{fmt.Errorf("%w: %q", native.ErrNoSuchToolGroup, name)}
 	for _, t := range c {
-		groups, ok := t.(agentrt.ToolGroups)
+		groups, ok := t.(native.ToolGroups)
 		if !ok {
 			continue
 		}
@@ -158,7 +167,7 @@ func (c chained) ToolGroup(name string) (agentrt.ToolGroup, error) {
 		}
 		errs = append(errs, err)
 	}
-	return agentrt.ToolGroup{}, errors.Join(errs...)
+	return native.ToolGroup{}, errors.Join(errs...)
 }
 
 // checkPins refuses a declared tool with no name or no schema hash. A tool

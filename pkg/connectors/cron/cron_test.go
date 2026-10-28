@@ -3,14 +3,19 @@ package cron_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/membership"
+
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/cron"
-	"github.com/urmzd/fiber/pkg/envelope"
 )
 
 // ── Expression parsing ──────────────────────────────────────────────
@@ -335,18 +340,16 @@ func TestAnOccurrenceThatCouldNotBeHandedOffIsStillOwed(t *testing.T) {
 	}
 }
 
-// ── The tag a schedule raises ───────────────────────────────────────
+// ── The event a schedule publishes ──────────────────────────────────
 
-func TestAScheduleRaisesACompleteTagAddressedAtItself(t *testing.T) {
-	target := address.MustParse("slack://T01ABCDEF/C02XYZ?thread=1699123456.001")
+func TestAScheduleTickIsACompleteEventOnItsOwnChannel(t *testing.T) {
 	store := memory(t, cron.Schedule{
 		Name:       "nightly",
 		Expression: "0 3 * * *",
 		Agent:      "docs-bot",
 		Tenant:     "acme",
 		Text:       "summarize yesterday's incidents",
-		Routes:     []envelope.Route{{Target: target, Kinds: []string{"lifecycle.completed"}}},
-		Meta:       map[string]string{"team": "platform"},
+		Context:    map[string]string{"team": "platform"},
 	})
 	clk := &clock{at: at(t, "2026-07-20T04:00:00Z")}
 	c, tags := start(t, store, clk)
@@ -354,68 +357,60 @@ func TestAScheduleRaisesACompleteTagAddressedAtItself(t *testing.T) {
 	clk.set(at(t, "2026-07-21T03:05:00Z"))
 	tick(t, c)
 
-	tag := drain(t, tags, 1)[0]
-	if err := tag.Validate(); err != nil {
-		t.Fatalf("invalid tag: %v", err)
+	e := drain(t, tags, 1)[0]
+	b, ok := e.Data.(event.CronTick)
+	if !ok {
+		t.Fatalf("published %s, want %s", e.Type, event.TypeCronTick)
 	}
-	if tag.Agent != "docs-bot" || tag.Origin != "cron" || tag.Tenant != "acme" {
-		t.Errorf("tag agent/origin/tenant = %q/%q/%q", tag.Agent, tag.Origin, tag.Tenant)
+	if e.ID != "nightly@1784602800" || e.Tenant != "acme" || e.Subject != "nightly" {
+		t.Errorf("id/tenant/subject = %q/%q/%q", e.ID, e.Tenant, e.Subject)
 	}
-	if tag.Text != "summarize yesterday's incidents" {
-		t.Errorf("Tag.Text = %q", tag.Text)
+	// The channel is the schedule's address; the source is opaque, so each
+	// run a tick starts is a conversation of its own.
+	if e.Channel != "cron://acme/nightly" || e.Source != "cron:acme/nightly" {
+		t.Errorf("channel/source = %q/%q", e.Channel, e.Source)
 	}
-	if got, want := tag.Source.String(), "cron://acme/nightly"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	if b.Text != "summarize yesterday's incidents" || len(b.Mentions) != 0 {
+		t.Errorf("text = %q, mentions = %v: the channel's members decide who answers", b.Text, b.Mentions)
 	}
-	if !tag.Actor.Bot {
-		t.Error("Tag.Actor is not marked as automation, so a sink would render a human")
+	if !b.Actor.Bot {
+		t.Error("Actor is not marked as automation, so a sink would render a human")
 	}
-	// At is the scheduled instant, not the instant the tick noticed it.
-	if !tag.At.Equal(at(t, "2026-07-21T03:00:00Z")) {
-		t.Errorf("Tag.At = %s, want the scheduled instant", tag.At.UTC().Format(time.RFC3339))
+	// Time is the scheduled instant, not the instant the tick noticed it.
+	if want := at(t, "2026-07-21T03:00:00Z"); !e.Time.Equal(want) || !b.Occurrence.Equal(want) {
+		t.Errorf("time/occurrence = %s/%s, want the scheduled instant", e.Time.Format(time.RFC3339), b.Occurrence.Format(time.RFC3339))
 	}
-	for key, want := range map[string]string{
-		"cron_schedule":   "nightly",
-		"cron_expression": "0 3 * * *",
-		"cron_occurrence": "2026-07-21T03:00:00Z",
-		"team":            "platform",
-	} {
-		if got := tag.Meta[key]; got != want {
-			t.Errorf("Meta[%q] = %q, want %q", key, got, want)
-		}
-	}
-	// The route is honoured verbatim: a schedule delivers wherever it says, into
-	// a surface it knows nothing about.
-	if len(tag.Routes()) != 1 || tag.Routes()[0].Target.String() != target.String() {
-		t.Errorf("Tag.Routes() = %+v, want the configured route", tag.Routes())
+	if b.Schedule != "nightly" || b.Expression != "0 3 * * *" || b.Context["team"] != "platform" {
+		t.Errorf("body = %+v", b)
 	}
 }
 
-func TestAScheduleWithNoRoutesStillRunsAndHasNoDestination(t *testing.T) {
-	store := memory(t, nightly())
+// A schedule's agent joins the schedule's channel before its first tick is
+// published, waking on ticks alone, and joins once.
+func TestAScheduleAgentJoinsItsChannelOnce(t *testing.T) {
+	members := &joins{}
 	clk := &clock{at: at(t, "2026-07-20T04:00:00Z")}
-	c, tags := start(t, store, clk)
+	c, err := cron.New(cron.Config{Store: memory(t, nightly()), Interval: -1, Now: clk.now, Members: members})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := ingest(t, c)
 	tick(t, c)
 	clk.set(at(t, "2026-07-21T03:05:00Z"))
 	tick(t, c)
+	drain(t, tags, 1)
 
-	tag := drain(t, tags, 1)[0]
-	if len(tag.Deliver) != 0 {
-		t.Errorf("Tag.Deliver = %+v, want none", tag.Deliver)
-	}
-	// Routes() falls back to Source, which is a cron:// address no sink can
-	// receive. That is the correct shape for "runs, reaches the bus, renders
-	// nowhere": the router refuses the target rather than inventing one.
-	if got := tag.Routes(); len(got) != 1 || got[0].Target.Connector != cron.Name {
-		t.Errorf("Tag.Routes() = %+v", got)
+	want := []string{"acme cron://acme/nightly docs-bot [cron.tick] ambient"}
+	if got := members.all(); !equal(got, want) {
+		t.Errorf("joins = %q, want %q", got, want)
 	}
 }
 
-func TestTheSourceAddressRoundTripsThroughPkgAddress(t *testing.T) {
+func TestTheChannelAddressRoundTripsThroughPkgAddress(t *testing.T) {
 	s := cron.Schedule{Name: "nightly-review", Expression: "0 3 * * *", Agent: "docs-bot", Tenant: "acme"}
-	uri := s.Source().String()
+	uri := s.Channel().String()
 	if uri != "cron://acme/nightly-review" {
-		t.Fatalf("Source() = %q", uri)
+		t.Fatalf("Channel() = %q", uri)
 	}
 	parsed, err := address.Parse(uri)
 	if err != nil {
@@ -432,13 +427,11 @@ func TestUnrunnableSchedulesAreRefusedWhenTheyAreStored(t *testing.T) {
 		s    cron.Schedule
 	}{
 		{"no name", cron.Schedule{Expression: "* * * * *", Agent: "a", Tenant: "acme"}},
-		{"no agent", cron.Schedule{Name: "n", Expression: "* * * * *", Tenant: "acme"}},
 		{"no tenant, so no scope and no address", cron.Schedule{Name: "n", Expression: "* * * * *", Agent: "a"}},
 		{"a name that cannot be an address segment", cron.Schedule{Name: "nightly/review", Expression: "* * * * *", Agent: "a", Tenant: "acme"}},
 		{"a tenant that cannot be a workspace", cron.Schedule{Name: "n", Expression: "* * * * *", Agent: "a", Tenant: "acme.co"}},
 		{"an agent name no topic could carry", cron.Schedule{Name: "n", Expression: "* * * * *", Agent: "docs bot", Tenant: "acme"}},
 		{"an expression that would silently never fire", cron.Schedule{Name: "n", Expression: "@daily", Agent: "a", Tenant: "acme"}},
-		{"a route with no target", cron.Schedule{Name: "n", Expression: "* * * * *", Agent: "a", Tenant: "acme", Routes: []envelope.Route{{}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -529,7 +522,7 @@ func mustMemory(t *testing.T) *cron.Memory { return memory(t) }
 
 // start builds a connector with no ticker of its own and holds its channel, so
 // the test decides when time passes and when a pass happens.
-func start(t *testing.T, store cron.Store, clk *clock) (*cron.Connector, chan envelope.Tag) {
+func start(t *testing.T, store cron.Store, clk *clock) (*cron.Connector, chan event.Envelope) {
 	t.Helper()
 	c, err := cron.New(cron.Config{Store: store, Interval: -1, Now: clk.now})
 	if err != nil {
@@ -538,14 +531,17 @@ func start(t *testing.T, store cron.Store, clk *clock) (*cron.Connector, chan en
 	return c, ingest(t, c)
 }
 
-func ingest(t *testing.T, c *cron.Connector) chan envelope.Tag {
+func ingest(t *testing.T, c *cron.Connector) chan event.Envelope {
 	t.Helper()
-	tags := make(chan envelope.Tag, 64)
+	tags := make(chan event.Envelope, 64)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = c.Ingest(ctx, tags)
+		_ = c.Ingest(ctx, func(_ context.Context, e event.Envelope) error {
+			tags <- e
+			return nil
+		})
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -568,21 +564,48 @@ func tick(t *testing.T, c *cron.Connector) {
 	}
 }
 
-func drain(t *testing.T, tags chan envelope.Tag, n int) []envelope.Tag {
+func drain(t *testing.T, tags chan event.Envelope, n int) []event.Envelope {
 	t.Helper()
-	out := make([]envelope.Tag, 0, n)
+	out := make([]event.Envelope, 0, n)
 	for range n {
 		select {
-		case tag := <-tags:
-			out = append(out, tag)
+		case e := <-tags:
+			if err := e.Validate(); err != nil {
+				t.Fatalf("published an invalid event: %v", err)
+			}
+			rendertest.Check(t, e)
+			out = append(out, e)
 		case <-time.After(2 * time.Second):
-			t.Fatalf("only %d of %d tags arrived", len(out), n)
+			t.Fatalf("only %d of %d events arrived", len(out), n)
 		}
 	}
 	return out
 }
 
-func ids(tags []envelope.Tag) []string {
+// joins records the memberships a connector asks for.
+type joins struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (j *joins) Join(_ context.Context, tenant, channel, agent string, rule membership.Rule) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	mode := "addressed"
+	if rule.Addressed != nil && !*rule.Addressed {
+		mode = "ambient"
+	}
+	j.got = append(j.got, fmt.Sprintf("%s %s %s %v %s", tenant, channel, agent, rule.Types, mode))
+	return nil
+}
+
+func (j *joins) all() []string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return slices.Clone(j.got)
+}
+
+func ids(tags []event.Envelope) []string {
 	out := make([]string, len(tags))
 	for i, tag := range tags {
 		out[i] = tag.ID

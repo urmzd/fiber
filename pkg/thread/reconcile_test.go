@@ -9,7 +9,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/thread/threadtest"
 )
@@ -40,7 +40,7 @@ func TestReconcileAppendsUnseenSurfaceMessagesInSurfaceOrder(t *testing.T) {
 		t.Fatalf("journal = %q", texts(got))
 	}
 	if e := got[0]; e.Role != thread.RoleUser || e.SurfaceID != first || e.RunID != "" ||
-		e.Actor != (envelope.Actor{ID: "ada", Display: "ada"}) || e.At.IsZero() {
+		e.Actor != (event.Actor{ID: "ada", Display: "ada"}) || e.At.IsZero() {
 		t.Errorf("a reconciled message lost who said it, when, or which message it is: %+v", e)
 	}
 
@@ -171,7 +171,7 @@ func TestReconcileFailsClosed(t *testing.T) {
 
 	// A thread with no surface has nothing to list, and the lister is not
 	// asked.
-	oneShot := thread.KeyOf(envelope.Tag{ID: "Ev1", Tenant: tenantA, Agent: "docs-bot"})
+	oneShot := thread.KeyOf(event.Envelope{ID: "Ev1", Tenant: tenantA, Source: "test"}, "docs-bot")
 	if err := thread.Reconcile(ctx, s, down, oneShot, address.Address{}); err != nil {
 		t.Errorf("Reconcile of a one-shot thread = %v, want nil", err)
 	}

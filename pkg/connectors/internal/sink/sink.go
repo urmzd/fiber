@@ -32,7 +32,7 @@
 //
 // The engine runs no background goroutine. It has a Flush the caller schedules,
 // and a clock seam instead of a timer. A connector that owns a ticker would own
-// a lifecycle, a shutdown ordering and a leak; the router already has a loop,
+// a lifecycle, a shutdown ordering and a leak; egress already has a loop,
 // and tests get determinism for free.
 //
 // # What is deliberately not solved here
@@ -56,7 +56,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connectors/internal/render"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Defaults for the engine.
@@ -171,11 +171,11 @@ type state struct {
 }
 
 // Deliver applies e and writes the run's message if it is due.
-func (eng *Engine) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (eng *Engine) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	if eng.render == nil || eng.surface == nil {
 		return fmt.Errorf("sink: engine is not configured with a surface and a renderer")
 	}
-	st := eng.state(key(e.RunID, target), target)
+	st := eng.state(key(e.Run, e.Channel), target)
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -288,12 +288,12 @@ func (eng *Engine) state(k string, target address.Address) *state {
 	return st
 }
 
-// Handle returns the native message identifier a run owns on target, and
+// Handle returns the native message identifier a run owns on channel, and
 // whether the engine has one. It exists for tests and for operators asking
 // "which message is this run writing to"; the delivery path does not use it.
-func (eng *Engine) Handle(runID string, target address.Address) (string, bool) {
+func (eng *Engine) Handle(runID, channel string) (string, bool) {
 	eng.mu.Lock()
-	el, ok := eng.byKey[key(runID, target)]
+	el, ok := eng.byKey[key(runID, channel)]
 	eng.mu.Unlock()
 	if !ok {
 		return "", false
@@ -304,14 +304,14 @@ func (eng *Engine) Handle(runID string, target address.Address) (string, bool) {
 	return st.handle, st.handle != ""
 }
 
-// key identifies one message. Both halves are needed: a run delivering to two
-// Slack threads owns one message in each, and two runs in the same thread own
-// one each.
-func key(runID string, target address.Address) string {
+// key identifies one message: a run on a channel. Both halves are needed:
+// two runs in the same thread own one message each, and the key never
+// depends on how a target address is spelled.
+func key(runID, channel string) string {
 	var b strings.Builder
-	b.Grow(len(runID) + 1 + 48)
+	b.Grow(len(runID) + 1 + len(channel))
 	b.WriteString(runID)
 	b.WriteByte(0)
-	b.WriteString(target.String())
+	b.WriteString(channel)
 	return b.String()
 }

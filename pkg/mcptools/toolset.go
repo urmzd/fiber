@@ -8,14 +8,14 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // Toolset is the callable view of one provider for one grant: the accepted
 // tools the server still offers unchanged, minus those the grant does not
-// permit. Its Lookup has the shape of pkg/agentrt's Tools interface.
+// permit. Its Lookup has the shape of pkg/turn/native's Tools interface.
 type Toolset struct {
 	session *Session
 	grant   toolprovider.Grant
@@ -144,7 +144,7 @@ func (c *callable) Definition() saigetypes.ToolDef { return c.def }
 
 // ActsForPerson reports whether the tool runs with the credential of the
 // person the turn acts for, which it does when its provider is
-// person-scoped. It is agentrt.PersonScoped, so an approval of a call to it
+// person-scoped. It is native.PersonScoped, so an approval of a call to it
 // says so and nobody but that person changes what it is called with.
 func (c *callable) ActsForPerson() bool {
 	return c.session.provider.Scope() == toolprovider.ScopePerson

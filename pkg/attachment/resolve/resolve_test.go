@@ -20,7 +20,7 @@ import (
 	"github.com/urmzd/fiber/pkg/attachment/resolve"
 	"github.com/urmzd/fiber/pkg/attachment/resolve/resolvetest"
 	"github.com/urmzd/fiber/pkg/blob"
-	"github.com/urmzd/saige/agent/types"
+	types "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 var ctx = context.Background()

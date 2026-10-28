@@ -82,7 +82,7 @@ func TestAnIssueCreatedWithAttachmentsBringsThemIn(t *testing.T) {
 	c.ServeHTTP(w, deliver(t, "created-files-1", issueCreatedWithFiles))
 	tag := receive(t, tags)
 	if tag.Tenant != "acme" || len(tag.Attachments) != 3 {
-		t.Fatalf("tag tenant %q, attachments %+v", tag.Tenant, tag.Attachments)
+		t.Fatalf("event tenant %q, attachments %+v", tag.Tenant, tag.Attachments)
 	}
 	if a := tag.Attachments[0]; a.Name != "dashboard.png" || a.MediaType != "image/png" || a.Origin.String() != "jira://acme/PROJ-11" {
 		t.Errorf("first = %+v", a)

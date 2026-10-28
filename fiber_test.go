@@ -3,12 +3,11 @@ package fiber
 import (
 	"testing"
 
-	"github.com/urmzd/saige/agent/agenttest"
-	saigetypes "github.com/urmzd/saige/agent/types"
-
-	"github.com/urmzd/fiber/pkg/agentrt"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/toolprovider"
+	"github.com/urmzd/fiber/pkg/turn/native"
+	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 type named string
@@ -18,12 +17,12 @@ func (n named) Name() string { return string(n) }
 // Every option lands in the field of the composition root's extensions it
 // names, and nothing else; a nil or empty one adds nothing.
 func TestOptionsBecomeTheCompositionRootsExtensions(t *testing.T) {
-	fn := func(agentrt.Spec) (saigetypes.Provider, error) { return &agenttest.ScriptedProvider{}, nil }
+	fn := func(native.Spec) (saigetypes.Provider, error) { return &agenttest.ScriptedProvider{}, nil }
 	ext := apply([]Option{
 		WithModelProvider("house", fn),
 		WithModelProvider("", fn),
 		WithModelProvider("nil", nil),
-		WithOpenAICompatible(agentrt.OpenAICompatible{Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1"}),
+		WithOpenAICompatible(native.OpenAICompatible{Name: "fireworks", BaseURL: "https://api.fireworks.ai/inference/v1"}),
 		WithTools(&agenttest.MockTool{Def: saigetypes.ToolDef{Name: "lookup"}}),
 		WithToolSource(nil),
 		WithConnector(named("chat")),

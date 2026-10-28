@@ -3,8 +3,8 @@
 // A connector is a peer, not a client. It may implement up to three faces,
 // and which ones it implements is what gives the mesh its shape:
 //
-//	Trigger  raises tags   (a Slack mention, a GitHub review request, a schedule)
-//	Sink     receives events (a Slack thread, a GitHub comment, a webhook POST)
+//	Trigger  publishes events (a Slack mention, a GitHub review request, a schedule)
+//	Sink     renders events   (a Slack thread, a GitHub comment, a webhook POST)
 //	Actor    contributes actions the agent can call (transition a Jira ticket)
 //
 // The faces are independent, and most connectors do not implement all three:
@@ -15,11 +15,9 @@
 //	cron     trigger only          — a schedule has no surface to deliver to
 //	webhook  sink only             — an outbound POST raises nothing
 //
-// Because Trigger and Sink are separate faces rather than two halves of one
-// request, a tag raised in GitHub can deliver into Jira, and a cron schedule
-// that no human touched can deliver into both. No connector ever calls
-// another connector: sources publish, sinks subscribe, and the bus is the
-// only thing in between.
+// Trigger and Sink are separate faces rather than two halves of one request.
+// No connector ever calls another connector: triggers publish, sinks
+// subscribe (pkg/egress), and the bus is the only thing in between.
 //
 // The Actor face is what turns "the agent replied" into "the work got done".
 // Actions are the connector's native verbs, executed under the agent's policy
@@ -34,7 +32,7 @@ import (
 	"fmt"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Errors returned by connectors and by the registry.
@@ -54,24 +52,30 @@ type Connector interface {
 	Name() string
 }
 
-// Trigger raises tags into the mesh.
+// Publish puts one event on the bus. A trigger is handed one by whoever
+// runs it, so it never learns what a bus or a runtime is.
+type Publish func(ctx context.Context, e event.Envelope) error
+
+// Trigger is an ingress adapter: it turns what happens on a surface into
+// typed events and publishes them.
 //
-// Ingest runs until ctx is cancelled, emitting a Tag for every native event
-// that names an agent. Implementations are responsible for verifying
-// authenticity before emitting (HMAC for webhook-style triggers, socket
-// authentication for streaming ones): nothing downstream re-checks, because
-// nothing downstream can.
+// Ingest runs until ctx is cancelled, publishing one event for every native
+// event the surface has a type for. Implementations are responsible for
+// verifying authenticity before publishing (HMAC for webhook-style triggers,
+// socket authentication for streaming ones): nothing downstream re-checks,
+// because nothing downstream can. A trigger never chooses an agent: the
+// members of the event's channel decide who it wakes.
 //
-// Emitting the same event twice is safe. Tag.ID is the run idempotency key,
-// so a redelivery joins the existing run rather than starting a second one.
+// Publishing the same event twice is safe. Its id is part of the run key, so
+// a redelivery joins the existing run rather than starting a second one.
 type Trigger interface {
 	Connector
-	Ingest(ctx context.Context, out chan<- envelope.Tag) error
+	Ingest(ctx context.Context, publish Publish) error
 }
 
 // Sink renders events onto a native surface.
 //
-// Deliver is called once per event that a route selected. Implementations
+// Deliver is called once per event its egress subscription selected. Implementations
 // must tolerate redelivery of the same Event.Seq, because the bus is
 // at-least-once: rendering should be idempotent, which for most surfaces
 // means editing a message keyed by run rather than posting a new one.
@@ -80,7 +84,26 @@ type Trigger interface {
 // guessing.
 type Sink interface {
 	Connector
-	Deliver(ctx context.Context, target address.Address, e envelope.Event) error
+	Deliver(ctx context.Context, target address.Address, e event.Envelope) error
+}
+
+// Subscription is what an egress adapter receives: events of tenant runs on
+// Channels (channel prefixes) whose type Types selects (type prefixes, with
+// opt-in families only when named). Target is where they are rendered; zero
+// renders each event on its own channel.
+type Subscription struct {
+	Channels []string
+	Types    []string
+	Target   address.Address
+}
+
+// Subscriber is a Sink that names its own subscriptions, such as an outbound
+// webhook that receives another surface's channels. A Sink that is not one
+// receives the run events on its own scheme's channels, rendered on each
+// event's channel.
+type Subscriber interface {
+	Sink
+	Subscriptions() []Subscription
 }
 
 // Actor contributes native verbs the agent can call as tools.
@@ -212,7 +235,19 @@ func (r *Registry) Sink(target address.Address) (Sink, error) {
 	return s, nil
 }
 
-// Triggers returns every registered connector that can raise tags.
+// Sinks returns every registered connector that renders events, in name
+// order.
+func (r *Registry) Sinks() []Sink {
+	var out []Sink
+	for _, name := range r.Names() {
+		if s, ok := r.byName[name].(Sink); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Triggers returns every registered connector that publishes events.
 func (r *Registry) Triggers() []Trigger {
 	var out []Trigger
 	for _, name := range r.Names() {

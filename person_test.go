@@ -18,8 +18,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
@@ -95,8 +95,8 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	}
 	search.Class = toolprovider.ClassRead
 
-	var asked []envelope.Actor
-	people := mcptools.PersonResolverFunc(func(_ context.Context, tn string, p toolprovider.Provider, a envelope.Actor) (mcptools.PersonCredential, error) {
+	var asked []event.Actor
+	people := mcptools.PersonResolverFunc(func(_ context.Context, tn string, p toolprovider.Provider, a event.Actor) (mcptools.PersonCredential, error) {
 		mu.Lock()
 		asked = append(asked, a)
 		mu.Unlock()
@@ -137,19 +137,22 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	}
 
 	start(t, c.Run)
-	spec := agentspec.AgentSpec{Name: "triage", Model: "m", Provider: agentspec.ProviderOpenAI,
+	spec := definition.AgentSpec{Name: "triage", Model: "m", Provider: definition.ProviderOpenAI,
 		SystemPrompt: "Triage.", Tools: []string{"mcp:issues"}}
-	if _, err := c.Registry().Create(ctx, tenant, spec, "test"); err != nil {
+	if _, err := createAgent(c.Definitions(), ctx, tenant, spec, "test"); err != nil {
 		t.Fatal(err)
 	}
-	people3 := []envelope.Actor{{ID: "U-ana", User: "u-ana"}, {ID: "U-bob", User: "u-bob"}, {ID: "U-carol", User: "u-carol"}}
+	people3 := []event.Actor{{ID: "U-ana", User: "u-ana"}, {ID: "U-bob", User: "u-bob"}, {ID: "U-carol", User: "u-carol"}}
 	for _, a := range people3 {
 		target, _ := address.Parse("inbox://" + tenant + "/" + a.User)
-		if _, err := c.Invoke(ctx, envelope.Tag{ID: "Ev-" + a.User, Tenant: tenant, Agent: "triage", Origin: "test",
-			Text: "how many for " + a.User + "?", Actor: a, Deliver: []envelope.Route{{Target: target}}, At: time.Now(),
-			// The tag's own metadata claims to be ana; it is not who
-			// the run acts for.
-			Meta: map[string]string{"actor": "U-ana", "user": "u-ana"}}); err != nil {
+		e := posted("Ev-"+a.User, tenant, "triage", target.String(), "how many for "+a.User+"?")
+		// The request's own context claims to be ana; it is not who the
+		// run acts for.
+		e.Data = event.MessagePosted{Request: event.Request{
+			Text: "how many for " + a.User + "?", Actor: a, Mentions: []string{"triage"},
+			Context: map[string]string{"actor": "U-ana", "user": "u-ana"},
+		}}
+		if _, err := ask(ctx, c, e); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -205,8 +208,8 @@ func personsReachTheirOwn(t *testing.T, pool *pgxpool.Pool) {
 	for _, a := range people3 {
 		for _, e := range box.at("inbox://" + tenant + "/" + a.User) {
 			for _, secret := range []string{anaToken, bobToken, shared} {
-				if strings.Contains(string(e.Payload), secret) {
-					t.Errorf("event %s of %s's run carries a credential", e.Kind, a.User)
+				if strings.Contains(bodyJSON(e), secret) {
+					t.Errorf("event %s of %s's run carries a credential", e.Type, a.User)
 				}
 			}
 		}

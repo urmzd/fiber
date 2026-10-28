@@ -3,135 +3,144 @@ package author_test
 import (
 	"context"
 	"errors"
-	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/connectors/author"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
 )
 
-func TestSeedingAtEveryStartupBurnsNoRevisions(t *testing.T) {
+func TestSeedingAtEveryStartupWritesNoNewVersions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := registry.NewMemory()
-	own := author.Spec("offline", agentspec.ProviderOffline)
+	store := definition.NewMemory()
+	own := author.Spec("offline", definition.ProviderOffline)
 
 	first, err := author.Seed(ctx, store, "acme", own)
 	if err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	if first.Rev != agentspec.FirstRev || first.CreatedBy != author.SeededBy {
-		t.Fatalf("first seed = rev %d by %q", first.Rev, first.CreatedBy)
+	if first.Version != "1.0.0" || first.CreatedBy != author.SeededBy {
+		t.Fatalf("first seed = %s by %q", first.Version, first.CreatedBy)
 	}
-	if !reflect.DeepEqual(first.Spec.Tools, agentspec.AgentSpec{Tools: author.ToolNames()}.Normalize().Tools) {
-		t.Errorf("the seeded agent's tools are %v, want every core action", first.Spec.Tools)
+	a, err := definition.Parse(first.Content, first.Policy, definition.Checks{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(first.Spec.Access, agentspec.Access{}) {
-		t.Errorf("the seeded agent was granted access %+v, want none", first.Spec.Access)
+	if want := slices.Sorted(slices.Values(author.ToolNames())); !slices.Equal(a.Spec.Tools, want) {
+		t.Errorf("the seeded agent's tools are %v, want every core action", a.Spec.Tools)
+	}
+	if len(a.Spec.Access.Spawn) != 0 || a.Policy.Hash() != (definition.Policy{}).Hash() {
+		t.Errorf("the seeded agent was granted %+v and policy %+v, want nothing", a.Spec.Access, a.Policy)
 	}
 	for range 3 {
 		again, err := author.Seed(ctx, store, "acme", own)
 		if err != nil {
 			t.Fatalf("Seed again: %v", err)
 		}
-		if again.Rev != first.Rev || again.Hash != first.Hash {
-			t.Fatalf("re-seeding moved the agent to rev %d", again.Rev)
+		if again.Version != first.Version || again.Digest != first.Digest {
+			t.Fatalf("re-seeding moved the agent to %s", again.Version)
 		}
 	}
-	if _, err := store.Get(ctx, "globex", author.AgentName, 0); !errors.Is(err, registry.ErrNotFound) {
+	if _, err := store.Latest(ctx, "globex", author.AgentName); !errors.Is(err, definition.ErrNotFound) {
 		t.Errorf("seeding one tenant created the agent in another: %v", err)
 	}
 }
 
-func TestSeedUpgradesItsOwnRevisionsAndLeavesAPersonsAlone(t *testing.T) {
+func TestSeedUpgradesItsOwnVersionsAndLeavesAPersonsAlone(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := registry.NewMemory()
-	old := author.Spec("offline", agentspec.ProviderOffline)
+	store := definition.NewMemory()
+	old := author.Spec("offline", definition.ProviderOffline)
 	if _, err := author.Seed(ctx, store, "acme", old); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
 
-	// A new binary ships a new definition: the seed's own revision moves.
+	// A new binary ships a new definition: the seed writes its next major.
 	next := old
 	next.Model = "newer-model"
 	upgraded, err := author.Seed(ctx, store, "acme", next)
-	if err != nil || upgraded.Rev != 2 || upgraded.Spec.Model != "newer-model" {
-		t.Fatalf("upgrade = rev %d model %q err %v", upgraded.Rev, upgraded.Spec.Model, err)
+	if err != nil || upgraded.Version != "2.0.0" || !strings.Contains(upgraded.Content, "offline/newer-model") {
+		t.Fatalf("upgrade = %s err %v\n%s", upgraded.Version, err, upgraded.Content)
 	}
 
 	// A person edits it: from then on the seed keeps its hands off.
 	edited := next
 	edited.SystemPrompt += "\nAlways answer in French."
-	if _, err := store.Revise(ctx, "acme", edited, 2, "slack:ada"); err != nil {
-		t.Fatalf("Revise: %v", err)
+	rec, err := definition.FromAgentSpec(edited, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Tenant, rec.CreatedBy = "acme", "slack:ada"
+	if _, err := store.Put(ctx, rec); err != nil {
+		t.Fatalf("Put: %v", err)
 	}
 	kept, err := author.Seed(ctx, store, "acme", old)
-	if err != nil || kept.Rev != 3 || kept.CreatedBy != "slack:ada" {
-		t.Fatalf("seed over a person's edit = rev %d by %q err %v", kept.Rev, kept.CreatedBy, err)
+	if err != nil || kept.Version != "3.0.0" || kept.CreatedBy != "slack:ada" {
+		t.Fatalf("seed over a person's edit = %s by %q err %v", kept.Version, kept.CreatedBy, err)
 	}
 }
 
 func TestSeedDoesNotResurrectAnAgentSomeoneRetired(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store := registry.NewMemory()
-	own := author.Spec("offline", agentspec.ProviderOffline)
+	store := definition.NewMemory()
+	own := author.Spec("offline", definition.ProviderOffline)
 	if _, err := author.Seed(ctx, store, "acme", own); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	if err := store.Delete(ctx, "acme", author.AgentName, 0); err != nil {
-		t.Fatalf("Delete: %v", err)
+	if err := store.Retire(ctx, "acme", author.AgentName, "slack:ada"); err != nil {
+		t.Fatalf("Retire: %v", err)
 	}
-	rev, err := author.Seed(ctx, store, "acme", own)
-	if err != nil || rev.Rev != 0 {
-		t.Fatalf("seed after retirement = rev %d err %v, want nothing and no error", rev.Rev, err)
+	rec, err := author.Seed(ctx, store, "acme", own)
+	if err != nil || rec.Version != "" {
+		t.Fatalf("seed after retirement = %q err %v, want nothing and no error", rec.Version, err)
 	}
-	if _, err := store.Get(ctx, "acme", author.AgentName, 0); !errors.Is(err, registry.ErrNotFound) {
+	if _, err := store.Latest(ctx, "acme", author.AgentName); !errors.Is(err, definition.ErrRetired) {
 		t.Fatalf("the retired agent came back: %v", err)
 	}
 }
 
-func TestSeedRefusesWhatTheRegistryRefuses(t *testing.T) {
+func TestSeedRefusesWhatTheSourceRefuses(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	if _, err := author.Seed(ctx, registry.NewMemory(), "", author.Spec("offline", agentspec.ProviderOffline)); !errors.Is(err, registry.ErrInvalid) {
-		t.Errorf("Seed with no tenant = %v, want the registry's ErrInvalid", err)
+	if _, err := author.Seed(ctx, definition.NewMemory(), "", author.Spec("offline", definition.ProviderOffline)); !errors.Is(err, definition.ErrInvalid) {
+		t.Errorf("Seed with no tenant = %v, want the source's ErrInvalid", err)
 	}
-	if _, err := author.Seed(ctx, registry.NewMemory(), "acme", author.Spec("", agentspec.ProviderOffline)); !errors.Is(err, registry.ErrInvalid) {
-		t.Errorf("Seed with no model = %v, want the registry's ErrInvalid", err)
+	if _, err := author.Seed(ctx, definition.NewMemory(), "acme", author.Spec("", definition.ProviderOffline)); !errors.Is(err, definition.ErrInvalid) {
+		t.Errorf("Seed with no model = %v, want the source's ErrInvalid", err)
 	}
-	if _, err := author.Seed(ctx, nil, "acme", author.Spec("m", agentspec.ProviderOffline)); !errors.Is(err, author.ErrInvalid) {
-		t.Errorf("Seed with no store = %v, want ErrInvalid", err)
+	if _, err := author.Seed(ctx, nil, "acme", author.Spec("m", definition.ProviderOffline)); !errors.Is(err, author.ErrInvalid) {
+		t.Errorf("Seed with no source = %v, want ErrInvalid", err)
 	}
 }
 
 func TestDiffShowsOnlyWhatChanged(t *testing.T) {
 	t.Parallel()
-	from := spec("docs", "You are a docs agent.\nLine two.\nLine three.\nLine four.\nLine five.\nLine six.")
-	from.Tools = []string{"search", "fetch"}
-
-	reordered := from
-	reordered.Tools = []string{"fetch", "search"}
-	reordered.Name = " Docs "
-	if d := author.Diff(from, reordered); d != "" {
-		t.Errorf("a change of presentation produced a diff:\n%s", d)
+	from := author.Draft{Definition: "---\nname: docs\nversion: 1.0.0\n---\nLine one.\nLine two.\nLine three.\nLine four.\nLine five.\nLine six.\n"}
+	if d := author.Diff(from, from); d != "" {
+		t.Errorf("an unchanged draft produced a diff:\n%s", d)
 	}
-
-	to := from
-	to.Tools = []string{"search"}
-	to.SystemPrompt = "You are a docs agent.\nLine two.\nLine three.\nLine four.\nLine five.\nLine 6."
-	const want = `  model: offline
-  provider: offline
-- tool: fetch
-  tool: search
-  system_prompt:
+	to := author.Draft{
+		Definition: "---\nname: docs\nversion: 1.1.0\n---\nLine one.\nLine two.\nLine three.\nLine four.\nLine five.\nLine 6.\n",
+		Policy:     definition.Policy{TaggedOnly: true},
+	}
+	const want = `  ---
+  name: docs
+- version: 1.0.0
++ version: 1.1.0
+  ---
+  Line one.
   ...
-    Line four.
-    Line five.
--   Line six.
-+   Line 6.`
+  Line four.
+  Line five.
+- Line six.
++ Line 6.
++ # policy
++ {
++   "tagged_only": true
++ }`
 	if got := author.Diff(from, to); got != want {
 		t.Errorf("diff =\n%s\nwant\n%s", got, want)
 	}

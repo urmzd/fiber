@@ -30,7 +30,7 @@
 //
 // # Layering
 //
-// This package is a leaf: stdlib and pkg/address only, so pkg/envelope can
+// This package is a leaf: stdlib and pkg/address only, so pkg/event can
 // carry an Attachment on a Tag without the wire contract growing a dependency
 // on storage or on the agent loop. Getting bytes in lives in the intake
 // subpackage; turning a reference into model input lives in resolve, which is

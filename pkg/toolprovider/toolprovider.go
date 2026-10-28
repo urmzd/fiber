@@ -22,7 +22,7 @@
 // tools are never callable. Diff computes the three-way comparison an admin
 // reviews; Accept records the decision.
 //
-// Snapshots are numbered like registry revisions and for the same reason: a
+// Snapshots are numbered, like definition versions and for the same reason: a
 // run can pin "provider X as of snapshot 4" and every attempt then sees the
 // same tool definitions, byte for byte, which keeps both the replay and the
 // prompt cache stable. Accept is an optimistic concurrency check on that
@@ -57,7 +57,7 @@
 //
 // # Tenancy
 //
-// The tenant is an explicit argument on every method, as in pkg/registry. Two
+// The tenant is an explicit argument on every method, as in pkg/definition. Two
 // tenants may each have a provider called github; they share a name and
 // nothing else.
 //

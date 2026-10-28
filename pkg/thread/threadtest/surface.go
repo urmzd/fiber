@@ -16,7 +16,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 )
 
@@ -42,7 +42,7 @@ func slot(tenant string, surface address.Address) string {
 
 // Post adds a message from a person to a thread and returns its id.
 func (s *Surface) Post(tenant string, surface address.Address, who, text string) string {
-	return s.post(tenant, surface, thread.Message{Text: text, Actor: envelope.Actor{ID: who, Display: who}})
+	return s.post(tenant, surface, thread.Message{Text: text, Actor: event.Actor{ID: who, Display: who}})
 }
 
 // PostFiles adds a message from a person with files on it and returns its
@@ -53,7 +53,7 @@ func (s *Surface) PostFiles(tenant string, surface address.Address, who, text st
 	held := append([]attachment.Attachment(nil), files...)
 	return s.post(tenant, surface, thread.Message{
 		Text:  text,
-		Actor: envelope.Actor{ID: who, Display: who},
+		Actor: event.Actor{ID: who, Display: who},
 		Files: func(ctx context.Context) ([]attachment.Attachment, error) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -76,7 +76,7 @@ func (s *Surface) Fetches() int {
 // PostOwn adds a message the deployment itself posted, such as an agent's
 // rendered answer.
 func (s *Surface) PostOwn(tenant string, surface address.Address, text string) string {
-	return s.post(tenant, surface, thread.Message{Text: text, Actor: envelope.Actor{ID: "fiber", Bot: true}, Own: true})
+	return s.post(tenant, surface, thread.Message{Text: text, Actor: event.Actor{ID: "fiber", Bot: true}, Own: true})
 }
 
 func (s *Surface) post(tenant string, surface address.Address, m thread.Message) string {

@@ -15,8 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
 	"github.com/urmzd/fiber/pkg/mcptools"
 	"github.com/urmzd/fiber/pkg/toolprovider"
 )
@@ -101,14 +100,13 @@ func coreExpandsAnMCPGrant(t *testing.T, pool *pgxpool.Pool) {
 	}
 
 	start(t, c.Run)
-	spec := agentspec.AgentSpec{Name: "triage", Model: "m", Provider: agentspec.ProviderOpenAI,
+	spec := definition.AgentSpec{Name: "triage", Model: "m", Provider: definition.ProviderOpenAI,
 		SystemPrompt: "Triage.", Tools: []string{"mcp:issues"}}
-	if _, err := c.Registry().Create(ctx, tenant, spec, "test"); err != nil {
+	if _, err := createAgent(c.Definitions(), ctx, tenant, spec, "test"); err != nil {
 		t.Fatal(err)
 	}
 	target, _ := address.Parse("inbox://" + tenant + "/out")
-	if _, err := c.Invoke(ctx, envelope.Tag{ID: "Ev-1", Tenant: tenant, Agent: "triage", Origin: "test",
-		Text: "how many?", Deliver: []envelope.Route{{Target: target}}, At: time.Now()}); err != nil {
+	if _, err := ask(ctx, c, posted("Ev-1", tenant, "triage", target.String(), "how many?")); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(15 * time.Second)
@@ -131,8 +129,8 @@ func coreExpandsAnMCPGrant(t *testing.T, pool *pgxpool.Pool) {
 		t.Errorf("the MCP server saw %v, want one call with the resolved credential", mcpAuth)
 	}
 	for _, e := range box.at(target.String()) {
-		if strings.Contains(string(e.Payload), secret) {
-			t.Errorf("event %s carries the credential", e.Kind)
+		if strings.Contains(bodyJSON(e), secret) {
+			t.Errorf("event %s carries the credential", e.Type)
 		}
 	}
 }

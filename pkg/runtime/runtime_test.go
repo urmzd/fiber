@@ -18,68 +18,193 @@ import (
 	"github.com/urmzd/anchor/pkg/worker"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/attachment"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/topic"
+	"github.com/urmzd/fiber/pkg/thread"
+	"github.com/urmzd/fiber/pkg/turn/native"
 )
 
 // ── fixtures ────────────────────────────────────────────────────────
 
-// specs is a control plane's revision history, complete enough to be revised
-// and to answer a pinned lookup after it has been.
+// specs is a control plane's definitions, complete enough to be revised and
+// to answer a pinned lookup after it has been. Every tenant reads the same
+// definitions, as the fixtures here are not about tenancy.
 type specs struct {
-	mu   sync.Mutex
-	revs map[string][]agentrt.Revision // agent -> revisions, index 0 is rev 1
+	*definition.Resolver
+	src *anyTenant
+
+	mu       sync.Mutex
+	versions map[string]int // agent -> latest major version
 }
 
-func newSpecs() *specs { return &specs{revs: make(map[string][]agentrt.Revision)} }
+func newSpecs() *specs {
+	src := &anyTenant{Source: definition.NewMemory(), tampered: map[string]string{}}
+	return &specs{Resolver: definition.NewResolver(src, definition.Checks{}), src: src, versions: map[string]int{}}
+}
 
-// revise appends the next revision of an agent and returns it.
-func (s *specs) revise(agent, prompt string) agentrt.Revision {
+// specContent is the definition file every fixture agent is written as.
+func specContent(agent, version, prompt string) string {
+	return fmt.Sprintf("---\napiVersion: saige/v1\nname: %s\nversion: %s\nmodel: offline/scripted\n---\n%s\n", agent, version, prompt)
+}
+
+// revise writes the next major version of an agent and returns it.
+func (s *specs) revise(agent, prompt string) native.Revision {
+	return s.set(native.Spec{Name: agent, Provider: native.ProviderOffline, Model: "scripted", SystemPrompt: prompt})
+}
+
+// set writes spec as the next major version of its agent and returns it. The
+// agents it delegates to must already exist.
+func (s *specs) set(spec native.Spec) native.Revision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rev := agentrt.Revision{
-		Rev: len(s.revs[agent]) + 1,
-		Spec: agentrt.Spec{
-			Name:         agent,
-			Provider:     agentrt.ProviderOffline,
-			Model:        "scripted",
-			SystemPrompt: prompt,
-		},
+	s.versions[spec.Name]++
+	old := definition.AgentSpec{
+		Name: spec.Name, Description: spec.Description, Model: spec.Model, Provider: spec.Provider,
+		SystemPrompt: spec.SystemPrompt, Tools: spec.Tools,
+		Access:     definition.AgentSpecAccess{Spawn: spec.Access.Spawn, WorkspaceAreas: spec.Access.WorkspaceAreas},
+		FallbackOn: spec.FallbackOn, Approvals: spec.Approvals, Approvers: spec.Approvers,
+		SelfApproval: spec.SelfApproval, Answerers: spec.Answerers, TaggedOnly: spec.TaggedOnly,
 	}
-	rev.Hash = fmt.Sprintf("sha256:%s@%d", agent, rev.Rev)
-	s.revs[agent] = append(s.revs[agent], rev)
+	for _, f := range spec.Fallbacks {
+		old.Fallbacks = append(old.Fallbacks, definition.AgentSpecModel{Provider: f.Provider, Model: f.Model})
+	}
+	for _, c := range spec.Sources {
+		old.Sources = append(old.Sources, definition.Corpus{Name: c.Name, URI: c.URI, Options: c.Options})
+	}
+	rec, err := definition.FromAgentSpec(old, s.versions[spec.Name])
+	if err != nil {
+		panic(err)
+	}
+	rec.Tenant, rec.CreatedBy = "acme", "test"
+	if rec, err = s.src.Put(context.Background(), rec); err != nil {
+		panic(err)
+	}
+	a, err := definition.Parse(rec.Content, rec.Policy, definition.Checks{})
+	if err != nil {
+		panic(err)
+	}
+	// The digest a run reports is the resolved one, which needs every
+	// sub-agent to exist. One written before its sub-agents reports the
+	// file's own until then.
+	digest := rec.Digest
+	if pin, err := s.ResolveAt(context.Background(), fixtureTenant, rec.Name, rec.Version); err == nil {
+		digest = pin.Digest
+	}
+	rev := native.Revision{Name: rec.Name, Version: rec.Version, Digest: digest, Spec: a.Spec}
+	fixtures.Store(pinKey(rev), s)
 	return rev
 }
 
-// at overwrites a stored revision, which only a broken control plane would do.
-// It exists so a test can prove that fiber notices.
-func (s *specs) corrupt(agent string, rev int, hash string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.revs[agent][rev-1].Hash = hash
+// latest pins the latest version of agent, as accept would.
+func (s *specs) latest(agent string) (native.Revision, error) {
+	pin, err := s.Resolve(context.Background(), fixtureTenant, agent)
+	if err != nil {
+		return native.Revision{}, err
+	}
+	loaded, err := s.Verify(context.Background(), fixtureTenant, pin)
+	if err != nil {
+		return native.Revision{}, err
+	}
+	rev := native.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
+	fixtures.Store(pinKey(rev), s)
+	return rev, nil
 }
 
-func (s *specs) Latest(_ context.Context, _, agent string) (agentrt.Revision, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	history := s.revs[agent]
-	if len(history) == 0 {
-		return agentrt.Revision{}, fmt.Errorf("no such agent %q", agent)
+// fixtures maps every version a fixture wrote to the fixture, so a test that
+// calls an executor directly can send the request accept would have built.
+var fixtures sync.Map
+
+func pinKey(rev native.Revision) string { return rev.Name + "@" + rev.Version + "#" + rev.Digest }
+
+// withPin is req for rev, pinned now as accept pins it.
+func withPin(req runtime.Request, rev native.Revision) runtime.Request {
+	v, ok := fixtures.Load(pinKey(rev))
+	if !ok {
+		panic("no fixture wrote " + pinKey(rev))
 	}
-	return history[len(history)-1], nil
+	s := v.(*specs)
+	pin, err := s.ResolveAt(context.Background(), fixtureTenant, rev.Name, rev.Version)
+	if err != nil {
+		panic(err)
+	}
+	loaded, err := s.Verify(context.Background(), fixtureTenant, pin)
+	if err != nil {
+		panic(err)
+	}
+	req.Definition = native.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
+	req.Pin, req.Policy = pin, loaded.Agent.Policy
+	return req
 }
 
-func (s *specs) At(_ context.Context, _, agent string, rev int) (agentrt.Revision, error) {
+// edit writes the next version of an agent with its latest spec changed by
+// mod.
+func (s *specs) edit(agent string, mod func(*native.Spec)) native.Revision {
+	rec, err := s.src.Latest(context.Background(), fixtureTenant, agent)
+	if err != nil {
+		panic(err)
+	}
+	a, err := definition.Parse(rec.Content, rec.Policy, definition.Checks{})
+	if err != nil {
+		panic(err)
+	}
+	spec := a.Spec
+	mod(&spec)
+	return s.set(spec)
+}
+
+// corrupt makes a stored version read back with other content, which only a
+// broken control plane would do. It exists so a test can prove that fiber
+// notices.
+func (s *specs) corrupt(agent string, major int, prompt string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	history := s.revs[agent]
-	if rev < 1 || rev > len(history) {
-		return agentrt.Revision{}, fmt.Errorf("agent %q has no revision %d", agent, rev)
+	s.src.mu.Lock()
+	defer s.src.mu.Unlock()
+	s.src.tampered[agent+"@"+fmt.Sprintf("%d.0.0", major)] = prompt
+}
+
+// anyTenant is a Source that keeps every tenant's definitions as one, and can
+// read a version back tampered with.
+type anyTenant struct {
+	definition.Source
+	mu       sync.Mutex
+	tampered map[string]string // name@version -> prompt
+}
+
+const fixtureTenant = "any"
+
+func (a *anyTenant) Put(ctx context.Context, r definition.Record) (definition.Record, error) {
+	r.Tenant = fixtureTenant
+	return a.Source.Put(ctx, r)
+}
+
+func (a *anyTenant) Get(ctx context.Context, _, name, version string) (definition.Record, error) {
+	r, err := a.Source.Get(ctx, fixtureTenant, name, version)
+	a.mu.Lock()
+	prompt, ok := a.tampered[name+"@"+version]
+	a.mu.Unlock()
+	if err == nil && ok {
+		r.Content = specContent(name, version, prompt)
 	}
-	return history[rev-1], nil
+	return r, err
+}
+
+func (a *anyTenant) Versions(ctx context.Context, _, name string) ([]definition.Record, error) {
+	return a.Source.Versions(ctx, fixtureTenant, name)
+}
+
+func (a *anyTenant) Latest(ctx context.Context, _, name string) (definition.Record, error) {
+	return a.Source.Latest(ctx, fixtureTenant, name)
+}
+
+func (a *anyTenant) List(ctx context.Context, _ string, page definition.Page) ([]definition.Record, string, error) {
+	return a.Source.List(ctx, fixtureTenant, page)
+}
+
+func (a *anyTenant) Retire(ctx context.Context, _, name, by string) error {
+	return a.Source.Retire(ctx, fixtureTenant, name, by)
 }
 
 // recorder is a bus that keeps every Publish call, deduplication included, so a
@@ -87,11 +212,11 @@ func (s *specs) At(_ context.Context, _, agent string, rev int) (agentrt.Revisio
 // broker decided to keep.
 type recorder struct {
 	mu     sync.Mutex
-	events []envelope.Event
-	fail   func(envelope.Event) error
+	events []event.Envelope
+	fail   func(event.Envelope) error
 }
 
-func (r *recorder) Publish(_ context.Context, e envelope.Event) error {
+func (r *recorder) Publish(_ context.Context, e event.Envelope) error {
 	r.mu.Lock()
 	fail := r.fail
 	r.mu.Unlock()
@@ -106,43 +231,43 @@ func (r *recorder) Publish(_ context.Context, e envelope.Event) error {
 	return nil
 }
 
-func (r *recorder) all() []envelope.Event {
+func (r *recorder) all() []event.Envelope {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]envelope.Event(nil), r.events...)
+	return append([]event.Envelope(nil), r.events...)
 }
 
-func (r *recorder) kinds() []envelope.Kind {
-	out := []envelope.Kind{}
+func (r *recorder) kinds() []string {
+	out := []string{}
 	for _, e := range r.all() {
-		out = append(out, e.Kind)
+		out = append(out, e.Type)
 	}
 	return out
 }
 
-func (r *recorder) ofKind(k envelope.Kind) []envelope.Event {
-	var out []envelope.Event
+func (r *recorder) ofKind(k string) []event.Envelope {
+	var out []event.Envelope
 	for _, e := range r.all() {
-		if e.Kind == k {
+		if e.Type == k {
 			out = append(out, e)
 		}
 	}
 	return out
 }
 
-func (r *recorder) failWhen(fn func(envelope.Event) error) {
+func (r *recorder) failWhen(fn func(event.Envelope) error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.fail = fn
 }
 
-// executor is an Executor that emits a scripted stream and counts how often it
+// executor is a turn that emits a scripted stream and counts how often it
 // actually ran, which is how a test sees whether replay paid for the model twice.
 type executor struct {
 	mu       sync.Mutex
 	runs     int
 	requests []runtime.Request
-	chunks   []agentrt.Chunk
+	chunks   []event.Body
 	err      error
 	failures int
 	answer   string
@@ -153,7 +278,7 @@ type executor struct {
 	prompt func(runtime.Request) string
 }
 
-func newExecutor(answer string, chunks ...agentrt.Chunk) *executor {
+func newExecutor(answer string, chunks ...event.Body) *executor {
 	return &executor{answer: answer, chunks: chunks}
 }
 
@@ -174,7 +299,7 @@ func (e *executor) failNext(n int, err error) {
 	e.err, e.failures = err, n
 }
 
-func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, agentrt.Chunk) error) (runtime.Outcome, error) {
+func (e *executor) Execute(ctx context.Context, req runtime.Request, emit func(context.Context, event.Body) error) (runtime.Outcome, error) {
 	e.mu.Lock()
 	e.runs++
 	e.requests = append(e.requests, req)
@@ -220,13 +345,9 @@ func (e *executor) seen() []runtime.Request {
 	return append([]runtime.Request(nil), e.requests...)
 }
 
-func textChunk(t *testing.T, s string) agentrt.Chunk {
+func textChunk(t *testing.T, s string) event.Body {
 	t.Helper()
-	b, err := payload.Encode(payload.Text{Text: s})
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	return agentrt.Chunk{Kind: envelope.KindText, Payload: b}
+	return event.Text{Text: s}
 }
 
 // harness is a runtime wired to in-memory anchor storage.
@@ -245,7 +366,7 @@ func newHarness(t *testing.T, exec *executor, opts ...runtime.Option) *harness {
 	q := dqueue.NewMemory()
 	bus := &recorder{}
 	sp := newSpecs()
-	rt, err := runtime.New(anchor.New(lgr, q), sp, bus, exec, opts...)
+	rt, err := runtime.New(anchor.New(lgr, q), sp, bus, append([]runtime.Option{runtime.WithRuntime(runtime.AsRuntime(exec))}, opts...)...)
 	if err != nil {
 		t.Fatalf("runtime.New: %v", err)
 	}
@@ -273,8 +394,63 @@ func (h *harness) work(t *testing.T) {
 	})
 }
 
-func tag(agent, id, text string) envelope.Tag {
-	return envelope.Tag{
+// fixture is a request a test raises: the fields of the event it posts and
+// the agent that answers it.
+type fixture struct {
+	ID          string
+	Tenant      string
+	Agent       string
+	Origin      string
+	Source      address.Address
+	Text        string
+	Actor       event.Actor
+	Meta        map[string]string
+	Attachments []attachment.Attachment
+	At          time.Time
+}
+
+// event is the message.posted.v1 the fixture posts. With a source it
+// publishes on that surface; without one it has no surface to answer into.
+func (f fixture) event() event.Envelope {
+	e := event.Envelope{
+		ID:     f.ID,
+		Type:   event.TypeMessagePosted,
+		Time:   f.At,
+		Tenant: f.Tenant,
+		Data: event.MessagePosted{Request: event.Request{
+			Text: f.Text, Actor: f.Actor, Mentions: []string{f.Agent},
+			Attachments: f.Attachments, Context: f.Meta,
+		}},
+	}
+	if f.Source.IsZero() {
+		e.Source = f.Origin + ":" + f.Tenant
+		e.Channel = f.Origin + "://" + f.Tenant + "/" + f.Origin
+	} else {
+		e.Source = f.Source.String()
+		e.Channel = e.Source
+	}
+	return e
+}
+
+// runID is the run Accept starts for the fixture.
+func (f fixture) runID() string { return runtime.RunKey(f.Tenant, f.ID, f.Agent) }
+
+// key is the thread the fixture's run journals into.
+func (f fixture) key() thread.Key { return thread.KeyOf(f.event(), f.Agent) }
+
+// accept accepts the fixture's run.
+func accept(ctx context.Context, rt *runtime.Runtime, f fixture) (runtime.Acceptance, error) {
+	return rt.Accept(ctx, f.event(), f.Agent)
+}
+
+// contextOf reads a request's host context, for a message id function.
+func contextOf(e event.Envelope, key string) string {
+	r, _ := event.RequestOf(e.Data)
+	return r.Context[key]
+}
+
+func tag(agent, id, text string) fixture {
+	return fixture{
 		ID:     id,
 		Tenant: "acme",
 		Agent:  agent,
@@ -298,7 +474,7 @@ func TestRunIDIsADeterministicTopicSafeFunctionOfTenantAndTagID(t *testing.T) {
 	for _, tenant := range []string{"acme", "globex"} {
 		for _, id := range ids {
 			got := runtime.RunID(tenant, id)
-			if _, err := topic.Run("docs-bot", got); err != nil {
+			if err := runtime.CheckRun("docs-bot", got); err != nil {
 				t.Errorf("RunID(%q, %q) is %q, which is not a usable topic segment: %v", tenant, id, got, err)
 			}
 			if runtime.RunID(tenant, id) != got {
@@ -345,19 +521,19 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 	second := tag("docs-bot", "Ev-shared", "globex's question")
 	second.Tenant = "globex"
 
-	a, err := h.rt.Accept(context.Background(), first)
+	a, err := accept(context.Background(), h.rt, first)
 	if err != nil {
 		t.Fatalf("accept for acme: %v", err)
 	}
-	b, err := h.rt.Accept(context.Background(), second)
+	b, err := accept(context.Background(), h.rt, second)
 	if err != nil {
 		t.Fatalf("accept for globex: %v", err)
 	}
 	if a.RunID == b.RunID {
 		t.Fatalf("both tenants were given run %q", a.RunID)
 	}
-	if a.Topic.String() == b.Topic.String() {
-		t.Fatalf("both tenants were given topic %q", a.Topic)
+	if a.Tenant == b.Tenant {
+		t.Fatalf("both tenants publish under tenant %q", a.Tenant)
 	}
 
 	for _, want := range []struct {
@@ -373,12 +549,13 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 		if err := json.Unmarshal(rec.Input, &in); err != nil {
 			t.Fatalf("decode run %s: %v", want.runID, err)
 		}
-		if in.Tag.Tenant != want.tenant || in.Tag.Text != want.text {
-			t.Errorf("run %s holds tenant %q text %q, want %q %q", want.runID, in.Tag.Tenant, in.Tag.Text, want.tenant, want.text)
+		req, _ := event.RequestOf(in.Trigger.Data)
+		if in.Trigger.Tenant != want.tenant || req.Text != want.text {
+			t.Errorf("run %s holds tenant %q text %q, want %q %q", want.runID, in.Trigger.Tenant, req.Text, want.tenant, want.text)
 		}
 	}
 	for _, e := range h.bus.all() {
-		switch e.RunID {
+		switch e.Run {
 		case a.RunID:
 			if e.Tenant != "acme" {
 				t.Errorf("acme's run published an event for tenant %q", e.Tenant)
@@ -388,12 +565,12 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 				t.Errorf("globex's run published an event for tenant %q", e.Tenant)
 			}
 		default:
-			t.Errorf("an event was published for unknown run %q", e.RunID)
+			t.Errorf("an event was published for unknown run %q", e.Run)
 		}
 	}
 
 	// A redelivery within a tenant still joins that tenant's run.
-	again, err := h.rt.Accept(context.Background(), first)
+	again, err := accept(context.Background(), h.rt, first)
 	if err != nil || again.RunID != a.RunID {
 		t.Errorf("acme's redelivery got run %q, %v; want %q", again.RunID, err, a.RunID)
 	}
@@ -404,14 +581,14 @@ func TestTheSameTagIDInTwoTenantsIsTwoRuns(t *testing.T) {
 func TestLifecycleOrderOnSuccess(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, newExecutor("the docs are updated", func() agentrt.Chunk { return agentrt.Chunk{} }()))
+	h := newHarness(t, newExecutor("the docs are updated", event.Text{}))
 	h.exec.chunks = nil // replaced below, once t is available for encoding
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "the docs "), textChunk(t, "are updated")}
+	h.exec.chunks = []event.Body{textChunk(t, "the docs "), textChunk(t, "are updated")}
 	h.specs.revise("docs-bot", "you document things")
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev1", "update the docs"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev1", "update the docs"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -423,12 +600,12 @@ func TestLifecycleOrderOnSuccess(t *testing.T) {
 		t.Errorf("run output is %q, want the agent's answer", out.Text)
 	}
 
-	want := []envelope.Kind{
-		envelope.KindAccepted,
-		envelope.KindStarted,
-		envelope.KindText,
-		envelope.KindText,
-		envelope.KindCompleted,
+	want := []string{
+		event.TypeAccepted,
+		event.TypeStarted,
+		event.TypeText,
+		event.TypeText,
+		event.TypeCompleted,
 	}
 	if got := h.bus.kinds(); !sameKinds(got, want) {
 		t.Fatalf("lifecycle is %v, want %v", got, want)
@@ -447,7 +624,7 @@ func TestLifecycleOrderOnSuccess(t *testing.T) {
 	if last.Seq != out.LastSeq {
 		t.Errorf("Output.LastSeq is %d, want the completed event's seq %d", out.LastSeq, last.Seq)
 	}
-	body, err := payload.Decode[payload.Lifecycle](last)
+	body, err := decode[lifecycle](last)
 	if err != nil {
 		t.Fatalf("decode completed: %v", err)
 	}
@@ -465,13 +642,13 @@ func TestEveryEventCarriesRunIdentity(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("done"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "done")}
+	h.exec.chunks = []event.Body{textChunk(t, "done")}
 	h.specs.revise("docs-bot", "v1")
 	rev := h.specs.revise("docs-bot", "v2")
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev2", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev2", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -479,31 +656,27 @@ func TestEveryEventCarriesRunIdentity(t *testing.T) {
 		t.Fatalf("Result: %v", err)
 	}
 
-	wantTopic, err := topic.Run("docs-bot", acc.RunID)
-	if err != nil {
-		t.Fatalf("topic.Run: %v", err)
+	if acc.Channel == "" || !strings.HasPrefix(acc.Channel, "github://") {
+		t.Fatalf("accepted on channel %q, want the trigger's github channel", acc.Channel)
 	}
 	for _, e := range h.bus.all() {
-		if e.Topic.String() != wantTopic.String() {
-			t.Errorf("%s published on %s, want the run topic %s", e.Kind, e.Topic, wantTopic)
+		if e.Channel != acc.Channel {
+			t.Errorf("%s published on %s, want the trigger's channel %s", e.Type, e.Channel, acc.Channel)
 		}
-		if e.RunID != acc.RunID {
-			t.Errorf("%s carries run %q, want %q", e.Kind, e.RunID, acc.RunID)
+		if e.Run != acc.RunID {
+			t.Errorf("%s carries run %q, want %q", e.Type, e.Run, acc.RunID)
 		}
 		if e.Tenant != "acme" {
-			t.Errorf("%s carries tenant %q, want acme", e.Kind, e.Tenant)
+			t.Errorf("%s carries tenant %q, want acme", e.Type, e.Tenant)
 		}
 		if e.Agent != "docs-bot" {
-			t.Errorf("%s carries agent %q, want docs-bot", e.Kind, e.Agent)
+			t.Errorf("%s carries agent %q, want docs-bot", e.Type, e.Agent)
 		}
-		if e.Rev != rev.Rev {
-			t.Errorf("%s carries rev %d, want the pinned %d", e.Kind, e.Rev, rev.Rev)
+		if e.Version != rev.Version || e.Digest != rev.Digest {
+			t.Errorf("%s carries version %q digest %q, want the pinned %s %q", e.Type, e.Version, e.Digest, rev.Version, rev.Digest)
 		}
-		if e.Origin != "github" {
-			t.Errorf("%s carries origin %q, want github", e.Kind, e.Origin)
-		}
-		if e.At.IsZero() {
-			t.Errorf("%s has no timestamp", e.Kind)
+		if e.Time.IsZero() {
+			t.Errorf("%s has no timestamp", e.Type)
 		}
 	}
 }
@@ -516,30 +689,30 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("answered"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "answered")}
+	h.exec.chunks = []event.Body{textChunk(t, "answered")}
 	for i := 1; i <= 5; i++ {
 		h.specs.revise("docs-bot", fmt.Sprintf("revision %d instructions", i))
 	}
 	pinned := h.specs.revise("docs-bot", "revision 6 instructions")
-	if pinned.Rev != 6 {
-		t.Fatalf("fixture pinned revision %d, want 6", pinned.Rev)
+	if pinned.Version != "6.0.0" {
+		t.Fatalf("fixture pinned version %s, want 6.0.0", pinned.Version)
 	}
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev6", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev6", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	if acc.Rev != 6 {
-		t.Fatalf("accepted at revision %d, want 6", acc.Rev)
+	if acc.Version != "6.0.0" {
+		t.Fatalf("accepted at version %s, want 6.0.0", acc.Version)
 	}
 
 	// The agent is revised while the run sits in the queue, which is exactly
 	// the race a real deployment has: a tag arrives, someone ships a prompt
 	// change, and the worker picks the run up afterwards.
 	seven := h.specs.revise("docs-bot", "revision 7 instructions")
-	if seven.Rev != 7 {
-		t.Fatalf("fixture revised to %d, want 7", seven.Rev)
+	if seven.Version != "7.0.0" {
+		t.Fatalf("fixture revised to %s, want 7.0.0", seven.Version)
 	}
 
 	h.work(t)
@@ -552,18 +725,18 @@ func TestARunPinnedToARevisionStillExecutesItAfterARevise(t *testing.T) {
 		t.Fatalf("the executor ran %d times, want 1", len(seen))
 	}
 	req := seen[0]
-	if req.Rev() != 6 {
-		t.Errorf("the turn executed revision %d, want the pinned 6", req.Rev())
+	if req.Version() != "6.0.0" {
+		t.Errorf("the turn executed version %s, want the pinned 6.0.0", req.Version())
 	}
-	if got := req.Revision.Spec.SystemPrompt; got != "revision 6 instructions" {
+	if got := req.Definition.Spec.SystemPrompt; got != "revision 6 instructions" {
 		t.Errorf("the turn executed the prompt %q, want revision 6's", got)
 	}
-	if got := req.Revision.Hash; got != pinned.Hash {
-		t.Errorf("the turn executed hash %q, want the pinned %q", got, pinned.Hash)
+	if got := req.Definition.Digest; got != pinned.Digest {
+		t.Errorf("the turn executed digest %q, want the pinned %q", got, pinned.Digest)
 	}
 	for _, e := range h.bus.all() {
-		if e.Rev != 6 {
-			t.Errorf("%s reports revision %d, want the pinned 6", e.Kind, e.Rev)
+		if e.Version != "6.0.0" {
+			t.Errorf("%s reports version %q, want the pinned 6", e.Type, e.Version)
 		}
 	}
 }
@@ -575,17 +748,17 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("answered"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "answered")}
+	h.exec.chunks = []event.Body{textChunk(t, "answered")}
 	h.specs.revise("docs-bot", "revision 1 instructions")
 
 	ctx := context.Background()
-	first, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-dup", "hello"))
+	first, err := accept(ctx, h.rt, tag("docs-bot", "Ev-dup", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
 	h.specs.revise("docs-bot", "revision 2 instructions")
 
-	second, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-dup", "hello"))
+	second, err := accept(ctx, h.rt, tag("docs-bot", "Ev-dup", "hello"))
 	if err != nil {
 		t.Fatalf("Accept (redelivery): %v", err)
 	}
@@ -600,8 +773,8 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 	if n := h.exec.count(); n != 1 {
 		t.Fatalf("the turn executed %d times, want once", n)
 	}
-	if rev := h.exec.seen()[0].Rev(); rev != 1 {
-		t.Fatalf("the run executed revision %d, want the revision pinned by the first delivery", rev)
+	if v := h.exec.seen()[0].Version(); v != "1.0.0" {
+		t.Fatalf("the run executed version %s, want the version pinned by the first delivery", v)
 	}
 	// Both deliveries announce, and the redelivery resolves the revision that
 	// is current when IT arrives — it cannot know the run already exists,
@@ -610,7 +783,7 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 	// SeqAccepted, so the broker's first-write-wins rule keeps the first and
 	// discards the redelivery's, revision and all. This recorder is a spy on
 	// Publish rather than a broker, so it sees both.
-	accepted := h.bus.ofKind(envelope.KindAccepted)
+	accepted := h.bus.ofKind(event.TypeAccepted)
 	if len(accepted) != 2 {
 		t.Fatalf("got %d accepted events, want 2, one per delivery", len(accepted))
 	}
@@ -619,18 +792,18 @@ func TestARedeliveredTagJoinsTheRunItDuplicated(t *testing.T) {
 			t.Errorf("an accepted event landed at seq %d, want %d: reusing the sequence is the only thing that lets the broker collapse the redelivery", e.Seq, runtime.SeqAccepted)
 		}
 	}
-	if accepted[0].Rev != 1 {
-		t.Errorf("the accepted event the broker keeps reports revision %d; the run pinned 1", accepted[0].Rev)
+	if accepted[0].Version != "1.0.0" {
+		t.Errorf("the accepted event the broker keeps reports version %q; the run pinned 1.0.0", accepted[0].Version)
 	}
 	// Everything the run itself produced — which is everything a subscriber
 	// will actually see, since the redelivery's announcement never survives —
 	// reports the pinned revision.
 	for _, e := range h.bus.all() {
-		if e.Kind == envelope.KindAccepted {
+		if e.Type == event.TypeAccepted {
 			continue
 		}
-		if e.Rev != 1 {
-			t.Errorf("%s reports revision %d; the run pinned 1", e.Kind, e.Rev)
+		if e.Version != "1.0.0" {
+			t.Errorf("%s reports version %q; the run pinned 1.0.0", e.Type, e.Version)
 		}
 	}
 }
@@ -643,12 +816,12 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 	exec := newExecutor("")
 	exec.err = anchor.NonRetryable(errors.New("the model refused"))
 	h := newHarness(t, exec)
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "partial ")}
+	h.exec.chunks = []event.Body{textChunk(t, "partial ")}
 	h.specs.revise("docs-bot", "v1")
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-fail", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-fail", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -656,17 +829,17 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 		t.Fatal("the run succeeded, want a terminal failure")
 	}
 
-	want := []envelope.Kind{
-		envelope.KindAccepted,
-		envelope.KindStarted,
-		envelope.KindText,
-		envelope.KindFailed,
+	want := []string{
+		event.TypeAccepted,
+		event.TypeStarted,
+		event.TypeText,
+		event.TypeFailed,
 	}
 	if got := h.bus.kinds(); !sameKinds(got, want) {
 		t.Fatalf("lifecycle is %v, want %v", got, want)
 	}
-	failed := h.bus.ofKind(envelope.KindFailed)
-	body, err := payload.Decode[payload.Lifecycle](failed[0])
+	failed := h.bus.ofKind(event.TypeFailed)
+	body, err := decode[lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode failed event: %v", err)
 	}
@@ -681,7 +854,7 @@ func TestLifecycleOrderOnFailure(t *testing.T) {
 	}
 	// The partial answer stays on the stream: a sink has already rendered it,
 	// and retracting it would make the thread disagree with the run.
-	if len(h.bus.ofKind(envelope.KindText)) != 1 {
+	if len(h.bus.ofKind(event.TypeText)) != 1 {
 		t.Errorf("the partial output was not published")
 	}
 }
@@ -701,7 +874,7 @@ func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) 
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-retry", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-retry", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -714,8 +887,8 @@ func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) 
 		t.Errorf("run output is %q, want the second attempt's answer", out.Text)
 	}
 
-	failed := h.bus.ofKind(envelope.KindFailed)
-	body, err := payload.Decode[payload.Lifecycle](failed[0])
+	failed := h.bus.ofKind(event.TypeFailed)
+	body, err := decode[lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -724,14 +897,14 @@ func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) 
 	}
 	// The second attempt announces itself as a resumption, and everything it
 	// publishes sits above everything the first attempt published.
-	resumed := h.bos(envelope.KindResumed)
+	resumed := h.bos(event.TypeResumed)
 	if len(resumed) != 1 {
 		t.Fatalf("got %d resumed events, want 1", len(resumed))
 	}
 	if resumed[0].Seq <= failed[0].Seq {
 		t.Errorf("the resumed event is seq %d, at or below the failed attempt's %d", resumed[0].Seq, failed[0].Seq)
 	}
-	completed := h.bus.ofKind(envelope.KindCompleted)
+	completed := h.bus.ofKind(event.TypeCompleted)
 	if len(completed) != 1 {
 		t.Fatalf("got %d completed events, want 1", len(completed))
 	}
@@ -745,7 +918,7 @@ func TestARetryableFailureIsReportedAsNonTerminalAndTheRunResumes(t *testing.T) 
 
 // bos is ofKind under a shorter name, for the assertions that read better in one
 // line.
-func (h *harness) bos(k envelope.Kind) []envelope.Event { return h.bus.ofKind(k) }
+func (h *harness) bos(k string) []event.Envelope { return h.bus.ofKind(k) }
 
 // Replay must not pay for the model twice: the agent's activity is memoized, so a
 // re-execution of the same attempt publishes the identical sequence — which the
@@ -754,11 +927,11 @@ func TestReplayingAnAttemptRepublishesTheIdenticalSequence(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor("answered"))
-	h.exec.chunks = []agentrt.Chunk{textChunk(t, "ans"), textChunk(t, "wered")}
+	h.exec.chunks = []event.Body{textChunk(t, "ans"), textChunk(t, "wered")}
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-replay", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-replay", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -800,7 +973,7 @@ func TestReplayingAnAttemptRepublishesTheIdenticalSequence(t *testing.T) {
 	// re-executes; the agent's deltas are not, because the agent is a nested
 	// activity whose result is memoized and whose emits therefore never happen
 	// a second time. That asymmetry is the point of the split.
-	if got := kindsOf(replayed); !sameKinds(got, []envelope.Kind{envelope.KindStarted, envelope.KindCompleted}) {
+	if got := kindsOf(replayed); !sameKinds(got, []string{event.TypeStarted, event.TypeCompleted}) {
 		t.Errorf("the replay published %v, want the turn's lifecycle only", got)
 	}
 	// And the replay is invisible to a subscriber: every event it publishes
@@ -827,7 +1000,7 @@ func TestReplayingAnAttemptRepublishesTheIdenticalSequence(t *testing.T) {
 	}
 	third := h.bus.all()[before:]
 	for _, e := range third {
-		if e.Kind == envelope.KindText {
+		if e.Type == event.TypeText {
 			t.Errorf("a memoized replay re-published the agent's output: seq %d", e.Seq)
 		}
 	}
@@ -839,7 +1012,7 @@ func TestReplayingAnAttemptRepublishesTheIdenticalSequence(t *testing.T) {
 	}
 	for _, e := range third {
 		if e.Seq <= highest {
-			t.Errorf("attempt 2 published %s at seq %d, at or below attempt 1's high-water mark %d", e.Kind, e.Seq, highest)
+			t.Errorf("attempt 2 published %s at seq %d, at or below attempt 1's high-water mark %d", e.Type, e.Seq, highest)
 		}
 	}
 }
@@ -855,18 +1028,18 @@ func TestAParkedRunPublishesParked(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-park", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-park", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
 	h.work(t)
-	waitFor(t, func() bool { return len(h.bus.ofKind(envelope.KindParked)) == 1 })
+	waitFor(t, func() bool { return len(h.bus.ofKind(event.TypeParked)) == 1 })
 
-	if got := len(h.bus.ofKind(envelope.KindFailed)); got != 0 {
+	if got := len(h.bus.ofKind(event.TypeFailed)); got != 0 {
 		t.Errorf("a parked run published %d failed events, want none", got)
 	}
-	parked := h.bus.ofKind(envelope.KindParked)[0]
-	body, err := payload.Decode[payload.Lifecycle](parked)
+	parked := h.bus.ofKind(event.TypeParked)[0]
+	body, err := decode[lifecycle](parked)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -882,8 +1055,8 @@ func TestAParkedRunPublishesParked(t *testing.T) {
 	}
 }
 
-// A revision is immutable by contract. One whose content hash moved under a
-// pinned number is corruption, and executing it would silently run a definition
+// A version is immutable by contract. One whose content moved under a pinned
+// version is corruption, and executing it would silently run a definition
 // the run never agreed to.
 func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	t.Parallel()
@@ -892,7 +1065,7 @@ func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	h.specs.revise("docs-bot", "v1")
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-hash", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-hash", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -905,18 +1078,18 @@ func TestAPinnedRevisionWhoseHashMovedFailsTerminally(t *testing.T) {
 	if n := h.exec.count(); n != 0 {
 		t.Errorf("the executor ran %d times, want 0: the mismatch must be caught before the model", n)
 	}
-	failed := h.bus.ofKind(envelope.KindFailed)
+	failed := h.bus.ofKind(event.TypeFailed)
 	if len(failed) == 0 {
 		t.Fatal("no failure was published")
 	}
-	body, err := payload.Decode[payload.Lifecycle](failed[0])
+	body, err := decode[lifecycle](failed[0])
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !body.Terminal {
 		t.Error("a changed revision was reported as retryable")
 	}
-	if !strings.Contains(body.Error, "immutable revision changed") {
+	if !strings.Contains(body.Error, "pin does not hold") || !strings.Contains(body.Error, "content changed under its version") {
 		t.Errorf("failure reports %q, want it to name the mismatch", body.Error)
 	}
 }
@@ -927,81 +1100,72 @@ func TestAnUnknownAgentIsRefusedAtAcceptTime(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor(""))
-	if _, err := h.rt.Accept(context.Background(), tag("nobody", "Ev-x", "hello")); err == nil {
+	if _, err := accept(context.Background(), h.rt, tag("nobody", "Ev-x", "hello")); err == nil {
 		t.Fatal("Accept succeeded for an unknown agent")
 	}
 	if got := len(h.bus.all()); got != 0 {
 		t.Errorf("%d events were published for a refused tag, want none", got)
 	}
-	if got, err := h.ledger.GetRun(context.Background(), runtime.RunID("acme", "Ev-x")); err == nil {
+	if got, err := h.ledger.GetRun(context.Background(), runtime.RunKey("acme", "Ev-x", "nobody")); err == nil {
 		t.Errorf("a run %+v was accepted for an unknown agent", got)
 	}
 }
 
-// A malformed tag never becomes a run.
-func TestAMalformedTagIsRefused(t *testing.T) {
+// A malformed trigger never becomes a run.
+func TestAMalformedTriggerIsRefused(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, newExecutor(""))
 	h.specs.revise("docs-bot", "v1")
 	tests := []struct {
 		name string
-		tag  envelope.Tag
+		tag  fixture
 	}{
-		{"no id", envelope.Tag{Agent: "docs-bot", Origin: "github"}},
-		{"no agent", envelope.Tag{ID: "Ev1", Origin: "github"}},
-		{"no origin", envelope.Tag{ID: "Ev1", Agent: "docs-bot"}},
+		{"no id", fixture{Tenant: "acme", Agent: "docs-bot", Origin: "github", At: time.Now()}},
+		{"no agent", fixture{ID: "Ev1", Tenant: "acme", Origin: "github", At: time.Now()}},
+		{"no time", fixture{ID: "Ev1", Tenant: "acme", Agent: "docs-bot", Origin: "github"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := h.rt.Accept(context.Background(), tc.tag); !errors.Is(err, envelope.ErrInvalid) {
-				t.Fatalf("Accept returned %v, want an envelope.ErrInvalid", err)
+			if _, err := accept(context.Background(), h.rt, tc.tag); !errors.Is(err, runtime.ErrInvalid) {
+				t.Fatalf("Accept returned %v, want a runtime.ErrInvalid", err)
 			}
 		})
 	}
 }
 
 // The journal is the run's own durable record of its stream, and it has to give
-// events back, not a shape a reader has to guess at. envelope.Event does not
-// survive JSON on its own, which is the reason Entry exists.
+// events back: an envelope as it was published, and an entry written before
+// the event union read through the legacy table.
 func TestJournalEntriesRoundTripBackIntoEvents(t *testing.T) {
 	t.Parallel()
 
-	tp, err := topic.Run("docs-bot", "run_1")
+	at := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	want := event.Envelope{
+		ID: "run_1:1048577", Source: "fiber://run/run_1", Type: event.TypeText,
+		Channel: "github://acme/fiber", Time: at, Hops: 1, Tenant: "acme",
+		Run: "run_1", Seq: 1048577, Agent: "docs-bot", Version: "6",
+		Data: event.Text{Text: "hi"},
+	}
+	encoded, err := json.Marshal(want)
 	if err != nil {
-		t.Fatalf("topic.Run: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
-	want := envelope.Event{
-		Seq: 1048577, Topic: tp, RunID: "run_1", Tenant: "acme", Agent: "docs-bot",
-		Rev: 6, Origin: "github", Kind: envelope.KindText,
-		Payload: []byte(`{"text":"hi"}`),
-		At:      time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC),
-	}
-
-	raw, err := json.Marshal(runtime.EntryOf(want))
-	if err != nil {
-		t.Fatalf("marshal entry: %v", err)
-	}
-	var entry runtime.Entry
-	if err := json.Unmarshal(raw, &entry); err != nil {
-		t.Fatalf("unmarshal entry: %v", err)
-	}
-	got, err := entry.Event()
-	if err != nil {
-		t.Fatalf("Event: %v", err)
-	}
-	if got.Topic.String() != want.Topic.String() {
-		t.Errorf("topic is %q, want %q", got.Topic, want.Topic)
-	}
-	if string(got.Payload) != string(want.Payload) {
-		t.Errorf("payload is %s, want %s", got.Payload, want.Payload)
-	}
-	// Compare the rest field by field: an Event holds a topic and a payload,
-	// neither of which is comparable with ==.
-	if got.Seq != want.Seq || got.RunID != want.RunID || got.Tenant != want.Tenant ||
-		got.Agent != want.Agent || got.Rev != want.Rev || got.Origin != want.Origin ||
-		got.Kind != want.Kind || !got.At.Equal(want.At) {
-		t.Errorf("event is %+v, want %+v", got, want)
+	old := []byte(`{"seq":1048577,"topic":"agent:docs-bot:run_1","run_id":"run_1","tenant":"acme",` +
+		`"agent":"docs-bot","rev":6,"origin":"github","kind":"delta.text","payload":{"text":"hi"},"at":"2026-07-26T12:00:00Z"}`)
+	for name, entry := range map[string][]byte{"envelope": encoded, "before the union": old} {
+		got, err := runtime.DecodeEntry(entry)
+		if err != nil {
+			t.Fatalf("%s: DecodeEntry: %v", name, err)
+		}
+		body, ok := got.Data.(event.Text)
+		if !ok || body.Text != "hi" {
+			t.Errorf("%s: body is %#v, want the text", name, got.Data)
+		}
+		if got.Type != want.Type || got.Seq != want.Seq || got.Run != want.Run || got.Tenant != want.Tenant ||
+			got.Agent != want.Agent || got.Version != want.Version || !got.Time.Equal(want.Time) {
+			t.Errorf("%s: event is %+v, want %+v", name, got, want)
+		}
 	}
 }
 
@@ -1014,9 +1178,9 @@ func TestAPublishFailureFailsTheAttempt(t *testing.T) {
 	h := newHarness(t, newExecutor("answered"))
 	h.specs.revise("docs-bot", "v1")
 	var once sync.Once
-	h.bus.failWhen(func(e envelope.Event) error {
+	h.bus.failWhen(func(e event.Envelope) error {
 		var err error
-		if e.Kind == envelope.KindCompleted {
+		if e.Type == event.TypeCompleted {
 			once.Do(func() { err = errors.New("broker unreachable") })
 		}
 		return err
@@ -1024,7 +1188,7 @@ func TestAPublishFailureFailsTheAttempt(t *testing.T) {
 	h.work(t)
 
 	ctx := context.Background()
-	acc, err := h.rt.Accept(ctx, tag("docs-bot", "Ev-pub", "hello"))
+	acc, err := accept(ctx, h.rt, tag("docs-bot", "Ev-pub", "hello"))
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
@@ -1036,14 +1200,14 @@ func TestAPublishFailureFailsTheAttempt(t *testing.T) {
 	if n := h.exec.count(); n != 1 {
 		t.Errorf("the executor ran %d times, want 1: the model must not be paid for twice", n)
 	}
-	if got := len(h.bus.ofKind(envelope.KindCompleted)); got != 1 {
+	if got := len(h.bus.ofKind(event.TypeCompleted)); got != 1 {
 		t.Errorf("%d completed events landed, want 1", got)
 	}
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
 
-func sameKinds(got, want []envelope.Kind) bool {
+func sameKinds(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
 	}
@@ -1055,18 +1219,18 @@ func sameKinds(got, want []envelope.Kind) bool {
 	return true
 }
 
-func fingerprint(events []envelope.Event) []string {
+func fingerprint(events []event.Envelope) []string {
 	out := make([]string, 0, len(events))
 	for _, e := range events {
-		out = append(out, fmt.Sprintf("%d:%s:%s", e.Seq, e.Kind, e.Payload))
+		out = append(out, fmt.Sprintf("%d:%s:%s", e.Seq, e.Type, raw(e)))
 	}
 	return out
 }
 
-func kindsOf(events []envelope.Event) []envelope.Kind {
-	out := make([]envelope.Kind, 0, len(events))
+func kindsOf(events []event.Envelope) []string {
+	out := make([]string, 0, len(events))
 	for _, e := range events {
-		out = append(out, e.Kind)
+		out = append(out, e.Type)
 	}
 	return out
 }
@@ -1083,4 +1247,75 @@ func waitFor(t *testing.T, cond func() bool) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// A run key is "r" and 32 hex digits, stable for one (tenant, event,
+// subscriber), different for every other subscriber, and never a RunID.
+func TestRunKeyIsDomainSeparatedPerSubscriber(t *testing.T) {
+	a := runtime.RunKey("acme", "Ev-1", "docs-bot")
+	if len(a) != 33 || a[0] != 'r' || strings.Trim(a[1:], "0123456789abcdef") != "" {
+		t.Fatalf("RunKey = %q; want r and 32 hex digits", a)
+	}
+	if runtime.RunKey("acme", "Ev-1", "docs-bot") != a {
+		t.Fatal("RunKey is not deterministic")
+	}
+	for _, other := range []string{
+		runtime.RunKey("acme", "Ev-1", "reviewer"),
+		runtime.RunKey("globex", "Ev-1", "docs-bot"),
+		runtime.RunKey("acme", "Ev-1d", "ocs-bot"),
+		runtime.RunID("acme", "Ev-1"),
+	} {
+		if other == a {
+			t.Fatalf("%q collides with RunKey(acme, Ev-1, docs-bot)", other)
+		}
+	}
+}
+
+// With the ledger to read, a redelivery joins its run from the stored pin:
+// it does not resolve again, so a retired agent cannot fail it and a newer
+// version cannot change what it reports, and it announces nothing again.
+func TestARedeliveryReadsItsRunFromTheLedger(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, newExecutor("answered"))
+	h.rt = mustRuntime(t, h, runtime.WithStopLedger(h.ledger))
+	h.specs.revise("docs-bot", "revision 1 instructions")
+
+	ctx := context.Background()
+	first, err := accept(ctx, h.rt, tag("docs-bot", "Ev-redeliver", "hello"))
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	h.specs.revise("docs-bot", "revision 2 instructions")
+	second, err := accept(ctx, h.rt, tag("docs-bot", "Ev-redeliver", "hello"))
+	if err != nil {
+		t.Fatalf("Accept (redelivery after a bump): %v", err)
+	}
+	if second.RunID != first.RunID || second.Version != "1.0.0" {
+		t.Fatalf("redelivery = %s@%s, want %s@1.0.0", second.RunID, second.Version, first.RunID)
+	}
+	if err := h.specs.src.Retire(ctx, fixtureTenant, "docs-bot", "ada"); err != nil {
+		t.Fatal(err)
+	}
+	third, err := accept(ctx, h.rt, tag("docs-bot", "Ev-redeliver", "hello"))
+	if err != nil {
+		t.Fatalf("Accept (redelivery after retiring): %v", err)
+	}
+	if third.RunID != first.RunID || third.Version != "1.0.0" {
+		t.Fatalf("redelivery = %s@%s, want %s@1.0.0", third.RunID, third.Version, first.RunID)
+	}
+	if n := len(h.bus.ofKind(event.TypeAccepted)); n != 1 {
+		t.Fatalf("got %d accepted events, want 1: a redelivery announces nothing", n)
+	}
+}
+
+// mustRuntime builds a runtime over h's ledger, queue, definitions and bus.
+func mustRuntime(t *testing.T, h *harness, opts ...runtime.Option) *runtime.Runtime {
+	t.Helper()
+	rt, err := runtime.New(anchor.New(h.ledger, h.queue), h.specs, h.bus,
+		append([]runtime.Option{runtime.WithRuntime(runtime.AsRuntime(h.exec))}, opts...)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt
 }

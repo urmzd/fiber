@@ -13,8 +13,6 @@ import (
 
 	"github.com/urmzd/fiber/pkg/bus"
 	"github.com/urmzd/fiber/pkg/bus/bustest"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 // postgresEnv names the Postgres the conformance suite runs against. Without
@@ -84,12 +82,12 @@ func TestPostgresIsSharedAcrossBusesOnOneDatabase(t *testing.T) {
 	if err := b.Migrate(t.Context()); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	s, err := b.Subscribe(t.Context(), envelope.Subscription{Topic: topic.MustParse("agent:docs-bot")})
+	s, err := b.Subscribe(t.Context(), all)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	if err := a.Publish(t.Context(), event("run_1", 0)); err != nil {
+	if err := a.Publish(t.Context(), runEvent("run_1", 1)); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -98,7 +96,44 @@ func TestPostgresIsSharedAcrossBusesOnOneDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.Seq != 1 || e.RunID != "run_1" {
-		t.Fatalf("got %s#%d, want run_1#1", e.RunID, e.Seq)
+	if e.Seq != 1 || e.Run != "run_1" {
+		t.Fatalf("got %s#%d, want run_1#1", e.Run, e.Seq)
+	}
+}
+
+// A stored row that does not decode is skipped, and the stream moves past it
+// to the next event instead of failing.
+func TestPostgresSkipsARowThatDoesNotDecode(t *testing.T) {
+	url := os.Getenv(postgresEnv)
+	if url == "" {
+		t.Skipf("set %s", postgresEnv)
+	}
+	pool := newPostgresPool(t, url)
+	b := bus.NewPostgres(pool, bus.WithPollInterval(25*time.Millisecond))
+	if err := b.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	broken := `{"id":"x","source":"fiber://run/r","type":"run.delta.text.v1","channel":"slack://T01/C02","time":"2026-01-01T00:00:00Z","hops":0,"tenant":"acme","run":"run_1","seq":1,"data":{"text":5}}`
+	if _, err := pool.Exec(t.Context(),
+		`INSERT INTO fiber_events (tenant, channel, type, run, seq, event_id, body) VALUES ('acme', 'slack://T01/C02', 'run.delta.text.v1', 'run_1', 1, 'x', $1)`,
+		broken); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Publish(t.Context(), runEvent("run_1", 2)); err != nil {
+		t.Fatal(err)
+	}
+	s, err := b.Subscribe(t.Context(), all)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	e, err := s.Recv(ctx)
+	if err != nil {
+		t.Fatalf("Recv = %v; want the row after the broken one", err)
+	}
+	if e.Seq != 2 {
+		t.Fatalf("got seq %d, want 2", e.Seq)
 	}
 }

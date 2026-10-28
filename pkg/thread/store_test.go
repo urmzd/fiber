@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/thread/threadtest"
 )
@@ -64,11 +63,11 @@ func slackThread(agent string) thread.Key {
 }
 
 func user(run, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleUser, Text: text, RunID: run, Actor: envelope.Actor{ID: "U1", Display: "ada"}}
+	return thread.Entry{Role: thread.RoleUser, Text: text, RunID: run, Actor: event.Actor{ID: "U1", Display: "ada"}}
 }
 
 func assistant(run, text string) thread.Entry {
-	return thread.Entry{Role: thread.RoleAssistant, Text: text, RunID: run, Actor: envelope.Actor{ID: "docs-bot", Bot: true}}
+	return thread.Entry{Role: thread.RoleAssistant, Text: text, RunID: run, Actor: event.Actor{ID: "docs-bot", Bot: true}}
 }
 
 func mustAppend(t *testing.T, s thread.Store, key thread.Key, entries ...thread.Entry) []thread.Entry {
@@ -110,12 +109,12 @@ func texts(entries []thread.Entry) []string {
 // conversation stays the same one.
 func TestKeyOfKeepsWhatIdentifiesAConversationAndDropsWhatMoves(t *testing.T) {
 	t.Parallel()
-	tag := func(source string) envelope.Tag {
-		tg := envelope.Tag{ID: "Ev1", Tenant: tenantA, Agent: "Docs-Bot", Origin: "test"}
+	tag := func(source string) event.Envelope {
+		e := event.Envelope{ID: "Ev1", Tenant: tenantA, Source: "test"}
 		if source != "" {
-			tg.Source = address.MustParse(source)
+			e.Source = source
 		}
-		return tg
+		return e
 	}
 	cases := []struct {
 		name, source, want string
@@ -129,7 +128,7 @@ func TestKeyOfKeepsWhatIdentifiesAConversationAndDropsWhatMoves(t *testing.T) {
 		{"no source", "", "tag:Ev1"},
 	}
 	for _, tc := range cases {
-		got := thread.KeyOf(tag(tc.source))
+		got := thread.KeyOf(tag(tc.source), "Docs-Bot")
 		if got.Surface != tc.want {
 			t.Errorf("%s: surface = %q, want %q", tc.name, got.Surface, tc.want)
 		}
@@ -145,24 +144,24 @@ func TestKeyOfKeepsWhatIdentifiesAConversationAndDropsWhatMoves(t *testing.T) {
 	}
 
 	// Two pushes to one pull request are one conversation; two Slack threads
-	// in one channel are two; two tags with no surface are two.
-	same := [][2]envelope.Tag{
+	// in one channel are two; two events with no surface are two.
+	same := [][2]event.Envelope{
 		{tag("github://acme/handbook/pull/7?head_sha=aaa"), tag("github://acme/handbook/pull/7?head_sha=bbb")},
 	}
 	for _, p := range same {
-		if thread.KeyOf(p[0]) != thread.KeyOf(p[1]) {
+		if thread.KeyOf(p[0], "docs-bot") != thread.KeyOf(p[1], "docs-bot") {
 			t.Errorf("%s and %s are different threads", p[0].Source, p[1].Source)
 		}
 	}
 	a, b := tag(""), tag("")
 	b.ID = "Ev2"
-	different := [][2]envelope.Tag{
+	different := [][2]event.Envelope{
 		{tag("slack://T01/C02?thread=1699.001"), tag("slack://T01/C02?thread=1700.002")},
 		{tag("github://acme/handbook/issues/7"), tag("github://acme/handbook/pull/7")},
 		{a, b},
 	}
 	for _, p := range different {
-		if thread.KeyOf(p[0]) == thread.KeyOf(p[1]) {
+		if thread.KeyOf(p[0], "docs-bot") == thread.KeyOf(p[1], "docs-bot") {
 			t.Errorf("%q/%s and %q/%s are one thread", p[0].Source, p[0].ID, p[1].Source, p[1].ID)
 		}
 	}

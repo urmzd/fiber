@@ -9,15 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urmzd/saige/agent/agenttest"
-
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/author"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
+	"github.com/urmzd/fiber/pkg/turn/native"
+	"github.com/urmzd/fiber/pkg/turn/native/agenttest"
 )
 
 // runs is the test's run ledger: which principal each run acts as.
@@ -39,25 +37,20 @@ var fixture = runs{
 	"run-other": {Tenant: "globex", Actor: "slack:eve"},
 }
 
-// counting wraps a store and counts the calls that change it.
+// counting wraps a source and counts the calls that change it.
 type counting struct {
-	registry.Store
+	definition.Source
 	writes atomic.Int64
 }
 
-func (c *counting) Create(ctx context.Context, tenant string, spec agentspec.AgentSpec, by string) (agentspec.Revision, error) {
+func (c *counting) Put(ctx context.Context, rec definition.Record) (definition.Record, error) {
 	c.writes.Add(1)
-	return c.Store.Create(ctx, tenant, spec, by)
+	return c.Source.Put(ctx, rec)
 }
 
-func (c *counting) Revise(ctx context.Context, tenant string, spec agentspec.AgentSpec, rev int, by string) (agentspec.Revision, error) {
+func (c *counting) Retire(ctx context.Context, tenant, name, by string) error {
 	c.writes.Add(1)
-	return c.Store.Revise(ctx, tenant, spec, rev, by)
-}
-
-func (c *counting) Delete(ctx context.Context, tenant, name string, expectedRev int) error {
-	c.writes.Add(1)
-	return c.Store.Delete(ctx, tenant, name, expectedRev)
+	return c.Source.Retire(ctx, tenant, name, by)
 }
 
 type harness struct {
@@ -70,9 +63,9 @@ type harness struct {
 func newHarness(t *testing.T, edit ...func(*author.Config)) *harness {
 	t.Helper()
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	h := &harness{t: t, store: &counting{Store: registry.NewMemory()}, now: &now}
+	h := &harness{t: t, store: &counting{Source: definition.NewMemory()}, now: &now}
 	cfg := author.Config{
-		Store:      h.store,
+		Source:     h.store,
 		Principals: fixture,
 		Clock:      func() time.Time { return *h.now },
 	}
@@ -123,13 +116,19 @@ func (h *harness) must(runID, action string, args any) connector.Result {
 	return res
 }
 
-func (h *harness) seed(tenant string, spec agentspec.AgentSpec) agentspec.Revision {
+// seed writes spec at version major.0.0 directly, as setup.
+func (h *harness) seed(tenant string, spec definition.AgentSpec, major int) definition.Record {
 	h.t.Helper()
-	rev, err := h.store.Store.Create(context.Background(), tenant, spec, "setup")
+	rec, err := definition.FromAgentSpec(spec, major)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	rec.Tenant, rec.CreatedBy = tenant, "setup"
+	got, err := h.store.Source.Put(context.Background(), rec)
 	if err != nil {
 		h.t.Fatalf("seed %s/%s: %v", tenant, spec.Name, err)
 	}
-	return rev
+	return got
 }
 
 // token extracts the proposal token from a propose result.
@@ -144,31 +143,42 @@ func token(t *testing.T, res connector.Result) string {
 	return out.Token
 }
 
-func spec(name, prompt string) agentspec.AgentSpec {
-	return agentspec.AgentSpec{
+func spec(name, prompt string) definition.AgentSpec {
+	return definition.AgentSpec{
 		Name:         name,
 		Description:  "test agent",
 		Model:        "offline",
-		Provider:     agentspec.ProviderOffline,
+		Provider:     definition.ProviderOffline,
 		SystemPrompt: prompt,
 	}
+}
+
+// draft is spec at version major.0.0 as the actions take it.
+func draft(t testing.TB, spec definition.AgentSpec, major int) map[string]any {
+	t.Helper()
+	rec, err := definition.FromAgentSpec(spec, major)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{"definition": rec.Content, "policy": rec.Policy}
 }
 
 const goodPrompt = "You are a docs agent. Your goal is to answer from the docs. Output format: concise plain text."
 
 // validArgs returns arguments each action accepts, so a test can drive the
 // whole catalog.
-func validArgs(action string) map[string]any {
-	draft := spec("docs", goodPrompt)
+func validArgs(t testing.TB, action string) map[string]any {
+	edited := spec("docs", goodPrompt)
+	edited.Description = "edited"
 	switch action {
 	case "author_list", "author_pending":
 		return map[string]any{}
 	case "author_get", "author_history":
 		return map[string]any{"name": "docs"}
 	case "author_diff":
-		return map[string]any{"name": "docs", "from": 1}
+		return map[string]any{"name": "docs", "from": "1.0.0"}
 	case "author_validate", "author_review":
-		return map[string]any{"spec": draft}
+		return map[string]any{"draft": draft(t, spec("docs", goodPrompt), 1)}
 	case "author_scaffold":
 		return map[string]any{
 			"router":      map[string]any{"name": "front", "role": "Routes requests."},
@@ -176,12 +186,11 @@ func validArgs(action string) map[string]any {
 			"model":       "offline", "provider": "offline",
 		}
 	case "author_propose_create":
-		return map[string]any{"spec": spec("fresh", goodPrompt)}
+		return map[string]any{"draft": draft(t, spec("fresh", goodPrompt), 1)}
 	case "author_propose_revise":
-		draft.Description = "edited"
-		return map[string]any{"spec": draft, "expected_rev": 1}
+		return map[string]any{"draft": draft(t, edited, 2), "expected_version": "1.0.0"}
 	case "author_propose_delete":
-		return map[string]any{"name": "docs", "expected_rev": 1}
+		return map[string]any{"name": "docs", "expected_version": "1.0.0"}
 	case "author_apply":
 		return map[string]any{"token": "prop_unknown"}
 	case author.KnowledgeToolName:
@@ -195,8 +204,8 @@ func validArgs(action string) map[string]any {
 func TestTheTenantComesFromTheRunAndCannotBeNamed(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.seed("acme", spec("docs", goodPrompt))
-	h.seed("globex", spec("secrets", goodPrompt))
+	h.seed("acme", spec("docs", goodPrompt), 1)
+	h.seed("globex", spec("secrets", goodPrompt), 1)
 
 	if got := h.must("run-ada", "author_list", map[string]any{}).Summary; !strings.Contains(got, "docs") || strings.Contains(got, "secrets") {
 		t.Fatalf("acme's listing is %q; want its own agent and nobody else's", got)
@@ -207,27 +216,32 @@ func TestTheTenantComesFromTheRunAndCannotBeNamed(t *testing.T) {
 
 	// Another tenant's agent is not found, by any read.
 	for _, action := range []string{"author_get", "author_history"} {
-		if _, err := h.call("run-ada", action, map[string]any{"name": "secrets"}); !errors.Is(err, registry.ErrNotFound) {
+		if _, err := h.call("run-ada", action, map[string]any{"name": "secrets"}); !errors.Is(err, definition.ErrNotFound) {
 			t.Errorf("%s of another tenant's agent = %v, want ErrNotFound", action, err)
 		}
 	}
-	if _, err := h.call("run-ada", "author_propose_delete", map[string]any{"name": "secrets", "expected_rev": 1}); !errors.Is(err, registry.ErrNotFound) {
-		t.Errorf("proposing to delete another tenant's agent = %v, want ErrNotFound", err)
+	if _, err := h.call("run-ada", "author_propose_delete", map[string]any{"name": "secrets", "expected_version": "1.0.0"}); !errors.Is(err, definition.ErrNotFound) {
+		t.Errorf("proposing to retire another tenant's agent = %v, want ErrNotFound", err)
 	}
 
 	// Naming a tenant in the arguments is an error on every action, at the
-	// top level and inside the spec, and never a silent success.
+	// top level and inside the draft, and never a silent success.
 	for _, a := range h.conn.Actions() {
-		args := validArgs(a.Name)
+		args := validArgs(t, a.Name)
 		args["tenant"] = "globex"
 		if _, err := h.call("run-ada", a.Name, args); !errors.Is(err, author.ErrInvalid) {
 			t.Errorf("%s with a tenant argument = %v, want ErrInvalid", a.Name, err)
 		}
-		args = validArgs(a.Name)
-		if _, ok := args["spec"]; ok {
-			args["spec"] = json.RawMessage(`{"name":"docs","model":"m","provider":"offline","system_prompt":"p","tenant":"globex"}`)
+		args = validArgs(t, a.Name)
+		if d, ok := args["draft"].(map[string]any); ok {
+			d["tenant"] = "globex"
 			if _, err := h.call("run-ada", a.Name, args); !errors.Is(err, author.ErrInvalid) {
-				t.Errorf("%s with a tenant inside the spec = %v, want ErrInvalid", a.Name, err)
+				t.Errorf("%s with a tenant inside the draft = %v, want ErrInvalid", a.Name, err)
+			}
+			delete(d, "tenant")
+			d["policy"] = map[string]any{"tenant": "globex"}
+			if _, err := h.call("run-ada", a.Name, args); !errors.Is(err, author.ErrInvalid) {
+				t.Errorf("%s with a tenant inside the policy = %v, want ErrInvalid", a.Name, err)
 			}
 		}
 	}
@@ -270,9 +284,9 @@ func TestACallThatCannotBeScopedIsRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t, func(c *author.Config) { c.Principals = ledger })
-			h.seed("acme", spec("docs", goodPrompt))
+			h.seed("acme", spec("docs", goodPrompt), 1)
 			for _, a := range h.conn.Actions() {
-				if _, err := h.call(tc.run, a.Name, validArgs(a.Name)); !errors.Is(err, tc.want) {
+				if _, err := h.call(tc.run, a.Name, validArgs(t, a.Name)); !errors.Is(err, tc.want) {
 					t.Errorf("%s = %v, want %v", a.Name, err, tc.want)
 				}
 			}
@@ -285,21 +299,21 @@ func TestACallThatCannotBeScopedIsRefused(t *testing.T) {
 
 func TestNewRefusesAConnectorThatCouldNotScopeACall(t *testing.T) {
 	t.Parallel()
-	if _, err := author.New(author.Config{Store: registry.NewMemory()}); !errors.Is(err, author.ErrInvalid) {
+	if _, err := author.New(author.Config{Source: definition.NewMemory()}); !errors.Is(err, author.ErrInvalid) {
 		t.Errorf("New with no Principals = %v, want ErrInvalid", err)
 	}
 	if _, err := author.New(author.Config{Principals: fixture}); !errors.Is(err, author.ErrInvalid) {
-		t.Errorf("New with no Store = %v, want ErrInvalid", err)
+		t.Errorf("New with no Source = %v, want ErrInvalid", err)
 	}
 }
 
 // Reads and proposals are separable from the write by name and by metadata,
-// and the classification is true: only author_apply ever reaches a store
+// and the classification is true: only author_apply ever reaches a source
 // method that changes anything.
 func TestOnlyTheWriteActionWrites(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, func(c *author.Config) { c.Knowledge = &corpus{} })
-	h.seed("acme", spec("docs", goodPrompt))
+	h.seed("acme", spec("docs", goodPrompt), 1)
 
 	writes := 0
 	for _, a := range h.conn.Actions() {
@@ -326,7 +340,7 @@ func TestOnlyTheWriteActionWrites(t *testing.T) {
 		if effect == author.EffectWrite {
 			continue
 		}
-		if _, err := h.call("run-ada", a.Name, validArgs(a.Name)); err != nil {
+		if _, err := h.call("run-ada", a.Name, validArgs(t, a.Name)); err != nil {
 			t.Errorf("%s: %v", a.Name, err)
 		}
 	}
@@ -336,18 +350,18 @@ func TestOnlyTheWriteActionWrites(t *testing.T) {
 	if n := h.store.writes.Load(); n != 0 {
 		t.Fatalf("read and propose actions made %d store writes", n)
 	}
-	if got := h.must("run-ada", "author_get", map[string]any{"name": "docs"}).Summary; !strings.Contains(got, "rev 1") {
+	if got := h.must("run-ada", "author_get", map[string]any{"name": "docs"}).Summary; !strings.HasPrefix(got, "docs 1.0.0") {
 		t.Fatalf("docs moved after proposals alone: %s", got)
 	}
 }
 
 // The pause for approval is enforced by run identity. The run that proposed
-// cannot apply; a later run can, and the revision records that run's actor.
+// cannot apply; a later run can, and the version records that run's actor.
 func TestAChangeNeedsASecondRunAndRecordsWhoApproved(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	res := h.must("run-ada", "author_propose_create", map[string]any{"spec": spec("docs", goodPrompt)})
-	if !strings.Contains(res.Summary, "NOT SAVED") || !strings.Contains(res.Summary, "review:") || !strings.Contains(res.Summary, "+ name: docs") {
+	res := h.must("run-ada", "author_propose_create", map[string]any{"draft": draft(t, spec("docs", goodPrompt), 1)})
+	if !strings.Contains(res.Summary, "NOT SAVED") || !strings.Contains(res.Summary, "review:") || !strings.Contains(res.Summary, `+ name: "docs"`) {
 		t.Fatalf("a proposal must show the change and the findings: %s", res.Summary)
 	}
 	tok := token(t, res)
@@ -363,14 +377,14 @@ func TestAChangeNeedsASecondRunAndRecordsWhoApproved(t *testing.T) {
 	}
 
 	h.must("run-grace", "author_apply", map[string]any{"token": tok})
-	rev, err := h.store.Get(context.Background(), "acme", "docs", 0)
+	rec, err := h.store.Latest(context.Background(), "acme", "docs")
 	if err != nil {
-		t.Fatalf("the applied agent is not in the registry: %v", err)
+		t.Fatalf("the applied agent is not stored: %v", err)
 	}
-	if rev.CreatedBy != "slack:grace" {
-		t.Errorf("revision is by %q, want the approving run's actor", rev.CreatedBy)
+	if rec.CreatedBy != "slack:grace" || rec.Version != "1.0.0" {
+		t.Errorf("version %s is by %q, want 1.0.0 by the approving run's actor", rec.Version, rec.CreatedBy)
 	}
-	if _, err := h.store.Get(context.Background(), "globex", "docs", 0); !errors.Is(err, registry.ErrNotFound) {
+	if _, err := h.store.Latest(context.Background(), "globex", "docs"); !errors.Is(err, definition.ErrNotFound) {
 		t.Errorf("the agent leaked into another tenant: %v", err)
 	}
 }
@@ -379,7 +393,7 @@ func TestATokenIsSingleUseExpiresAndStaysInItsTenant(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	propose := func(name string) string {
-		return token(t, h.must("run-ada", "author_propose_create", map[string]any{"spec": spec(name, goodPrompt)}))
+		return token(t, h.must("run-ada", "author_propose_create", map[string]any{"draft": draft(t, spec(name, goodPrompt), 1)}))
 	}
 
 	leaked := propose("one")
@@ -410,7 +424,7 @@ func TestATokenIsSingleUseExpiresAndStaysInItsTenant(t *testing.T) {
 func TestRepeatingAProposalDoesNotResetWhoProposedIt(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	args := map[string]any{"spec": spec("docs", goodPrompt)}
+	args := map[string]any{"draft": draft(t, spec("docs", goodPrompt), 1)}
 	first := token(t, h.must("run-ada", "author_propose_create", args))
 	if again := token(t, h.must("run-ada", "author_propose_create", args)); again != first {
 		t.Fatalf("the same change staged twice: %s and %s", first, again)
@@ -423,109 +437,91 @@ func TestRepeatingAProposalDoesNotResetWhoProposedIt(t *testing.T) {
 func TestAConcurrentEditConflictsInsteadOfBeingOverwritten(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.seed("acme", spec("docs", goodPrompt))
-	mine := spec("docs", goodPrompt+" Cite the page.")
-	theirs := spec("docs", goodPrompt+" Be kind.")
+	h.seed("acme", spec("docs", goodPrompt), 1)
+	mine := draft(t, spec("docs", goodPrompt+" Cite the page."), 2)
 
-	tok := token(t, h.must("run-ada", "author_propose_revise", map[string]any{"spec": mine, "expected_rev": 1}))
-	if _, err := h.store.Store.Revise(context.Background(), "acme", theirs, 1, "someone-else"); err != nil {
-		t.Fatalf("concurrent revise: %v", err)
-	}
+	tok := token(t, h.must("run-ada", "author_propose_revise", map[string]any{"draft": mine, "expected_version": "1.0.0"}))
+	h.seed("acme", spec("docs", goodPrompt+" Be kind."), 2)
 
-	if _, err := h.call("run-grace", "author_apply", map[string]any{"token": tok}); !errors.Is(err, registry.ErrConflict) {
+	if _, err := h.call("run-grace", "author_apply", map[string]any{"token": tok}); !errors.Is(err, definition.ErrConflict) {
 		t.Fatalf("applying over a concurrent edit = %v, want ErrConflict", err)
 	}
-	cur, _ := h.store.Get(context.Background(), "acme", "docs", 0)
-	if cur.Rev != 2 || !strings.Contains(cur.Spec.SystemPrompt, "Be kind.") {
-		t.Fatalf("the concurrent edit was overwritten: rev %d %q", cur.Rev, cur.Spec.SystemPrompt)
+	cur, _ := h.store.Latest(context.Background(), "acme", "docs")
+	if cur.Version != "2.0.0" || !strings.Contains(cur.Content, "Be kind.") {
+		t.Fatalf("the concurrent edit was overwritten: %s %q", cur.Version, cur.Content)
 	}
-	// And a draft made against a revision that is already stale never stages.
-	if _, err := h.call("run-ada", "author_propose_revise", map[string]any{"spec": mine, "expected_rev": 1}); !errors.Is(err, registry.ErrConflict) {
-		t.Errorf("proposing against a stale revision = %v, want ErrConflict", err)
+	// And a draft made against a version that is already stale never stages.
+	if _, err := h.call("run-ada", "author_propose_revise", map[string]any{"draft": mine, "expected_version": "1.0.0"}); !errors.Is(err, definition.ErrConflict) {
+		t.Errorf("proposing against a stale version = %v, want ErrConflict", err)
 	}
-	if _, err := h.call("run-ada", "author_propose_revise", map[string]any{"spec": mine}); !errors.Is(err, author.ErrInvalid) {
-		t.Errorf("proposing a revise with no expected revision = %v, want ErrInvalid", err)
+	if _, err := h.call("run-ada", "author_propose_revise", map[string]any{"draft": mine}); !errors.Is(err, author.ErrInvalid) {
+		t.Errorf("proposing a revise with no expected version = %v, want ErrInvalid", err)
 	}
-}
-
-// interleaved lets a test land a write in the instant between apply deciding to
-// retire an agent and the store being asked to.
-type interleaved struct {
-	registry.Store
-	beforeDelete func()
-}
-
-func (s *interleaved) Delete(ctx context.Context, tenant, name string, expectedRev int) error {
-	if s.beforeDelete != nil {
-		s.beforeDelete()
-	}
-	return s.Store.Delete(ctx, tenant, name, expectedRev)
-}
-
-// An approved retirement retires the revision that was approved and no other.
-// A revise that lands after the approval, however late, makes the retirement a
-// conflict: the newer revision stays live because nobody was shown it, and the
-// proposal is spent rather than left to be retried against it.
-func TestAnApprovedRetirementCannotRetireARevisionThatLandedAfterIt(t *testing.T) {
-	t.Parallel()
-	var racing *interleaved
-	h := newHarness(t, func(cfg *author.Config) {
-		racing = &interleaved{Store: cfg.Store}
-		cfg.Store = racing
-	})
-	h.seed("acme", spec("docs", goodPrompt))
-	tok := token(t, h.must("run-ada", "author_propose_delete", map[string]any{"name": "docs", "expected_rev": 1}))
-
-	racing.beforeDelete = func() {
-		if _, err := racing.Revise(context.Background(), "acme", spec("docs", goodPrompt+" Be kind."), 1, "someone-else"); err != nil {
-			t.Errorf("concurrent revise: %v", err)
-		}
-	}
-	if _, err := h.call("run-grace", "author_apply", map[string]any{"token": tok}); !errors.Is(err, registry.ErrConflict) {
-		t.Fatalf("retiring past a concurrent revise = %v, want ErrConflict", err)
-	}
-	cur, err := racing.Get(context.Background(), "acme", "docs", 0)
-	if err != nil || cur.Rev != 2 {
-		t.Fatalf("the unapproved revision was retired: rev %d, %v; want live at 2", cur.Rev, err)
+	// A revise is a new, higher version: one at or below the latest is refused.
+	if _, err := h.call("run-ada", "author_propose_revise", map[string]any{"draft": draft(t, spec("docs", goodPrompt+" Lower."), 1), "expected_version": "2.0.0"}); !errors.Is(err, author.ErrInvalid) {
+		t.Errorf("proposing a version below the latest = %v, want ErrInvalid", err)
 	}
 }
 
-func TestARevisionShowsItsDiffAndAnUnchangedDraftProposesNothing(t *testing.T) {
+// An approved retirement retires the version that was approved and no other.
+// A version that lands after the approval makes the retirement a conflict:
+// the newer version stays live because nobody was shown it, and the proposal
+// is spent rather than left to be retried against it.
+func TestAnApprovedRetirementCannotRetireAVersionThatLandedAfterIt(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.seed("acme", spec("docs", goodPrompt))
+	h.seed("acme", spec("docs", goodPrompt), 1)
+	tok := token(t, h.must("run-ada", "author_propose_delete", map[string]any{"name": "docs", "expected_version": "1.0.0"}))
+	h.seed("acme", spec("docs", goodPrompt+" Be kind."), 2)
 
-	same := h.must("run-ada", "author_propose_revise", map[string]any{"spec": spec("docs", goodPrompt), "expected_rev": 1})
+	if _, err := h.call("run-grace", "author_apply", map[string]any{"token": tok}); !errors.Is(err, definition.ErrConflict) {
+		t.Fatalf("retiring past a concurrent revise = %v, want ErrConflict", err)
+	}
+	cur, err := h.store.Latest(context.Background(), "acme", "docs")
+	if err != nil || cur.Version != "2.0.0" {
+		t.Fatalf("the unapproved version was retired: %s, %v; want live at 2.0.0", cur.Version, err)
+	}
+	if _, err := h.call("run-grace", "author_apply", map[string]any{"token": tok}); !errors.Is(err, author.ErrToken) {
+		t.Errorf("the conflicting proposal was kept: %v, want ErrToken", err)
+	}
+}
+
+func TestAVersionShowsItsDiffAndAnUnchangedDraftProposesNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seed("acme", spec("docs", goodPrompt), 1)
+
+	same := h.must("run-ada", "author_propose_revise", map[string]any{"draft": draft(t, spec("docs", goodPrompt), 1), "expected_version": "1.0.0"})
 	if !strings.Contains(same.Summary, "no change") {
 		t.Fatalf("an identical draft was staged: %s", same.Summary)
 	}
 
 	edited := spec("docs", goodPrompt)
 	edited.Tools = []string{"search"}
-	res := h.must("run-ada", "author_propose_revise", map[string]any{"spec": edited, "expected_rev": 1})
-	for _, want := range []string{"+ tool: search", "unused-tool"} {
+	res := h.must("run-ada", "author_propose_revise", map[string]any{"draft": draft(t, edited, 2), "expected_version": "1.0.0"})
+	for _, want := range []string{`+     - "search"`, `+ version: "2.0.0"`, "unused-tool"} {
 		if !strings.Contains(res.Summary, want) {
 			t.Errorf("proposal does not show %q:\n%s", want, res.Summary)
 		}
 	}
 	h.must("run-grace", "author_apply", map[string]any{"token": token(t, res)})
-	if got := h.must("run-ada", "author_diff", map[string]any{"name": "docs", "from": 1}).Summary; !strings.Contains(got, "+ tool: search") {
-		t.Errorf("diff of rev 1 to current = %s", got)
+	if got := h.must("run-ada", "author_diff", map[string]any{"name": "docs", "from": "1.0.0"}).Summary; !strings.Contains(got, `+     - "search"`) {
+		t.Errorf("diff of 1.0.0 to latest = %s", got)
 	}
-	if got := h.must("run-ada", "author_history", map[string]any{"name": "docs"}).Summary; !strings.Contains(got, "rev 2 by slack:grace") {
+	if got := h.must("run-ada", "author_history", map[string]any{"name": "docs"}).Summary; !strings.Contains(got, "2.0.0 by slack:grace") {
 		t.Errorf("history = %s", got)
 	}
-	if got := h.must("run-ada", "author_get", map[string]any{"name": "docs", "rev": 1}).Summary; strings.Contains(got, "search") {
-		t.Errorf("rev 1 changed after rev 2 was written: %s", got)
+	if got := h.must("run-ada", "author_get", map[string]any{"name": "docs", "version": "1.0.0"}).Summary; strings.Contains(got, "search") {
+		t.Errorf("1.0.0 changed after 2.0.0 was written: %s", got)
 	}
 }
 
-// A revision must say who made it, and a failed attempt must not cost the
+// A version must say who wrote it, and a failed attempt must not cost the
 // human who will approve it their proposal.
 func TestAWriteWithNoIdentifiedActorIsRefusedAndTheProposalSurvives(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	tok := token(t, h.must("run-ada", "author_propose_create", map[string]any{"spec": spec("docs", goodPrompt)}))
+	tok := token(t, h.must("run-ada", "author_propose_create", map[string]any{"draft": draft(t, spec("docs", goodPrompt), 1)}))
 	if _, err := h.call("run-cron", "author_apply", map[string]any{"token": tok}); !errors.Is(err, author.ErrNoActor) {
 		t.Fatalf("apply by an unidentified run = %v, want ErrNoActor", err)
 	}
@@ -538,41 +534,49 @@ func TestAWriteWithNoIdentifiedActorIsRefusedAndTheProposalSurvives(t *testing.T
 func TestRetiringAnAgentShowsWhatDependsOnItAndKeepsItsHistory(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.seed("acme", spec("docs", goodPrompt))
+	h.seed("acme", spec("docs", goodPrompt), 1)
 	front := spec("front", goodPrompt)
 	front.Access.Spawn = []string{"docs"}
-	h.seed("acme", front)
+	h.seed("acme", front, 1)
 
-	if _, err := h.call("run-ada", "author_propose_delete", map[string]any{"name": "docs", "expected_rev": 4}); !errors.Is(err, registry.ErrConflict) {
-		t.Fatalf("retiring at the wrong revision = %v, want ErrConflict", err)
+	if _, err := h.call("run-ada", "author_propose_delete", map[string]any{"name": "docs", "expected_version": "4.0.0"}); !errors.Is(err, definition.ErrConflict) {
+		t.Fatalf("retiring at the wrong version = %v, want ErrConflict", err)
 	}
-	res := h.must("run-ada", "author_propose_delete", map[string]any{"name": "docs", "expected_rev": 1})
+	res := h.must("run-ada", "author_propose_delete", map[string]any{"name": "docs", "expected_version": "1.0.0"})
 	if !strings.Contains(res.Summary, `"front" delegates to "docs"`) {
 		t.Fatalf("the proposal hides a dependent: %s", res.Summary)
 	}
 	h.must("run-grace", "author_apply", map[string]any{"token": token(t, res)})
-	if _, err := h.store.Get(context.Background(), "acme", "docs", 0); !errors.Is(err, registry.ErrNotFound) {
+	if _, err := h.store.Latest(context.Background(), "acme", "docs"); !errors.Is(err, definition.ErrRetired) {
 		t.Errorf("the agent is still live: %v", err)
 	}
-	if got := h.must("run-ada", "author_history", map[string]any{"name": "docs"}).Summary; !strings.Contains(got, "1 revision") {
+	if _, err := h.store.Get(context.Background(), "acme", "docs", "1.0.0"); err != nil {
+		t.Errorf("a retired version no longer reads: %v", err)
+	}
+	if got := h.must("run-ada", "author_history", map[string]any{"name": "docs"}).Summary; !strings.Contains(got, "1 version(s)") || !strings.Contains(got, "retired") {
 		t.Errorf("history was erased: %s", got)
+	}
+	if _, err := h.call("run-ada", "author_propose_create", map[string]any{"draft": draft(t, spec("docs", goodPrompt), 2)}); !errors.Is(err, definition.ErrRetired) {
+		t.Errorf("reusing a retired name = %v, want ErrRetired", err)
 	}
 }
 
-func TestValidateReportsWhatTheRegistryWouldRefuseWithoutSaving(t *testing.T) {
+func TestValidateReportsWhatTheSourceWouldRefuseWithoutSaving(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	bad := spec("docs", goodPrompt)
 	bad.Provider = "nonesuch"
-	got := h.must("run-ada", "author_validate", map[string]any{"spec": bad}).Summary
-	_, want := h.store.Store.Create(context.Background(), "scratch", bad, "x")
-	if want == nil || !strings.HasPrefix(got, "invalid: ") || !errors.Is(want, agentspec.ErrInvalid) {
-		t.Fatalf("validate said %q, the registry said %v", got, want)
+	got := h.must("run-ada", "author_validate", map[string]any{"draft": draft(t, bad, 1)}).Summary
+	rec, _ := definition.FromAgentSpec(bad, 1)
+	rec.Tenant, rec.CreatedBy = "scratch", "x"
+	_, want := h.store.Source.Put(context.Background(), rec)
+	if want == nil || !strings.HasPrefix(got, "invalid: ") || !errors.Is(want, definition.ErrInvalid) {
+		t.Fatalf("validate said %q, the source said %v", got, want)
 	}
-	if got := h.must("run-ada", "author_validate", map[string]any{"spec": spec("docs", goodPrompt)}).Summary; !strings.HasPrefix(got, "valid") {
+	if got := h.must("run-ada", "author_validate", map[string]any{"draft": draft(t, spec("docs", goodPrompt), 1)}).Summary; !strings.HasPrefix(got, "valid") {
 		t.Errorf("a valid draft reported %q", got)
 	}
-	if _, err := h.call("run-ada", "author_propose_create", map[string]any{"spec": bad}); !errors.Is(err, author.ErrInvalid) {
+	if _, err := h.call("run-ada", "author_propose_create", map[string]any{"draft": draft(t, bad, 1)}); !errors.Is(err, author.ErrInvalid) {
 		t.Errorf("proposing an invalid draft = %v, want ErrInvalid", err)
 	}
 }
@@ -607,7 +611,7 @@ func TestTheBuiltInAgentRunsOfflineAgainstItsOwnTools(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	ctx := context.Background()
-	if _, err := author.Seed(ctx, h.store, "acme", author.Spec("offline", agentspec.ProviderOffline)); err != nil {
+	if _, err := author.Seed(ctx, h.store, "acme", author.Spec("offline", definition.ProviderOffline)); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
 	reg := connector.NewRegistry()
@@ -617,13 +621,19 @@ func TestTheBuiltInAgentRunsOfflineAgainstItsOwnTools(t *testing.T) {
 	if roles := connector.RolesOf(h.conn); !roles.Actor || roles.Trigger || roles.Sink {
 		t.Fatalf("roles = %+v, want an actor and nothing else", roles)
 	}
-	rev, err := registry.NewSpecs(h.store).Latest(ctx, "acme", author.AgentName)
+	defs := definition.NewResolver(h.store, definition.Checks{})
+	pin, err := defs.Resolve(ctx, "acme", author.AgentName)
 	if err != nil {
-		t.Fatalf("Latest: %v", err)
+		t.Fatalf("Resolve: %v", err)
 	}
+	loaded, err := defs.Verify(ctx, "acme", pin)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	rev := native.Revision{Name: pin.Name, Version: pin.Version, Digest: pin.Digest, Spec: loaded.Agent.Spec}
 
-	var actions []payload.Action
-	tools := agentrt.ConnectorToolsForRun(reg, address.Address{}, "run-ada", func(a payload.Action) error {
+	var actions []event.Action
+	tools := native.ConnectorToolsForRun(reg, address.Address{}, "run-ada", func(a event.Action) error {
 		actions = append(actions, a)
 		return nil
 	})
@@ -632,16 +642,16 @@ func TestTheBuiltInAgentRunsOfflineAgainstItsOwnTools(t *testing.T) {
 			t.Errorf("the built-in agent grants %s, which does not resolve: %v", name, err)
 		}
 	}
-	runner, err := agentrt.New(rev,
-		agentrt.WithTools(tools),
-		agentrt.WithScript(
+	runner, err := native.New(rev,
+		native.WithTools(tools),
+		native.WithScript(
 			agenttest.ToolCallResponse("call_1", "author_list", map[string]any{}),
 			agenttest.TextResponse("You have one agent."),
 		))
 	if err != nil {
-		t.Fatalf("agentrt.New: %v", err)
+		t.Fatalf("native.New: %v", err)
 	}
-	res, err := runner.Run(ctx, agentrt.Turn{Text: "what agents do I have?"}, func(context.Context, agentrt.Chunk) error { return nil })
+	res, err := runner.Run(ctx, native.Turn{Text: "what agents do I have?"}, func(context.Context, event.Body) error { return nil })
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

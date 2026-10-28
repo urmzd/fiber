@@ -17,15 +17,16 @@ import (
 	"github.com/urmzd/playscape/pkg/task"
 	"github.com/urmzd/playscape/pkg/tool"
 	"github.com/urmzd/playscape/pkg/workspace"
-	saigetypes "github.com/urmzd/saige/agent/types"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
+	turnrt "github.com/urmzd/fiber/pkg/turn"
+	"github.com/urmzd/fiber/pkg/turn/native"
 
 	"github.com/urmzd/fiber/pkg/attachment"
+	saigetypes "github.com/urmzd/fiber/pkg/turn/native/saigetypes"
 )
 
 // Sandbox defaults.
@@ -45,20 +46,20 @@ const (
 // Catalog builds the tool catalog for one turn.
 //
 // action is called for every connector action the agent invokes; the Sandbox
-// turns each call into an envelope.KindActionTaken event on the run's stream, so
+// turns each call into a run.action.taken.v1 event on the run's stream, so
 // "the work got done" lands on the bus next to the conversation that decided to
 // do it.
-type Catalog func(req Request, action func(payload.Action) error) (agentrt.Tools, error)
+type Catalog func(req Request, action func(event.Action) error) (native.Tools, error)
 
 // Connectors returns a Catalog resolving tool names against the actions every
 // registered connector contributes, bound to the tag's own surface.
 func Connectors(reg *connector.Registry) Catalog {
-	return func(req Request, action func(payload.Action) error) (agentrt.Tools, error) {
+	return func(req Request, action func(event.Action) error) (native.Tools, error) {
 		target, err := req.SourceAddress()
 		if err != nil {
 			return nil, err
 		}
-		return agentrt.ConnectorToolsForRun(reg, target, req.RunID, action), nil
+		return native.ConnectorToolsForRun(reg, target, req.RunID, action), nil
 	}
 }
 
@@ -116,7 +117,7 @@ func (r Request) SourceAddress() (address.Address, error) {
 type Sandbox struct {
 	plane   controlplane.ControlPlane
 	tools   *tool.Registry
-	specs   Specs
+	defs    Definitions
 	catalog Catalog
 	// groups supplies tool groups per turn ahead of the catalog's own; nil
 	// leaves them to the catalog.
@@ -126,8 +127,8 @@ type Sandbox struct {
 	delegator Delegator
 	callTool  string
 
-	agentOpts []agentrt.Option
-	knowledge func(tenant string, sources []string) agentrt.Retriever
+	agentOpts []native.Option
+	knowledge func(tenant string, sources []string) native.Retriever
 	replicas  int
 	buffer    int
 	poll      time.Duration
@@ -161,13 +162,13 @@ type turn struct {
 	// sink carries the turn's chunks out. For a delegated sub-task, which has
 	// no stream of its own, only its usage is relayed from it onto its
 	// parent's stream; the rest is dropped.
-	sink chan agentrt.Chunk
+	sink chan event.Body
 	// stop asks the turn to wrap up. Nil for a turn that can only be
 	// cancelled.
-	stop <-chan agentrt.Stop
+	stop <-chan native.Stop
 	// compact carries requests to compact the turn's history. Nil for a
 	// turn nobody can ask.
-	compact <-chan agentrt.CompactRequest
+	compact <-chan native.CompactRequest
 	// abort is closed when nobody is waiting on the turn any more: its
 	// caller returned, was cancelled, or gave up on a stop. The tool cancels
 	// its own context on it, which is the only cancellation that reaches a
@@ -175,18 +176,18 @@ type turn struct {
 	abort chan struct{}
 	// stopped is the stop request the turn was handed, once it has been: how
 	// a delegation the stop cancels learns that it was a stop.
-	stopped atomic.Pointer[agentrt.Stop]
+	stopped atomic.Pointer[native.Stop]
 	// childUsage checks and reads a child run a Delegator reports, from the
 	// runtime executing the turn. Nil when the runtime offered none.
-	childUsage func(context.Context, string) (payload.UsageChild, error)
+	childUsage func(context.Context, string) (event.UsageChild, error)
 	// childQuestion checks and reads a child run a Delegator watches for
 	// questions (WatchChildQuestions). Nil when the runtime offered none.
-	childQuestion func(context.Context, string) (payload.ChildQuestion, bool, bool, error)
+	childQuestion func(context.Context, string) (event.ChildParked, bool, bool, error)
 	// actor is who the turn acts for, from the context the runtime executed
 	// it under: the actor on the run's durable record, or a delegated
 	// sub-task's parent's. The task never carries it, so nothing the task
 	// input says (and nothing a model wrote into it) can name someone else.
-	actor envelope.Actor
+	actor event.Actor
 }
 
 // SandboxOption configures a Sandbox.
@@ -209,7 +210,7 @@ func WithCatalog(c Catalog) SandboxOption {
 // under the grant's class.
 //
 // Expand is called under the turn's context, which carries the actor the run
-// acts for (envelope.ActorFrom): the actor on the tag in the run's durable
+// acts for (event.ActorFrom): the actor on the tag in the run's durable
 // record, the same one approvals are decided on, or a delegated sub-task's
 // parent's. A source that reaches a provider as a person, with that person's
 // own credential, reads it there and nowhere else. A turn that acts for
@@ -223,11 +224,11 @@ type ToolGroupSource interface {
 
 // WithToolGroupSource supplies a turn's tool groups from src, for the turn's
 // tenant and under its context. It feeds the one group mechanism
-// pkg/agentrt has: the turn's catalog answers agentrt's ToolGroups face from
+// pkg/turn/native has: the turn's catalog answers native's ToolGroups face from
 // src first and from the deployment catalog's own groups otherwise, and the
 // runner registers the members, never the group. A group src cannot expand
-// reaches the runner as agentrt.ErrNoSuchToolGroup, which drops it as
-// unavailable for that turn (or fails the build under agentrt.WithStrictTools),
+// reaches the runner as native.ErrNoSuchToolGroup, which drops it as
+// unavailable for that turn (or fails the build under native.WithStrictTools),
 // as any unresolvable group does.
 func WithToolGroupSource(src ToolGroupSource) SandboxOption {
 	return func(s *Sandbox) {
@@ -253,7 +254,7 @@ func WithToolGroupSource(src ToolGroupSource) SandboxOption {
 // only for a target the parent's pinned revision names in Access.Spawn. A host
 // with limits of its own enforces them here and returns the refusal as an
 // error, which the model sees as the tool failing.
-type Delegator func(ctx context.Context, parent Request, target, text string, report func(payload.Action) error) (string, error)
+type Delegator func(ctx context.Context, parent Request, target, text string, report func(event.Action) error) (string, error)
 
 // WithDelegator sets who carries out a delegation made by a turn that is a
 // durable run. A turn that is itself a sub-task has no run to hang another one
@@ -269,9 +270,9 @@ func WithCallTool(name string) SandboxOption {
 	return func(s *Sandbox) { s.callTool = name }
 }
 
-// WithAgentOptions passes options through to every agentrt.Runner the sandbox
+// WithAgentOptions passes options through to every native.Runner the sandbox
 // builds: the provider table, an offline script, a retriever, loop bounds.
-func WithAgentOptions(opts ...agentrt.Option) SandboxOption {
+func WithAgentOptions(opts ...native.Option) SandboxOption {
 	return func(s *Sandbox) { s.agentOpts = append(s.agentOpts, opts...) }
 }
 
@@ -282,7 +283,7 @@ func WithAgentOptions(opts ...agentrt.Option) SandboxOption {
 // belongs to, and to the sources its pinned revision declares. One retriever
 // shared by every run would have to pick a tenant, and there is no right one to
 // pick. The factory may return nil, which means this run retrieves nothing.
-func WithKnowledge(f func(tenant string, sources []string) agentrt.Retriever) SandboxOption {
+func WithKnowledge(f func(tenant string, sources []string) native.Retriever) SandboxOption {
 	return func(s *Sandbox) { s.knowledge = f }
 }
 
@@ -325,13 +326,13 @@ func WithSandboxLogger(l *slog.Logger) SandboxOption {
 	}
 }
 
-// NewSandbox returns an executor over a playscape control plane.
+// NewSandbox returns a turn runtime over a playscape control plane.
 //
 // tools is the registry the plane's nodes resolve from; the sandbox registers one
-// tool per agent into it as agents are first seen. specs is used only to resolve
+// tool per agent into it as agents are first seen. defs is used only to resolve
 // a delegation target's definition; passing nil disables delegation with an error
 // the model can read.
-func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, specs Specs, opts ...SandboxOption) (*Sandbox, error) {
+func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, defs Definitions, opts ...SandboxOption) (*Sandbox, error) {
 	if plane == nil {
 		return nil, fmt.Errorf("%w: no playscape control plane", ErrInvalid)
 	}
@@ -341,7 +342,7 @@ func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, specs Spe
 	s := &Sandbox{
 		plane:      plane,
 		tools:      tools,
-		specs:      specs,
+		defs:       defs,
 		replicas:   1,
 		buffer:     DefaultBuffer,
 		poll:       DefaultPollInterval,
@@ -356,15 +357,52 @@ func NewSandbox(plane controlplane.ControlPlane, tools *tool.Registry, specs Spe
 	return s, nil
 }
 
-var _ Executor = (*Sandbox)(nil)
+var _ turnrt.Runtime = (*Sandbox)(nil)
+
+// Turn runs one turn the runtime handed it (see RequestFrom) as a playscape
+// task. A turn with no request on its context is refused: the sandbox's
+// grants come from the pinned policy on the request, and nothing else.
+func (s *Sandbox) Turn(ctx context.Context, def turnrt.Pinned, in turnrt.Input, emit func(context.Context, event.Body) error) (turnrt.Result, error) {
+	req, ok := RequestFrom(ctx)
+	if !ok {
+		return turnrt.Result{}, fmt.Errorf("%w: the sandbox runs only turns a fiber runtime hands it", ErrInvalid)
+	}
+	if def.Name != req.Definition.Name || def.Version != req.Definition.Version {
+		return turnrt.Result{}, fmt.Errorf("%w: turn of %s@%s carries the request of %s@%s", ErrInvalid,
+			def.Name, def.Version, req.Definition.Name, req.Definition.Version)
+	}
+	out, err := s.execute(ctx, req, emit)
+	report(ctx, out)
+	res := turnrt.Result{Text: out.Text, Prompt: out.Prompt, Citations: out.Citations, Stopped: out.Stopped}
+	if err != nil {
+		return res, err
+	}
+	if out.Parked != nil {
+		p, perr := native.ParkedTo(*out.Parked)
+		if perr != nil {
+			return res, perr
+		}
+		res.Parked = &p
+	}
+	return res, nil
+}
 
 // ToolName is the playscape tool an agent's turns execute as. It is also the
 // agent's identity in the policy graph, and the object a spawn grant names.
 func ToolName(agent string) string { return "agent:" + agent }
 
-// DeploymentName is the playscape deployment a pinned revision runs in.
-func DeploymentName(agent string, rev int) string {
-	return fmt.Sprintf("fiber-%s-r%d", agent, rev)
+// DeploymentName is the playscape deployment a pinned definition runs in: its
+// name, version and the first 12 characters of the pin's hash, which covers
+// the policy the deployment's grants are compiled from.
+func DeploymentName(pin definition.Pin) string {
+	h := pin.Hash
+	if i := strings.LastIndexByte(h, ':'); i >= 0 {
+		h = h[i+1:]
+	}
+	if len(h) > 12 {
+		h = h[:12]
+	}
+	return fmt.Sprintf("fiber-%s-v%s-%s", pin.Name, pin.Version, h)
 }
 
 // DelegateToolName is the tool an agent calls to tag another agent.
@@ -375,24 +413,24 @@ func AnswerKey(agent, runID string) string {
 	return path.Join(AnswerArea, agent, runID, "answer")
 }
 
-// Execute submits the turn as a playscape task and publishes what it streams.
-func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
+// execute submits the turn as a playscape task and publishes what it streams.
+func (s *Sandbox) execute(ctx context.Context, req Request, emit func(context.Context, event.Body) error) (Outcome, error) {
 	if req.RunID == "" {
 		return Outcome{}, fmt.Errorf("%w: turn has no run id", ErrInvalid)
 	}
-	deployment, err := s.ensure(ctx, req.Revision)
+	deployment, err := s.ensure(ctx, req)
 	if err != nil {
 		return Outcome{}, err
 	}
 	req.Service = deployment
 
-	sink := make(chan agentrt.Chunk, s.buffer)
+	sink := make(chan event.Body, s.buffer)
 	// A stop request reaches the tool as a channel, never as a call into this
 	// type: the channel holds the request until the turn reads it, so a
 	// request that arrives before the task has been picked up is not lost to
 	// timing.
-	childQuestion, _ := ctx.Value(childQuestionKey{}).(func(context.Context, string) (payload.ChildQuestion, bool, bool, error))
-	actor, _ := envelope.ActorFrom(ctx)
+	childQuestion, _ := ctx.Value(childQuestionKey{}).(func(context.Context, string) (event.ChildParked, bool, bool, error))
+	actor, _ := event.ActorFrom(ctx)
 	if err := s.attach(req.RunID, &turn{sink: sink, stop: StopSignal(ctx), compact: CompactSignal(ctx), abort: make(chan struct{}), childUsage: childUsageOf(ctx), childQuestion: childQuestion, actor: actor}); err != nil {
 		return Outcome{}, err
 	}
@@ -421,8 +459,8 @@ func (s *Sandbox) Execute(ctx context.Context, req Request, emit func(context.Co
 // already in the buffer (it sent them all before returning, and a full buffer
 // would have blocked it), so a non-blocking drain finishes the stream in order
 // with nothing lost.
-func (s *Sandbox) stream(ctx context.Context, req Request, deployment, taskID string, sink <-chan agentrt.Chunk, emit func(context.Context, agentrt.Chunk) error) (Outcome, error) {
-	send := func(c agentrt.Chunk) error {
+func (s *Sandbox) stream(ctx context.Context, req Request, deployment, taskID string, sink <-chan event.Body, emit func(context.Context, event.Body) error) (Outcome, error) {
+	send := func(c event.Body) error {
 		if emit == nil {
 			return nil
 		}
@@ -475,25 +513,31 @@ func (s *Sandbox) stream(ctx context.Context, req Request, deployment, taskID st
 	}
 }
 
-// ensure deploys the service a pinned revision runs in, registering its tool and
-// its delegation targets' tools, and returns the deployment name.
-func (s *Sandbox) ensure(ctx context.Context, rev agentrt.Revision) (string, error) {
-	agent := rev.Spec.Name
-	key := fmt.Sprintf("%s@%d", agent, rev.Rev)
+// ensure deploys the service a pinned definition runs in, registering its tool
+// and its delegation targets' tools, and returns the deployment name. The
+// grants are read from the pinned policy (workspace areas) and the pinned
+// sub-agents (spawn), and from nothing else.
+func (s *Sandbox) ensure(ctx context.Context, req Request) (string, error) {
+	agent := req.Definition.Spec.Name
+	if req.Pin.IsZero() || req.Pin.Hash == "" || req.Pin.Name != agent || req.Pin.Version != req.Definition.Version {
+		// A deployment is named by its pin, so a request without one would
+		// share another definition's grants.
+		return "", fmt.Errorf("%w: agent %q has no pin for version %q", ErrInvalid, agent, req.Definition.Version)
+	}
+	name := DeploymentName(req.Pin)
 
 	s.mu.Lock()
-	name, ok := s.deployed[key]
+	_, ok := s.deployed[name]
 	s.mu.Unlock()
 	if ok {
 		return name, nil
 	}
 
-	name = DeploymentName(agent, rev.Rev)
 	if err := s.register(ToolName(agent)); err != nil {
 		return "", err
 	}
-	spawn := make([]string, 0, len(rev.Spec.Access.Spawn))
-	for _, target := range rev.Spec.Access.Spawn {
+	spawn := make([]string, 0, len(req.Definition.Spec.Access.Spawn))
+	for _, target := range req.Definition.Spec.Access.Spawn {
 		// A delegation target must be dispatchable before it can be spawned,
 		// and it runs under its own tool name with no grants of its own: a
 		// sub-task inherits nothing.
@@ -502,8 +546,8 @@ func (s *Sandbox) ensure(ctx context.Context, rev agentrt.Revision) (string, err
 		}
 		spawn = append(spawn, ToolName(target))
 	}
-	areas := make([]dispatchsandbox.Area, 0, len(rev.Spec.Access.WorkspaceAreas))
-	for _, prefix := range rev.Spec.Access.WorkspaceAreas {
+	areas := make([]dispatchsandbox.Area, 0, len(req.Policy.WorkspaceAreas))
+	for _, prefix := range req.Policy.WorkspaceAreas {
 		areas = append(areas, dispatchsandbox.Area{Prefix: prefix})
 	}
 
@@ -524,7 +568,7 @@ func (s *Sandbox) ensure(ctx context.Context, rev agentrt.Revision) (string, err
 	}
 
 	s.mu.Lock()
-	s.deployed[key] = name
+	s.deployed[name] = name
 	s.mu.Unlock()
 	return name, nil
 }
@@ -589,7 +633,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 		return nil, fmt.Errorf("runtime: sandbox: decode request: %w", err)
 	}
 	req := task.Request
-	rev := req.Revision
+	rev := req.Definition
 	if err := rev.Validate(); err != nil {
 		return nil, err
 	}
@@ -618,27 +662,27 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	// The turn acts for whoever the turn it was submitted for does, and for
 	// nobody when it is unwatched. It is set here whatever the node's own
 	// context carried, so a task cannot inherit someone it was not given.
-	var actor envelope.Actor
+	var actor event.Actor
 	if waited != nil {
 		actor = waited.actor
 	}
-	ctx = envelope.WithActor(ctx, actor)
+	ctx = event.WithActor(ctx, actor)
 
 	// A delegated sub-task's sink is read by the delegation waiting on it,
 	// which relays only the sub-task's usage onto the parent's stream: its
 	// answer is the tool result its parent reads, and it is not a durable run
 	// of its own, so it has no stream to publish onto.
-	var sink chan agentrt.Chunk
-	var stop <-chan agentrt.Stop
-	var compact <-chan agentrt.CompactRequest
+	var sink chan event.Body
+	var stop <-chan native.Stop
+	var compact <-chan native.CompactRequest
 	if waited != nil {
 		sink = waited.sink
 		compact = waited.compact
 		if waited.stop != nil {
 			// The request passes through here on its way to the agent loop,
 			// so the turn remembers it before anything it cancels can ask.
-			forward := make(chan agentrt.Stop, 1)
-			go func(in <-chan agentrt.Stop, t *turn) {
+			forward := make(chan native.Stop, 1)
+			go func(in <-chan native.Stop, t *turn) {
 				select {
 				case req := <-in:
 					t.stopped.Store(&req)
@@ -649,7 +693,7 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 			stop = forward
 		}
 	}
-	send := func(c agentrt.Chunk) error {
+	send := func(c event.Body) error {
 		if sink == nil {
 			return nil
 		}
@@ -676,27 +720,27 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 	// The sandbox's logger goes first so a host's own agent options can
 	// replace it; it is where a granted tool the turn had to drop is
 	// reported to the operator.
-	opts := append(append([]agentrt.Option{agentrt.WithLogger(s.logger)}, s.agentOpts...), agentrt.WithTools(tools))
+	opts := append(append([]native.Option{native.WithLogger(s.logger)}, s.agentOpts...), native.WithTools(tools))
 	if s.knowledge != nil {
 		names := make([]string, 0, len(rev.Spec.Sources))
 		for _, src := range rev.Spec.Sources {
 			names = append(names, src.Name)
 		}
 		if r := s.knowledge(req.Tenant, names); r != nil {
-			opts = append(opts, agentrt.WithRetriever(r))
+			opts = append(opts, native.WithRetriever(r))
 		}
 	}
-	runner, err := agentrt.New(rev, opts...)
+	runner, err := native.New(rev, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	res, err := runner.Run(ctx, agentrt.Turn{
+	res, err := runner.Run(ctx, native.Turn{
 		Text: req.Text, Meta: req.Meta, History: req.History, Instructions: req.Instructions,
 		Attachments: req.Attachments, Tenant: req.Tenant,
 		Stop: stop, Compact: compact, Accounting: req.Accounting,
 		Park: req.Park, QuestionTTL: req.QuestionTTL, Resume: req.Resume,
-	}, func(_ context.Context, c agentrt.Chunk) error {
+	}, func(_ context.Context, c event.Body) error {
 		return send(c)
 	})
 	if err != nil {
@@ -730,23 +774,23 @@ func (s *Sandbox) call(ctx context.Context, rt tool.Runtime, input []byte) ([]by
 // group to expand it, as a turn does.
 //
 // ctx carries the actor as it does for Execute: whoever asks puts the actor
-// the turn would act for on it (envelope.WithActor), and a context with none
+// the turn would act for on it (event.WithActor), and a context with none
 // is a turn for nobody.
-func (s *Sandbox) ToolsFor(ctx context.Context, req Request) (agentrt.Granted, error) {
-	rev := req.Revision
+func (s *Sandbox) ToolsFor(ctx context.Context, req Request) (native.Granted, error) {
+	rev := req.Definition
 	if err := rev.Validate(); err != nil {
-		return agentrt.Granted{}, err
+		return native.Granted{}, err
 	}
 	req.Accounting = accountingOf(req)
 	// Nothing runs, so there is no node runtime to hand the delegation tools
 	// and nothing they report has anywhere to go.
-	tools, granted, err := s.turnTools(ctx, nil, req, func(agentrt.Chunk) error { return nil })
+	tools, granted, err := s.turnTools(ctx, nil, req, func(event.Body) error { return nil })
 	if err != nil {
-		return agentrt.Granted{}, err
+		return native.Granted{}, err
 	}
 	rev.Spec.Tools = granted
-	opts := append(append([]agentrt.Option{agentrt.WithLogger(s.logger)}, s.agentOpts...), agentrt.WithTools(tools))
-	return agentrt.ResolveTools(rev, opts...)
+	opts := append(append([]native.Option{native.WithLogger(s.logger)}, s.agentOpts...), native.WithTools(tools))
+	return native.ResolveTools(rev, opts...)
 }
 
 // turnTools assembles the tools one turn may call: the deployment's catalog for
@@ -760,18 +804,12 @@ func (s *Sandbox) ToolsFor(ctx context.Context, req Request) (agentrt.Granted, e
 // It returns the catalog and the effective list of granted tool names, in a
 // stable order so that two turns of the same revision show the model the same
 // tools in the same sequence.
-func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, send func(agentrt.Chunk) error) (agentrt.Tools, []string, error) {
+func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, send func(event.Body) error) (native.Tools, []string, error) {
 	// A sub-task acts for the person its parent acts for.
-	actor, _ := envelope.ActorFrom(ctx)
-	report := func(a payload.Action) error {
-		body, err := payload.Encode(a)
-		if err != nil {
-			return err
-		}
-		return send(agentrt.Chunk{Kind: envelope.KindActionTaken, Payload: body})
-	}
+	actor, _ := event.ActorFrom(ctx)
+	report := func(a event.Action) error { return send(a) }
 
-	granted := make([]string, 0, len(req.Revision.Spec.Tools)+len(req.Revision.Spec.Access.Spawn))
+	granted := make([]string, 0, len(req.Definition.Spec.Tools)+len(req.Definition.Spec.Access.Spawn))
 	seen := make(map[string]bool, cap(granted))
 	add := func(name string) {
 		if name == "" || seen[name] {
@@ -780,23 +818,23 @@ func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, s
 		seen[name] = true
 		granted = append(granted, name)
 	}
-	for _, name := range req.Revision.Spec.Tools {
+	for _, name := range req.Definition.Spec.Tools {
 		add(name)
 	}
 
-	delegates := make(map[string]saigetypes.Tool, len(req.Revision.Spec.Access.Spawn))
-	for _, target := range req.Revision.Spec.Access.Spawn {
+	delegates := make(map[string]saigetypes.Tool, len(req.Definition.Spec.Access.Spawn))
+	for _, target := range req.Definition.Spec.Access.Spawn {
 		name := DelegateToolName(target)
 		delegates[name] = s.delegateTool(rt, req, actor, target, report, send)
 		if s.callTool == "" {
 			add(name)
 		}
 	}
-	if s.callTool != "" && len(req.Revision.Spec.Access.Spawn) > 0 {
+	if s.callTool != "" && len(req.Definition.Spec.Access.Spawn) > 0 {
 		add(s.callTool)
 	}
 
-	var base agentrt.Tools
+	var base native.Tools
 	if s.catalog != nil {
 		b, err := s.catalog(req, report)
 		if err != nil {
@@ -810,7 +848,7 @@ func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, s
 			return t, nil
 		}
 		if base == nil {
-			return nil, fmt.Errorf("%w: %q (no tool catalog configured)", agentrt.ErrNoSuchTool, name)
+			return nil, fmt.Errorf("%w: %q (no tool catalog configured)", native.ErrNoSuchTool, name)
 		}
 		t, err := base.Lookup(name)
 		if err != nil {
@@ -829,31 +867,31 @@ func (s *Sandbox) turnTools(ctx context.Context, rt tool.Runtime, req Request, s
 // single tools resolve from. Delegation tools belong to no group: Access.Spawn
 // alone grants them.
 type turnCatalog struct {
-	// ctx is the turn's: agentrt asks for groups while it builds the
+	// ctx is the turn's: native asks for groups while it builds the
 	// runner, inside the turn, and an expansion that dials a server must
 	// stop when the turn does.
 	ctx    context.Context
 	tenant string
 	groups ToolGroupSource
-	base   agentrt.Tools
+	base   native.Tools
 	lookup func(name string) (saigetypes.Tool, error)
 }
 
 func (c turnCatalog) Lookup(name string) (saigetypes.Tool, error) { return c.lookup(name) }
 
-func (c turnCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
+func (c turnCatalog) ToolGroup(name string) (native.ToolGroup, error) {
 	if c.groups != nil {
 		tools, ok, err := c.groups.Expand(c.ctx, c.tenant, name)
 		switch {
 		case ok && err != nil:
-			return agentrt.ToolGroup{}, fmt.Errorf("%w: %q: %w", agentrt.ErrNoSuchToolGroup, name, err)
+			return native.ToolGroup{}, fmt.Errorf("%w: %q: %w", native.ErrNoSuchToolGroup, name, err)
 		case ok:
-			return agentrt.ToolGroup{Name: name, Tools: tools}, nil
+			return native.ToolGroup{Name: name, Tools: tools}, nil
 		}
 	}
-	groups, ok := c.base.(agentrt.ToolGroups)
+	groups, ok := c.base.(native.ToolGroups)
 	if !ok {
-		return agentrt.ToolGroup{}, fmt.Errorf("%w: %q (this deployment's tool catalog has no groups)", agentrt.ErrNoSuchToolGroup, name)
+		return native.ToolGroup{}, fmt.Errorf("%w: %q (this deployment's tool catalog has no groups)", native.ErrNoSuchToolGroup, name)
 	}
 	return groups.ToolGroup(name)
 }
@@ -895,7 +933,7 @@ func (c turnCatalog) ToolGroup(name string) (agentrt.ToolGroup, error) {
 // whether the child answers, fails or is aborted. A host Delegator reports the
 // run it started with ReportChildUsage, from the context it is given, and the
 // runtime reads that run's total from the ledger.
-func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.Actor, target string, report func(payload.Action) error, send func(agentrt.Chunk) error) saigetypes.Tool {
+func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor event.Actor, target string, report func(event.Action) error, send func(event.Body) error) saigetypes.Tool {
 	if parent.ChildRuns && parent.RunID != "" {
 		return &childRunTool{s: s, parent: parent, target: target, send: send}
 	}
@@ -924,10 +962,10 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.A
 				defer done()
 				return s.delegator(dctx, parent, target, text, report)
 			}
-			if s.specs == nil {
+			if s.defs == nil {
 				return "", fmt.Errorf("%w: this deployment cannot resolve agent %q", ErrInvalid, target)
 			}
-			rev, err := s.specs.Latest(ctx, parent.Tenant, target)
+			loaded, err := s.subagent(ctx, parent, target)
 			if err != nil {
 				return "", fmt.Errorf("runtime: delegate to %q: %w", target, err)
 			}
@@ -937,7 +975,7 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.A
 			// stopped parent would leave its helpers working on answers
 			// nobody will read.
 			sub := fmt.Sprintf("sub-%d", s.subs.Add(1))
-			sink := make(chan agentrt.Chunk, s.buffer)
+			sink := make(chan event.Body, s.buffer)
 			if err := s.attach(sub, &turn{sink: sink, abort: make(chan struct{}), actor: actor}); err != nil {
 				return "", err
 			}
@@ -957,8 +995,10 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.A
 				Source:  parent.Source,
 				Text:    text,
 				// No History: see above.
-				Revision: rev,
-				Service:  parent.Service,
+				Definition: pinnedOf(loaded),
+				Pin:        loaded.Pin,
+				Policy:     loaded.Agent.Policy,
+				Service:    parent.Service,
 				// The child's calls are keyed under the parent's, so no two
 				// calls of one run share a key at any depth.
 				Accounting: parent.Accounting + "/" + target + "." + sub,
@@ -999,8 +1039,8 @@ func (s *Sandbox) delegateTool(rt tool.Runtime, parent Request, actor envelope.A
 // that function relays what is still buffered and waits for the relay to end.
 // Everything else a sub-task streams is dropped: its answer reaches the parent
 // as the delegation tool's result.
-func relay(sink <-chan agentrt.Chunk, send func(agentrt.Chunk) error) func() {
-	forward := func(c agentrt.Chunk) {
+func relay(sink <-chan event.Body, send func(event.Body) error) func() {
+	forward := func(c event.Body) {
 		if up, ok := relayUsage(c); ok {
 			// A parent that has gone away cannot be told. The child's
 			// calls are then lost with the parent's own unfinished ones.
@@ -1098,16 +1138,16 @@ func (r *subTask) Spawn(ctx context.Context, t task.Task) (string, error) {
 
 // childRunTool is the delegation tool of a durable run whose delegations are
 // child runs (WithChildRuns). The turn parks at a call to it (it is
-// agentrt.Awaiting), the runtime starts the child, and the continuation runs
+// native.Awaiting), the runtime starts the child, and the continuation runs
 // the call with the child's ending as its answer.
 type childRunTool struct {
 	s      *Sandbox
 	parent Request
 	target string
-	send   func(agentrt.Chunk) error
+	send   func(event.Body) error
 }
 
-var _ agentrt.Awaiting = (*childRunTool)(nil)
+var _ native.Awaiting = (*childRunTool)(nil)
 
 func (t *childRunTool) Definition() saigetypes.ToolDef {
 	return saigetypes.ToolDef{
@@ -1125,15 +1165,15 @@ func (t *childRunTool) Definition() saigetypes.ToolDef {
 
 // AwaitQuestion describes the wait a call parks on. A call with no request
 // text is not a delegation: it runs, and tells the model what was wrong.
-func (t *childRunTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
+func (t *childRunTool) AwaitQuestion(call saigetypes.ToolCallPart) (event.Question, bool) {
 	text, _ := call.Arguments["text"].(string)
 	if strings.TrimSpace(text) == "" {
-		return payload.Question{}, false
+		return event.Question{}, false
 	}
 	args, _ := json.Marshal(call.Arguments)
-	return payload.Question{
+	return event.Question{
 		Prompt: text,
-		Tool:   &payload.QuestionTool{Name: call.Name, CallID: call.ID, Arguments: args},
+		Tool:   &event.QuestionTool{Name: call.Name, CallID: call.ID, Arguments: args},
 	}, true
 }
 
@@ -1143,16 +1183,14 @@ func (t *childRunTool) Execute(ctx context.Context, args map[string]any) (string
 	if text, _ := args["text"].(string); strings.TrimSpace(text) == "" {
 		return "", fmt.Errorf("%w: delegation to %q needs a text request", ErrInvalid, t.target)
 	}
-	a, ok := agentrt.AnswerFor(ctx)
+	a, ok := native.AnswerFor(ctx)
 	if !ok {
 		return "", fmt.Errorf("runtime: delegation to %q: the run it started has not answered", t.target)
 	}
 	if a.RunID != "" {
 		if turn := t.s.turn(t.parent.RunID); turn != nil && turn.childUsage != nil {
 			if c, err := turn.childUsage(ctx, a.RunID); err == nil {
-				if body, err := payload.Encode(c); err == nil {
-					_ = t.send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
-				}
+				_ = t.send(c)
 			}
 		}
 	}
@@ -1164,7 +1202,7 @@ func (t *childRunTool) Execute(ctx context.Context, args map[string]any) (string
 
 // hostCallContext gives a unified host tool the same stop propagation, child
 // accounting and question forwarding as the built-in delegation tools.
-func (s *Sandbox) hostCallContext(ctx context.Context, parent Request, send func(agentrt.Chunk) error) (context.Context, func()) {
+func (s *Sandbox) hostCallContext(ctx context.Context, parent Request, send func(event.Body) error) (context.Context, func()) {
 	dctx, done := s.delegationContext(ctx, parent.RunID)
 	dctx = context.WithValue(dctx, usageReporterKey{}, func(ctx context.Context, runID string) error {
 		t := s.turn(parent.RunID)
@@ -1175,23 +1213,15 @@ func (s *Sandbox) hostCallContext(ctx context.Context, parent Request, send func
 		if err != nil {
 			return err
 		}
-		body, err := payload.Encode(c)
-		if err != nil {
-			return err
-		}
-		return send(agentrt.Chunk{Kind: envelope.KindUsageChild, Payload: body})
+		return send(c)
 	})
 	dctx = context.WithValue(dctx, childQuestionKey{}, func(ctx context.Context, runID string) error {
 		t := s.turn(parent.RunID)
 		if t == nil || t.childQuestion == nil {
 			return fmt.Errorf("%w: this runtime cannot vouch for child runs", ErrNotAChild)
 		}
-		return watchChild(ctx, t.childQuestion, runID, func(cq payload.ChildQuestion) error {
-			body, err := payload.Encode(cq)
-			if err != nil {
-				return err
-			}
-			return send(agentrt.Chunk{Kind: envelope.KindChildParked, Payload: body})
+		return watchChild(ctx, t.childQuestion, runID, func(cq event.ChildParked) error {
+			return send(cq)
 		})
 	})
 
@@ -1202,7 +1232,7 @@ type hostCallTool struct {
 	saigetypes.Tool
 	sandbox *Sandbox
 	parent  Request
-	send    func(agentrt.Chunk) error
+	send    func(event.Body) error
 }
 
 func (t *hostCallTool) Execute(ctx context.Context, args map[string]any) (string, error) {
@@ -1213,23 +1243,34 @@ func (t *hostCallTool) Execute(ctx context.Context, args map[string]any) (string
 
 // Approval forwards a per-call approval to the tool the host wraps, so a host
 // call tool that decides per call who must approve it still asks.
-func (t *hostCallTool) Approval(call saigetypes.ToolCallPart) (agentrt.ApprovalRequest, bool) {
-	if approving, ok := t.Tool.(agentrt.Approving); ok {
+func (t *hostCallTool) Approval(call saigetypes.ToolCallPart) (native.ApprovalRequest, bool) {
+	if approving, ok := t.Tool.(native.Approving); ok {
 		return approving.Approval(call)
 	}
-	return agentrt.ApprovalRequest{}, false
+	return native.ApprovalRequest{}, false
 }
 
 // ActsForPerson forwards whether the tool the host wraps runs with the
 // credential of the person the turn acts for, so an approval of it says so.
 func (t *hostCallTool) ActsForPerson() bool {
-	p, ok := t.Tool.(agentrt.PersonScoped)
+	p, ok := t.Tool.(native.PersonScoped)
 	return ok && p.ActsForPerson()
 }
 
-func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (payload.Question, bool) {
-	if awaiting, ok := t.Tool.(agentrt.Awaiting); ok {
+func (t *hostCallTool) AwaitQuestion(call saigetypes.ToolCallPart) (event.Question, bool) {
+	if awaiting, ok := t.Tool.(native.Awaiting); ok {
 		return awaiting.AwaitQuestion(call)
 	}
-	return payload.Question{}, false
+	return event.Question{}, false
+}
+
+// subagent loads the definition a delegation runs, verified: target and
+// every sub-agent it reaches at the versions the parent's pin names. A
+// target the pin does not name fails terminally.
+func (s *Sandbox) subagent(ctx context.Context, parent Request, target string) (definition.Loaded, error) {
+	pin, err := s.defs.ResolveUnder(ctx, parent.Tenant, parent.Pin, target)
+	if err != nil {
+		return definition.Loaded{}, err
+	}
+	return s.defs.Verify(ctx, parent.Tenant, pin)
 }

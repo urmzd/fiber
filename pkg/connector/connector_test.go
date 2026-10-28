@@ -8,7 +8,7 @@ import (
 
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Three connectors covering the three shapes the mesh actually has: a full
@@ -18,11 +18,11 @@ import (
 type fullPeer struct{ name string }
 
 func (f fullPeer) Name() string { return f.name }
-func (f fullPeer) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
+func (f fullPeer) Ingest(ctx context.Context, _ connector.Publish) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
-func (f fullPeer) Deliver(context.Context, address.Address, envelope.Event) error { return nil }
+func (f fullPeer) Deliver(context.Context, address.Address, event.Envelope) error { return nil }
 func (f fullPeer) Actions() []connector.Action {
 	return []connector.Action{{Name: f.name + "_comment", Description: "post a comment"}}
 }
@@ -30,7 +30,7 @@ func (f fullPeer) Actions() []connector.Action {
 type triggerOnly struct{}
 
 func (triggerOnly) Name() string { return "cron" }
-func (triggerOnly) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
+func (triggerOnly) Ingest(ctx context.Context, _ connector.Publish) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -38,7 +38,7 @@ func (triggerOnly) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
 type sinkOnly struct{}
 
 func (sinkOnly) Name() string                                                   { return "webhook" }
-func (sinkOnly) Deliver(context.Context, address.Address, envelope.Event) error { return nil }
+func (sinkOnly) Deliver(context.Context, address.Address, event.Envelope) error { return nil }
 
 type inert struct{}
 

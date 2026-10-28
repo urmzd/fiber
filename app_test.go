@@ -18,14 +18,14 @@ import (
 	"github.com/urmzd/anchor/pkg/ledger"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/blob"
 	"github.com/urmzd/fiber/pkg/bus"
+	"github.com/urmzd/fiber/pkg/connector"
 	"github.com/urmzd/fiber/pkg/connectors/webhook"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/knowledge"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/membership"
 	"github.com/urmzd/fiber/pkg/runtime"
 	"github.com/urmzd/fiber/pkg/thread"
 	"github.com/urmzd/fiber/pkg/toolprovider"
@@ -34,34 +34,67 @@ import (
 // postgresEnv names a Postgres the backend tests run against when set.
 const postgresEnv = "FIBER_POSTGRES_TEST_URL"
 
-// inbox is a sink that records what was delivered where.
+// inbox is a sink that records what was delivered where. It receives the
+// run types of the inbox:// channels, or the channels and types it is given,
+// rendered at target when one is set.
 type inbox struct {
+	channels []string
+	types    []string
+	target   address.Address
+
 	mu   sync.Mutex
-	seen map[string][]envelope.Event
+	seen map[string][]event.Envelope
 }
 
 func (i *inbox) Name() string { return "inbox" }
 
-func (i *inbox) Deliver(_ context.Context, target address.Address, e envelope.Event) error {
+func (i *inbox) Subscriptions() []connector.Subscription {
+	channels, types := i.channels, i.types
+	if channels == nil {
+		channels = []string{"inbox://"}
+	}
+	if types == nil {
+		types = []string{"run"}
+	}
+	return []connector.Subscription{{Channels: channels, Types: types, Target: i.target}}
+}
+
+// posted is a message.posted.v1 asking agent, published on channel: where
+// the run's events are published, and so where the inbox renders them.
+func posted(id, tenant, agent, channel, text string) event.Envelope {
+	return event.Envelope{
+		ID: id, Source: channel, Type: event.TypeMessagePosted, Channel: channel,
+		Time: time.Now().UTC(), Tenant: tenant,
+		Data: event.MessagePosted{Request: event.Request{Text: text, Mentions: []string{agent}}},
+	}
+}
+
+// ask accepts the run of the agent e mentions first.
+func ask(ctx context.Context, app *App, e event.Envelope) (runtime.Acceptance, error) {
+	r, _ := event.RequestOf(e.Data)
+	return app.Runtime().Accept(ctx, e, r.Mentions[0])
+}
+
+func (i *inbox) Deliver(_ context.Context, target address.Address, e event.Envelope) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.seen == nil {
-		i.seen = map[string][]envelope.Event{}
+		i.seen = map[string][]event.Envelope{}
 	}
 	i.seen[target.String()] = append(i.seen[target.String()], e)
 	return nil
 }
 
-func (i *inbox) at(target string) []envelope.Event {
+func (i *inbox) at(target string) []event.Envelope {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return append([]envelope.Event(nil), i.seen[target]...)
+	return append([]event.Envelope(nil), i.seen[target]...)
 }
 
 // completed reports whether target has received a run's final event.
 func (i *inbox) completed(target string) bool {
 	for _, e := range i.at(target) {
-		if e.Kind == envelope.KindCompleted {
+		if e.Type == event.TypeCompleted {
 			return true
 		}
 	}
@@ -163,40 +196,33 @@ func awaitEnded(t *testing.T, app *App, tenant, runID string) Run {
 	}
 }
 
-var offline = agentspec.AgentSpec{Name: "docs-bot", Model: "m", Provider: agentspec.ProviderOffline, SystemPrompt: "Answer."}
+var offline = definition.AgentSpec{Name: "docs-bot", Model: "m", Provider: definition.ProviderOffline, SystemPrompt: "Answer."}
 
-// A tag id is whatever the caller sent, so two tenants can send the same one.
-// Routes are registered and runs are started under an identity that includes
-// the tenant, so the second tenant gets its own run delivered to its own
-// target. It does not join the first tenant's run, and it does not replace
-// where that run's events go.
-func TestATenantReusingAnotherTenantsTagIDCannotJoinOrRerouteItsRun(t *testing.T) {
+// An event id is whatever the caller sent, so two tenants can send the same
+// one. Runs are started and delivered under an identity that includes the
+// tenant, so the second tenant gets its own run delivered on its own
+// channel. It does not join the first tenant's run, and it does not receive
+// that run's events.
+func TestATenantReusingAnotherTenantsEventIDCannotJoinOrReceiveItsRun(t *testing.T) {
 	box := &inbox{}
 	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.Run)
+	start(t, func(ctx context.Context) error { return app.Egress().Run(ctx, "globex") })
 	ctx := context.Background()
 
 	for _, tenant := range []string{"acme", "globex"} {
-		if _, err := app.Registry().Create(ctx, tenant, offline, "test"); err != nil {
+		if _, err := createAgent(app.Definitions(), ctx, tenant, offline, "test"); err != nil {
 			t.Fatalf("create agent for %s: %v", tenant, err)
 		}
 	}
-	tagFor := func(tenant string) (envelope.Tag, string) {
-		target := address.MustParse("inbox://" + tenant + "/out")
-		return envelope.Tag{
-			ID: "Ev-shared", Tenant: tenant, Agent: "docs-bot", Origin: "test",
-			Text: tenant + " asks", Deliver: []envelope.Route{{Target: target}}, At: time.Now(),
-		}, target.String()
-	}
-	acmeTag, acmeOut := tagFor("acme")
-	globexTag, globexOut := tagFor("globex")
-	a, err := app.Invoke(ctx, acmeTag)
+	acmeOut, globexOut := "inbox://acme/out", "inbox://globex/out"
+	a, err := ask(ctx, app, posted("Ev-shared", "acme", "docs-bot", acmeOut, "acme asks"))
 	if err != nil {
-		t.Fatalf("invoke for acme: %v", err)
+		t.Fatalf("accept for acme: %v", err)
 	}
-	b, err := app.Invoke(ctx, globexTag)
+	b, err := ask(ctx, app, posted("Ev-shared", "globex", "docs-bot", globexOut, "globex asks"))
 	if err != nil {
-		t.Fatalf("invoke for globex: %v", err)
+		t.Fatalf("accept for globex: %v", err)
 	}
 	if a.RunID == b.RunID {
 		t.Fatalf("both tenants were given run %q", a.RunID)
@@ -205,13 +231,13 @@ func TestATenantReusingAnotherTenantsTagIDCannotJoinOrRerouteItsRun(t *testing.T
 	awaitDelivered(t, box, globexOut)
 	for _, want := range []struct{ out, tenant, runID string }{{acmeOut, "acme", a.RunID}, {globexOut, "globex", b.RunID}} {
 		for _, e := range box.at(want.out) {
-			if e.Tenant != want.tenant || e.RunID != want.runID {
-				t.Errorf("%s received an event of tenant %q run %q; want only tenant %q run %q", want.out, e.Tenant, e.RunID, want.tenant, want.runID)
+			if e.Tenant != want.tenant || e.Run != want.runID {
+				t.Errorf("%s received an event of tenant %q run %q; want only tenant %q run %q", want.out, e.Tenant, e.Run, want.tenant, want.runID)
 			}
 		}
 	}
-	if run, err := app.Status(ctx, "acme", a.RunID); err != nil || !strings.HasPrefix(run.Tag.Text, "acme") {
-		t.Errorf("acme reading its run: %+v, %v", run.Tag.Text, err)
+	if run, err := app.Status(ctx, "acme", a.RunID); err != nil || !strings.HasPrefix(run.Trigger.Data.(event.MessagePosted).Text, "acme") {
+		t.Errorf("acme reading its run: %+v, %v", run.Trigger, err)
 	}
 	if _, err := app.Status(ctx, "globex", a.RunID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("globex reading acme's run = %v, want ErrNotFound", err)
@@ -227,20 +253,17 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.RunDelivery)
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
+	if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
 		t.Fatal(err)
 	}
 	target := address.MustParse("inbox://acme/out")
-	acc, err := app.Invoke(ctx, envelope.Tag{
-		ID: "Ev-1", Tenant: "acme", Agent: "docs-bot", Origin: "test",
-		Text: "explain", Deliver: []envelope.Route{{Target: target}}, At: time.Now(),
-	})
+	acc, err := ask(ctx, app, posted("Ev-1", "acme", "docs-bot", target.String(), "explain"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, req := range []runtime.StopRequest{
 		{Tenant: "globex", RunID: acc.RunID, Reason: "theirs"},
-		{Tenant: "acme", RunID: "Ev-1", Reason: "the tag id"},
+		{Tenant: "acme", RunID: "Ev-1", Reason: "the event id"},
 		{Tenant: "acme", RunID: acc.RunID, Reason: "Stopped by a user", By: "slack:U1"},
 	} {
 		if err := app.Stop(ctx, req); err != nil {
@@ -253,11 +276,11 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 
 	// Only now is there a worker.
 	start(t, app.RunExecution)
-	var last envelope.Event
+	var last event.Envelope
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		events := box.at(target.String())
-		if n := len(events); n > 0 && events[n-1].Kind == envelope.KindStopped {
+		if n := len(events); n > 0 && events[n-1].Type == event.TypeStopped {
 			last = events[n-1]
 			break
 		}
@@ -269,8 +292,8 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 	if box.completed(target.String()) {
 		t.Fatal("a stopped run was delivered as completed")
 	}
-	if !strings.Contains(string(last.Payload), "Stopped by a user") || !strings.Contains(string(last.Payload), "slack:U1") {
-		t.Errorf("lifecycle.stopped payload = %s, want the acme request", last.Payload)
+	if !strings.Contains(bodyJSON(last), "Stopped by a user") || !strings.Contains(bodyJSON(last), "slack:U1") {
+		t.Errorf("run.stopped body = %s, want the acme request", bodyJSON(last))
 	}
 	run := awaitEnded(t, app, "acme", acc.RunID)
 	if run.Status != StatusStopped || !run.Status.Terminal() || run.StopReason != "Stopped by a user" || run.StoppedBy != "slack:U1" {
@@ -279,37 +302,30 @@ func TestAStopEndsTheRunAndIsDeliveredAsStopped(t *testing.T) {
 }
 
 // A run's usage is delivered on its terminal event and read back from the
-// ledger by Status, and the two agree. A route that selects usage receives
-// the usage.call events.
+// ledger by Status, and the two agree. A sink that subscribes to usage
+// receives the usage.call events.
 func TestStatusReadsTheUsageTheRunRecorded(t *testing.T) {
-	box := &inbox{}
+	box := &inbox{types: []string{"run.usage", "run.accepted", "run.started", "run.completed", "run.failed", "run.stopped"}}
 	app := newApp(t, WithTenant("acme"), WithConnector(box))
 	start(t, app.Run)
 	ctx := context.Background()
-	if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
+	if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
 		t.Fatal(err)
 	}
 	target := address.MustParse("inbox://acme/out")
-	acc, err := app.Invoke(ctx, envelope.Tag{
-		ID: "Ev-1", Tenant: "acme", Agent: "docs-bot", Origin: "test",
-		Text: "explain", Deliver: []envelope.Route{{Target: target, Kinds: []string{"usage", "lifecycle"}}}, At: time.Now(),
-	})
+	acc, err := ask(ctx, app, posted("Ev-1", "acme", "docs-bot", target.String(), "explain"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	awaitDelivered(t, box, target.String())
-	var delivered *payload.RunUsage
+	var delivered *event.RunUsage
 	calls := 0
 	for _, e := range box.at(target.String()) {
-		switch e.Kind {
-		case envelope.KindUsageCall:
+		switch b := e.Data.(type) {
+		case event.UsageCall:
 			calls++
-		case envelope.KindCompleted:
-			body, err := payload.Decode[payload.Lifecycle](e)
-			if err != nil {
-				t.Fatal(err)
-			}
-			delivered = body.Usage
+		case event.Completed:
+			delivered = b.Usage
 		}
 	}
 	if calls == 0 || delivered == nil || delivered.Total.ModelCalls != calls {
@@ -328,7 +344,7 @@ func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T)
 		app := newApp(t, WithTenant("acme"))
 		for name, ok := range map[string]bool{
 			"bus":           isType[*bus.Memory](app.Bus()),
-			"registry":      isType[*registry.Memory](app.Registry()),
+			"definitions":   isType[*definition.Memory](app.Definitions()),
 			"knowledge":     isType[*knowledge.Memory](app.Knowledge()),
 			"threads":       isType[*thread.Memory](app.Threads()),
 			"tool provider": isType[*toolprovider.Memory](app.ToolProviders()),
@@ -349,7 +365,7 @@ func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T)
 		app := newApp(t, WithTenant("acme"), WithPostgres(pool), WithBus(pg), WithConnector(box))
 		for name, ok := range map[string]bool{
 			"bus":           isType[*bus.Postgres](app.Bus()),
-			"registry":      isType[*registry.Postgres](app.Registry()),
+			"definitions":   isType[*definition.Postgres](app.Definitions()),
 			"knowledge":     isType[*knowledge.Postgres](app.Knowledge()),
 			"threads":       isType[*thread.Postgres](app.Threads()),
 			"tool provider": isType[*toolprovider.Postgres](app.ToolProviders()),
@@ -361,12 +377,11 @@ func TestEveryBackendIsMemoryUnlessGivenAndPostgresFillsEveryStore(t *testing.T)
 		// And a run goes end to end on it.
 		start(t, app.Run)
 		ctx := context.Background()
-		if _, err := app.Registry().Create(ctx, "acme", offline, "test"); err != nil {
+		if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
 			t.Fatal(err)
 		}
 		target := address.MustParse("inbox://acme/pg")
-		acc, err := app.Invoke(ctx, envelope.Tag{ID: "Ev-pg", Tenant: "acme", Agent: "docs-bot", Origin: "test",
-			Text: "explain", Deliver: []envelope.Route{{Target: target}}, At: time.Now()})
+		acc, err := ask(ctx, app, posted("Ev-pg", "acme", "docs-bot", target.String(), "explain"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -456,5 +471,57 @@ func TestIndexGroundsAgentsInFiles(t *testing.T) {
 	hits, err := app.Knowledge().Search(ctx, "acme", knowledge.Query{Text: "release workflow", Sources: []string{"handbook"}})
 	if err != nil || len(hits) == 0 {
 		t.Fatalf("Search = %v, %v", hits, err)
+	}
+}
+
+// An event published twice wakes each member once: the redelivery joins the
+// run the first delivery started, and the run's events go to the sink that
+// subscribes to the event's channel.
+func TestRedeliveredEventJoinsItsRun(t *testing.T) {
+	box := &inbox{channels: []string{"slack://T1/C1"}, target: address.MustParse("inbox://acme/out")}
+	app := newApp(t, WithTenant("acme"), WithConnector(box))
+	start(t, app.Run)
+	ctx := context.Background()
+	if _, err := createAgent(app.Definitions(), ctx, "acme", offline, "test"); err != nil {
+		t.Fatal(err)
+	}
+	const channel = "slack://T1/C1"
+	if err := app.Memberships().Join(ctx, "acme", channel, "docs-bot", membership.Rule{Types: []string{"message"}}); err != nil {
+		t.Fatal(err)
+	}
+	e := event.Envelope{
+		ID: "Ev-redelivered", Source: "inbox://acme/out", Type: event.TypeMessagePosted, Channel: channel,
+		Time: time.Now().UTC(), Data: event.MessagePosted{Request: event.Request{Text: "explain", Mentions: []string{"docs-bot"}}},
+	}
+	for range 2 {
+		if err := app.Publish(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	awaitDelivered(t, box, "inbox://acme/out")
+	runID := runtime.RunKey("acme", e.ID, "docs-bot")
+	run := awaitEnded(t, app, "acme", runID)
+	if run.Agent != "docs-bot" || run.Channel != channel {
+		t.Fatalf("run = %+v", run)
+	}
+	// The bus keeps an event once by its id, so a redelivery is what a
+	// resubscribe replays: handed to the dispatcher again, it joins the run.
+	e.Tenant = "acme"
+	accs, err := app.Dispatcher().Handle(ctx, e)
+	if err != nil || len(accs) != 1 || accs[0].RunID != runID {
+		t.Fatalf("redelivery = %v, %v; want run %s again", accs, err, runID)
+	}
+	if again := awaitEnded(t, app, "acme", runID); !again.CreatedAt.Equal(run.CreatedAt) {
+		t.Fatalf("the redelivery replaced the run: created %v, then %v", run.CreatedAt, again.CreatedAt)
+	}
+	runs := map[string]bool{}
+	for _, got := range box.at("inbox://acme/out") {
+		runs[got.Run] = true
+		if got.Hops != 1 {
+			t.Errorf("%s carries %d hops; want the trigger's plus one", got.Type, got.Hops)
+		}
+	}
+	if len(runs) != 1 || !runs[runID] {
+		t.Fatalf("delivered runs %v; want only %s", runs, runID)
 	}
 }

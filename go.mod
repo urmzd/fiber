@@ -10,11 +10,13 @@ require (
 	github.com/urmzd/anchor/adapters/postgres v0.1.2-0.20261022071835-c4ab25200213
 	github.com/urmzd/playscape v0.7.0
 	github.com/urmzd/saige v0.41.0
+	go.yaml.in/yaml/v3 v3.0.5
 )
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.81.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/bmatcuk/doublestar/v4 v4.10.3 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect

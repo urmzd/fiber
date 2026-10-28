@@ -13,9 +13,7 @@ import (
 	"github.com/urmzd/anchor"
 	"github.com/urmzd/anchor/pkg/run"
 
-	"github.com/urmzd/fiber/pkg/agentrt"
-	"github.com/urmzd/fiber/pkg/agentrt/payload"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // # Usage
@@ -41,7 +39,7 @@ import (
 //
 // Keys are "<run>/a<attempt>[/<agent>.<sub>...]/<n>", which no other call of
 // any attempt can share. saige's own AccountingID is carried beside it and
-// never counted by. payload.Tally counts each key once, which is what makes a
+// never counted by. event.Tally counts each key once, which is what makes a
 // report delivered or relayed twice harmless.
 //
 // What is not counted: an attempt that dies without returning (a crash, a
@@ -65,32 +63,26 @@ func usageRecordKey(attempt int) string {
 
 // spent is what one attempt reported, as its usage record holds it.
 type spent struct {
-	Attempt  int                  `json:"attempt"`
-	Calls    []payload.UsageCall  `json:"calls,omitempty"`
-	Children []payload.UsageChild `json:"children,omitempty"`
+	Attempt  int                `json:"attempt"`
+	Calls    []event.UsageCall  `json:"calls,omitempty"`
+	Children []event.UsageChild `json:"children,omitempty"`
 }
 
 func (s *spent) empty() bool { return len(s.Calls) == 0 && len(s.Children) == 0 }
 
-// observe files a usage chunk the attempt relayed, and ignores every other
-// kind. A body that does not decode is ignored too: it was published as it
-// came, and a malformed report cannot be counted.
-func (s *spent) observe(c agentrt.Chunk) {
-	switch c.Kind {
-	case envelope.KindUsageCall:
-		var call payload.UsageCall
-		if json.Unmarshal(c.Payload, &call) == nil {
-			s.Calls = append(s.Calls, call)
-		}
-	case envelope.KindUsageChild:
-		var child payload.UsageChild
-		if json.Unmarshal(c.Payload, &child) == nil {
-			s.Children = append(s.Children, child)
-		}
+// observe files a usage body the attempt relayed, and ignores every other
+// type. The record keeps the usage in the shape it always had, so the tally
+// keys a call and a child exactly as before.
+func (s *spent) observe(b event.Body) {
+	switch b := b.(type) {
+	case event.UsageCall:
+		s.Calls = append(s.Calls, b)
+	case event.UsageChild:
+		s.Children = append(s.Children, b)
 	}
 }
 
-func (s *spent) into(t *payload.Tally) {
+func (s *spent) into(t *event.Tally) {
 	for _, c := range s.Calls {
 		t.Call(c)
 	}
@@ -105,12 +97,14 @@ type meter struct {
 	s  spent
 }
 
-func (m *meter) observe(c agentrt.Chunk) {
-	if c.Kind.Family() != "usage" {
+func (m *meter) observe(b event.Body) {
+	switch b.(type) {
+	case event.UsageCall, event.UsageChild:
+	default:
 		return
 	}
 	m.mu.Lock()
-	m.s.observe(c)
+	m.s.observe(b)
 	m.mu.Unlock()
 }
 
@@ -119,8 +113,8 @@ func (m *meter) snapshot() spent {
 	defer m.mu.Unlock()
 	return spent{
 		Attempt:  m.s.Attempt,
-		Calls:    append([]payload.UsageCall(nil), m.s.Calls...),
-		Children: append([]payload.UsageChild(nil), m.s.Children...),
+		Calls:    append([]event.UsageCall(nil), m.s.Calls...),
+		Children: append([]event.UsageChild(nil), m.s.Children...),
 	}
 }
 
@@ -213,7 +207,7 @@ func (r *Runtime) claimUsage(ctx context.Context, in Input, attempts []int, clai
 		case err == nil, errors.Is(err, run.ErrParked):
 		default:
 			r.logger.Warn("fiber/runtime: could not claim a usage record",
-				"run_id", RunID(in.Tag.Tenant, in.Tag.ID), "attempt", a, "error", err)
+				"run_id", in.runID(), "attempt", a, "error", err)
 		}
 	}
 }
@@ -226,10 +220,10 @@ func (r *Runtime) claimUsage(ctx context.Context, in Input, attempts []int, clai
 // something after it failed the run. Otherwise the total is the usage records
 // of the attempts that failed, which is every model call the run made. It
 // reports false when the records hold neither.
-func RecordedUsage(records []run.Record) (payload.RunUsage, bool) {
+func RecordedUsage(records []run.Record) (event.RunUsage, bool) {
 	// A run that parked has an outcome per turn; the latest counts every
 	// one before it.
-	var best *payload.RunUsage
+	var best *event.RunUsage
 	bestAttempt := -1
 	for _, rec := range records {
 		if (rec.Name != ActivityAgent && rec.Name != ActivityResume) || rec.Kind != run.KindActivity || rec.Status != run.RecordOK {
@@ -254,9 +248,9 @@ func RecordedUsage(records []run.Record) (payload.RunUsage, bool) {
 		}
 	}
 	if len(prior) == 0 {
-		return payload.RunUsage{}, false
+		return event.RunUsage{}, false
 	}
-	var t payload.Tally
+	var t event.Tally
 	for i := range prior {
 		prior[i].into(&t)
 	}
@@ -267,13 +261,13 @@ func RecordedUsage(records []run.Record) (payload.RunUsage, bool) {
 // is put on the parent's stream.
 type usageReporterKey struct{}
 
-// childUsageKey carries, on the context an Executor is called with, how a
+// childUsageKey carries, on the context a turn runtime is called with, how a
 // child run reported by a Delegator is checked and read: see ReportChildUsage.
 type childUsageKey struct{}
 
 // childUsageOf returns the check the runtime put on ctx, or nil.
-func childUsageOf(ctx context.Context) func(context.Context, string) (payload.UsageChild, error) {
-	f, _ := ctx.Value(childUsageKey{}).(func(context.Context, string) (payload.UsageChild, error))
+func childUsageOf(ctx context.Context) func(context.Context, string) (event.UsageChild, error) {
+	f, _ := ctx.Value(childUsageKey{}).(func(context.Context, string) (event.UsageChild, error))
 	return f
 }
 
@@ -287,30 +281,30 @@ var ErrNotAChild = errors.New("runtime: not a child run that can be rolled up")
 // the ledger, belong to the parent's tenant, not be the parent, and have
 // ended, and its total and agent are read from its own record. Another
 // tenant's run is refused with the same error as a run that does not exist.
-func (r *Runtime) childUsage(tenant, parentRunID string) func(context.Context, string) (payload.UsageChild, error) {
-	return func(ctx context.Context, runID string) (payload.UsageChild, error) {
+func (r *Runtime) childUsage(tenant, parentRunID string) func(context.Context, string) (event.UsageChild, error) {
+	return func(ctx context.Context, runID string) (event.UsageChild, error) {
 		runID = strings.TrimSpace(runID)
 		if r.stops == nil {
-			return payload.UsageChild{}, fmt.Errorf("%w: rolling up a child run needs the run ledger (WithStopLedger)", ErrNotAChild)
+			return event.UsageChild{}, fmt.Errorf("%w: rolling up a child run needs the run ledger (WithStopLedger)", ErrNotAChild)
 		}
 		if runID == "" || runID == parentRunID {
-			return payload.UsageChild{}, fmt.Errorf("%w: %q", ErrNotAChild, runID)
+			return event.UsageChild{}, fmt.Errorf("%w: %q", ErrNotAChild, runID)
 		}
 		rec, records, err := r.stops.Load(ctx, runID)
 		switch {
 		case errors.Is(err, run.ErrNotFound):
-			return payload.UsageChild{}, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
+			return event.UsageChild{}, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
 		case err != nil:
-			return payload.UsageChild{}, fmt.Errorf("runtime: read child run %s: %w", runID, err)
+			return event.UsageChild{}, fmt.Errorf("runtime: read child run %s: %w", runID, err)
 		}
 		var in Input
-		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Tag.Tenant != tenant {
-			return payload.UsageChild{}, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
+		if err := json.Unmarshal(rec.Input, &in); err != nil || in.Trigger.Tenant != tenant {
+			return event.UsageChild{}, fmt.Errorf("%w: no run %q", ErrNotAChild, runID)
 		}
 		if !rec.Status.Terminal() {
-			return payload.UsageChild{}, fmt.Errorf("%w: run %q has not ended", ErrNotAChild, runID)
+			return event.UsageChild{}, fmt.Errorf("%w: run %q has not ended", ErrNotAChild, runID)
 		}
-		var total payload.Usage
+		var total event.Usage
 		if rec.Status == run.StatusSucceeded {
 			var out Output
 			if err := json.Unmarshal(rec.Output, &out); err == nil && out.Usage != nil {
@@ -319,10 +313,10 @@ func (r *Runtime) childUsage(tenant, parentRunID string) func(context.Context, s
 		} else if u, ok := RecordedUsage(records); ok {
 			total = u.Total
 		}
-		return payload.UsageChild{
-			AccountingID: payload.ChildRunAccountingID(runID),
+		return event.UsageChild{
+			AccountingID: event.ChildRunAccountingID(runID),
 			RunID:        runID,
-			Agent:        in.Tag.Agent,
+			Agent:        in.Subscriber,
 			Depth:        1,
 			Usage:        total,
 		}, nil
@@ -356,35 +350,19 @@ func ReportChildUsage(ctx context.Context, runID string) error {
 	return report(ctx, runID)
 }
 
-// relayUsage rewrites a usage chunk that came up from a delegated sub-task so
-// that it reads one level deeper, and reports false for any other kind: a
+// relayUsage rewrites a usage body that came up from a delegated sub-task so
+// that it reads one level deeper, and reports false for any other type: a
 // sub-task's conversation is its parent's tool result, never its stream.
-func relayUsage(c agentrt.Chunk) (agentrt.Chunk, bool) {
-	switch c.Kind {
-	case envelope.KindUsageCall:
-		var call payload.UsageCall
-		if json.Unmarshal(c.Payload, &call) != nil {
-			return agentrt.Chunk{}, false
-		}
-		call.Depth++
-		b, err := payload.Encode(call)
-		if err != nil {
-			return agentrt.Chunk{}, false
-		}
-		return agentrt.Chunk{Kind: c.Kind, Payload: b}, true
-	case envelope.KindUsageChild:
-		var child payload.UsageChild
-		if json.Unmarshal(c.Payload, &child) != nil {
-			return agentrt.Chunk{}, false
-		}
-		child.Depth++
-		b, err := payload.Encode(child)
-		if err != nil {
-			return agentrt.Chunk{}, false
-		}
-		return agentrt.Chunk{Kind: c.Kind, Payload: b}, true
+func relayUsage(b event.Body) (event.Body, bool) {
+	switch v := b.(type) {
+	case event.UsageCall:
+		v.Depth++
+		return v, true
+	case event.UsageChild:
+		v.Depth++
+		return v, true
 	default:
-		return agentrt.Chunk{}, false
+		return nil, false
 	}
 }
 

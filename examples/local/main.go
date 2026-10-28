@@ -6,14 +6,14 @@
 // deployment would run against real infrastructure runs here against the
 // in-memory implementations of the same interfaces:
 //
-//	control plane   pkg/registry.Memory        (a real registry would be Postgres)
+//	control plane   pkg/definition.Memory      (a real one would be Postgres)
 //	bus             pkg/bus.Memory             (a real bus would be Redis Streams)
 //	ledger + queue  anchor's ledger.Memory   (a real ledger would be Postgres)
 //	                and queue.Memory
 //	model           saige's agenttest.ScriptedProvider, reached through the
-//	                agent's own "offline" provider — the agent loop, the typed
+//	                agent's own "offline" provider: the agent loop, the typed
 //	                deltas and the translation to events are all the real ones
-//	connectors      two fakes in fakes.go, implementing connector.Sink exactly
+//	connectors      two fakes in fakes.go, implementing connector.Subscriber exactly
 //
 // fiber.New assembles them, in process; the options it is given say
 // which pieces this file replaces. None of those are stubs standing in for
@@ -21,8 +21,8 @@
 // with the storage swapped. The seven sections below are the seven claims
 // fiber makes, each one demonstrated rather than described.
 //
-//  1. an agent is a declarative spec
-//  2. a revision is immutable; revising creates the next one
+//  1. an agent is a definition file (agents/*.agent.md)
+//  2. a version is immutable; revising writes the next one
 //  3. origin and destination are independent   ← the mesh thesis
 //  4. one run, two sinks, two granularities    ← N:M selectivity
 //  5. a third party can listen to an agent     ← "the Kafka of agents"
@@ -32,6 +32,8 @@ package main
 
 import (
 	"context"
+	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,29 +44,40 @@ import (
 	"time"
 
 	"github.com/urmzd/anchor/pkg/worker"
-	ragtypes "github.com/urmzd/saige/rag/types"
 
 	"github.com/urmzd/fiber"
-	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/bus"
-	"github.com/urmzd/fiber/pkg/envelope"
-	"github.com/urmzd/fiber/pkg/registry"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/egress"
+	"github.com/urmzd/fiber/pkg/event"
 	"github.com/urmzd/fiber/pkg/runtime"
-	"github.com/urmzd/fiber/pkg/topic"
+	ragtypes "github.com/urmzd/fiber/pkg/turn/native/ragtypes"
 )
 
 // tenant is the authorization scope. It comes from the caller's credential in
-// a real deployment and is never on the wire and never a topic segment: an
-// agent is addressed as agent:docs-bot, not agent:acme:docs-bot.
+// a real deployment and is never on the wire and never a channel segment: a
+// subscription names it beside its channels, never inside them.
 const tenant = "acme"
+
+// issue is the GitHub issue the demo request arrives on.
+const issue = "github://acme/handbook/issues/42"
 
 // author is who the control plane attributes these definitions to.
 const author = "ada@acme.test"
 
+// The agent, as two versions of one saige definition file and its policy.
+var (
+	//go:embed agents/docs-bot.v1.agent.md
+	docsBotV1 string
+	//go:embed agents/docs-bot.v2.agent.md
+	docsBotV2 string
+	//go:embed agents/docs-bot.policy.json
+	docsBotPolicy string
+)
+
 // demoStride shrinks the per-attempt sequence band from its default of 2^20 so
 // that the numbers in the output stay readable. Every attempt of a run gets its
-// own band — attempt 1 opens at 101, attempt 2 at 201 — which is what lets a
+// own band (attempt 1 opens at 101, attempt 2 at 201), which is what lets a
 // retry append its real output after an interrupted attempt's partial output
 // instead of vanishing behind the bus's high-water mark. Section 7 shows it.
 const demoStride = 100
@@ -72,7 +85,7 @@ const demoStride = 100
 // quiet sends every library log line to /dev/null. The story here is told by
 // fmt.Println, and interleaving it with operational logging would bury it.
 // Section 7 deliberately induces a failure, so this also suppresses the very
-// real error the router and worker log about it.
+// real error egress and the worker log about it.
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // fixedClock stamps events so two runs of this example print the same thing.
@@ -98,11 +111,11 @@ func run() error {
 	// This is the whole composition root. Each of these owns exactly one
 	// concern, and the wiring below is the only place they meet.
 
-	// The control plane: append-only agent definitions with revisions.
-	store := registry.NewMemory(registry.WithClock(fixedClock))
+	// The control plane: insert-only agent definitions, one row per version.
+	store := definition.NewMemory(definition.WithClock(fixedClock))
 
 	// The broker. Runs publish here; everything else subscribes. flakyBus
-	// wraps it for section 7 and forwards Subscribe untouched, so the router
+	// wraps it for section 7 and forwards Subscribe untouched, so egress
 	// and the observer below read the real broker.
 	broker := bus.NewMemory()
 	published := newFlakyBus(broker)
@@ -114,7 +127,7 @@ func run() error {
 	slack := newSlackSink(surfaces)
 	hook := newWebhookSink(surfaces)
 
-	// The agent side: a corpus to ground answers in, and an executor that
+	// The agent side: a corpus to ground answers in, and a turn runtime that
 	// builds the agent from a pinned revision and runs it.
 	docs := corpus{blocks: []ragtypes.ContextBlock{
 		{
@@ -143,7 +156,7 @@ func run() error {
 		},
 	}}
 
-	exec := newOfflineExecutor(docs)
+	exec := newOfflineRuntime(docs)
 	exec.script("docs-bot", streamed(
 		"The release workflow runs on merge to main [1]. ",
 		"It builds, signs and uploads the archive, then opens a draft release ",
@@ -151,7 +164,7 @@ func run() error {
 		"To roll back, re-run the previous tag's workflow rather than reverting by hand [2].",
 	))
 
-	// fiber.New is the composition root: it wires the router (another bus
+	// fiber.New is the composition root: it wires egress (another bus
 	// subscriber, which is why origin and destination stay independent),
 	// the durable runtime on anchor's in-memory ledger and queue, and the
 	// worker that pulls runs off the queue. Every piece this example
@@ -159,9 +172,9 @@ func run() error {
 	app, err := fiber.New(ctx,
 		fiber.WithTenant(tenant),
 		fiber.WithLogger(quiet),
-		fiber.WithRegistry(store),
+		fiber.WithDefinitions(store),
 		fiber.WithBus(published),
-		fiber.WithExecutor(exec),
+		fiber.WithTurnRuntime(exec),
 		fiber.WithConnector(slack),
 		fiber.WithConnector(hook),
 		fiber.WithRuntimeOptions(
@@ -169,6 +182,9 @@ func run() error {
 			runtime.WithClock(fixedClock),
 			runtime.WithLogger(quiet),
 		),
+		// Egress drops events older than its max age; this demo's clock is
+		// fixed, so egress reads the same clock.
+		fiber.WithEgressOptions(egress.WithClock(fixedClock)),
 		fiber.WithWorkerOptions(
 			worker.WithJanitorEvery(0),
 			worker.WithLeaseTTL(2*time.Second),
@@ -184,125 +200,102 @@ func run() error {
 	go func() { appDone <- app.Run(ctx) }()
 
 	// ── 1 ───────────────────────────────────────────────────────────
-	section(1, "AN AGENT IS A DECLARATIVE SPEC")
+	section(1, "AN AGENT IS A DEFINITION FILE")
 
-	first := agentspec.AgentSpec{
-		Name:        "docs-bot",
-		Description: "answers questions about how we ship",
-		// Change these two fields to "anthropic" and a real model id and
-		// every other line in this file stays the same. That is the only
-		// difference between this example and a production deployment's
-		// agent definition.
-		Provider:     agentspec.ProviderOffline,
-		Model:        "scripted",
-		SystemPrompt: "You answer questions about the deploy pipeline. Cite your sources.",
-		Sources: []agentspec.Source{
-			{Name: "handbook", URI: "https://docs.acme.test/"},
-		},
+	// The definition is a saige .agent.md file; what it may touch beyond its
+	// tools (here, the corpus it retrieves from) is its policy, which grants
+	// nothing it does not name.
+	var policy definition.Policy
+	if err := json.Unmarshal([]byte(docsBotPolicy), &policy); err != nil {
+		return fmt.Errorf("read policy: %w", err)
 	}
-
-	rev1, err := store.Create(ctx, tenant, first, author)
+	v1, err := store.Put(ctx, definition.Record{Tenant: tenant, Content: docsBotV1, Policy: policy, CreatedBy: author})
 	if err != nil {
 		return fmt.Errorf("create agent: %w", err)
 	}
-	fmt.Printf("  created  %s  revision %d\n", rev1.Spec.Name, rev1.Rev)
-	fmt.Printf("  hash     %s\n", rev1.Hash)
-	fmt.Printf("  prompt   %q\n", rev1.Spec.SystemPrompt)
-	fmt.Printf("  address  agent:%s          ← this is now a topic anyone can subscribe to\n", rev1.Spec.Name)
+	fmt.Printf("  created  %s  version %s\n", v1.Name, v1.Version)
+	fmt.Printf("  digest   %s\n", v1.Digest)
+	fmt.Printf("  policy   %s\n", v1.PolicyHash)
+	fmt.Printf("  name     %s          ← what a channel membership names to wake it\n", v1.Name)
 
 	// ── 2 ───────────────────────────────────────────────────────────
-	section(2, "A REVISION IS IMMUTABLE; REVISING CREATES THE NEXT ONE")
+	section(2, "A VERSION IS IMMUTABLE; REVISING WRITES THE NEXT ONE")
 
-	second := first
-	second.SystemPrompt = "You answer questions about the deploy pipeline. " +
-		"Cite your sources, and always mention the rollback procedure."
-
-	// expectedRev is optimistic concurrency: say which revision you edited,
-	// and a racing editor cannot silently overwrite you.
-	rev2, err := store.Revise(ctx, tenant, second, rev1.Rev, author)
+	// A version is never rewritten: storing other content under 1.0.0 is
+	// refused, so an edit is a new, higher version.
+	v2, err := store.Put(ctx, definition.Record{Tenant: tenant, Content: docsBotV2, Policy: policy, CreatedBy: author})
 	if err != nil {
 		return fmt.Errorf("revise agent: %w", err)
 	}
-	fmt.Printf("  revised  %s  revision %d\n\n", rev2.Spec.Name, rev2.Rev)
+	fmt.Printf("  revised  %s  version %s\n\n", v2.Name, v2.Version)
 
-	// Both numbers still resolve, and revision 1 is byte-for-byte what it was
-	// before the edit. This is not a nicety: a run PINS its revision at accept
+	// Both versions still resolve, and 1.0.0 is byte-for-byte what it was
+	// before the edit. This is not a nicety: a run PINS its version at accept
 	// time and replays under it forever, because anchor replays a workflow
 	// from the top and a definition that moved between attempts would make the
 	// replay diverge from its own ledger.
-	got1, err := store.Get(ctx, tenant, "docs-bot", 1)
+	got1, err := store.Get(ctx, tenant, "docs-bot", v1.Version)
 	if err != nil {
-		return fmt.Errorf("resolve revision 1: %w", err)
+		return fmt.Errorf("resolve version %s: %w", v1.Version, err)
 	}
-	got2, err := store.Get(ctx, tenant, "docs-bot", 2)
+	got2, err := store.Get(ctx, tenant, "docs-bot", v2.Version)
 	if err != nil {
-		return fmt.Errorf("resolve revision 2: %w", err)
+		return fmt.Errorf("resolve version %s: %w", v2.Version, err)
 	}
-	fmt.Printf("  rev 1    %s\n           %q\n", got1.Hash, got1.Spec.SystemPrompt)
-	fmt.Printf("  rev 2    %s\n           %q\n\n", got2.Hash, got2.Spec.SystemPrompt)
+	fmt.Printf("  %s  %s\n", got1.Version, got1.Digest)
+	fmt.Printf("  %s  %s\n\n", got2.Version, got2.Digest)
 
-	if got1.Hash != rev1.Hash {
-		return fmt.Errorf("revision 1 changed under a revise: %s became %s", rev1.Hash, got1.Hash)
+	if got1.Digest != v1.Digest {
+		return fmt.Errorf("version %s changed under a revise: %s became %s", v1.Version, v1.Digest, got1.Digest)
 	}
-	fmt.Println("  revision 1 still resolves, unchanged, after the edit that created 2.")
-	fmt.Println("  a run in flight against revision 1 finishes as revision 1.")
+	fmt.Println("  1.0.0 still resolves, unchanged, after the edit that wrote 2.0.0.")
+	fmt.Println("  a run in flight against 1.0.0 finishes as 1.0.0.")
 
 	// ── 3 ───────────────────────────────────────────────────────────
 	section(3, "ORIGIN AND DESTINATION ARE INDEPENDENT   ← the mesh thesis")
 
-	// A tag is the canonical request every trigger translates into. This one
-	// is what the GitHub connector would produce from an issue comment that
+	// An event is the canonical request every trigger publishes. This one is
+	// what the GitHub connector would publish for an issue comment that
 	// mentions @docs-bot; ID is GitHub's delivery GUID, which becomes the
 	// run's idempotency key, so a webhook redelivery JOINS the run it
 	// duplicated instead of starting a second one.
-	tag := envelope.Tag{
-		ID:     "gh-72d3162e-cc78",
-		Tenant: tenant,
-		Agent:  "docs-bot",
-		Origin: "github",
-		Source: address.MustParse("github://acme/handbook/issues/42"),
-		Text:   "how does a release actually get out the door?",
-		Actor:  envelope.Actor{ID: "U_ada", Display: "Ada"},
-		At:     fixedClock(),
-
-		// Deliver is where this run's events go. Neither of these is where
-		// the tag came from, and neither knows about the other.
-		Deliver: []envelope.Route{
-			{
-				// Every kind: this sink renders the live stream.
-				Target: address.MustParse("slack://T01/C02?thread=1699.001"),
+	trigger := event.Envelope{
+		ID:      "gh-72d3162e-cc78",
+		Source:  issue,
+		Type:    event.TypeGitHubIssueCommentCreated,
+		Channel: issue,
+		Time:    fixedClock(),
+		Tenant:  tenant,
+		Data: event.GitHubIssueCommentCreated{
+			Request: event.Request{
+				Text:     "how does a release actually get out the door?",
+				Actor:    event.Actor{ID: "U_ada", Display: "Ada"},
+				Mentions: []string{"docs-bot"},
 			},
-			{
-				// One kind: this sink only learns that the work landed.
-				Target: address.MustParse("webhook://acme/deploys"),
-				Kinds:  []string{"lifecycle.completed"},
-			},
+			GitHubRef: event.GitHubRef{Owner: "acme", Repo: "handbook", Number: 42, Sender: "ada"},
 		},
-		Meta: map[string]string{"issue": "42", "repo": "acme/handbook"},
 	}
 
-	fmt.Printf("  raised in   %-42s  (origin %q)\n", tag.Source, tag.Origin)
+	fmt.Printf("  raised in   %s\n", trigger.Channel)
 	fmt.Println("  answered in")
-	for _, r := range tag.Routes() {
-		kinds := "every kind"
-		if len(r.Kinds) > 0 {
-			kinds = strings.Join(r.Kinds, ", ")
-		}
-		fmt.Printf("              %-42s  %s\n", r.Target, kinds)
+	for _, sub := range append(slack.Subscriptions(), hook.Subscriptions()...) {
+		fmt.Printf("              %-42s  %s\n", sub.Target, strings.Join(sub.Types, ", "))
 	}
 	fmt.Println()
 	fmt.Println("  the trigger is GitHub. neither destination is GitHub.")
-	fmt.Println("  no component on this path holds both ends: the trigger writes a Tag,")
-	fmt.Println("  the run publishes Events, and the router — just another subscriber —")
-	fmt.Println("  renders them onto whatever the routes named. that indirection is the")
+	fmt.Println("  no component on this path holds both ends: the trigger publishes an")
+	fmt.Println("  event, the run publishes events on the same channel, and each sink")
+	fmt.Println("  subscribes to the channels it renders. that indirection is the")
 	fmt.Println("  difference between a mesh and a pile of integrations.")
 
-	// The third party attaches BEFORE anything is accepted, on the agent
-	// topic rather than the run topic. It will pick up this run and the next
+	// The third party attaches BEFORE anything is accepted, on channel
+	// prefixes rather than one run. It will pick up this run and the next
 	// one without ever being told either exists. Section 5 reads its log.
 	watcher := &observer{}
-	watching, err := watcher.watch(ctx, broker, envelope.Subscription{
-		Topic: topic.MustParse("agent:docs-bot"),
+	watching, err := watcher.watch(ctx, broker, bus.Subscription{
+		Tenant:   tenant,
+		Channels: []string{"github://", "cron://"},
+		Types:    []string{"run"},
 	})
 	if err != nil {
 		return fmt.Errorf("observer subscribe: %w", err)
@@ -311,22 +304,20 @@ func run() error {
 	// ── 4 ───────────────────────────────────────────────────────────
 	section(4, "ONE RUN, TWO SINKS, TWO GRANULARITIES   ← N:M selectivity")
 
-	fmt.Println("  slack   takes every kind and edits one message as the answer arrives")
-	fmt.Println("  webhook takes lifecycle.completed only and posts exactly once")
+	fmt.Println("  slack   takes every run type and edits one message as the answer arrives")
+	fmt.Println("  webhook takes run.completed only and posts exactly once")
 	fmt.Println()
 
-	// Invoke registers the run's routes with the router first (an event for
-	// a run it has no routes for has nowhere to go), then accepts: it pins
-	// the revision, publishes the accepted event, and submits the run
-	// durably. From here the process could be killed and restarted and the
-	// run would still finish.
-	meshRun := runtime.RunID(tag.Tenant, tag.ID)
-	acc, err := app.Invoke(ctx, tag)
+	// Accept pins the version, publishes the accepted event, and submits
+	// the run durably. From here the process could be killed and restarted
+	// and the run would still finish.
+	meshRun := runtime.RunKey(tenant, trigger.ID, "docs-bot")
+	acc, err := app.Runtime().Accept(ctx, trigger, "docs-bot")
 	if err != nil {
-		return fmt.Errorf("accept tag: %w", err)
+		return fmt.Errorf("accept: %w", err)
 	}
-	fmt.Printf("  accepted run %s on topic %s, pinned to revision %d\n\n",
-		acc.RunID, acc.Topic, acc.Rev)
+	fmt.Printf("  accepted run %s on channel %s, pinned to version %s\n\n",
+		acc.RunID, acc.Channel, acc.Version)
 
 	out, err := app.Runtime().Result(ctx, acc.RunID)
 	if err != nil {
@@ -356,30 +347,30 @@ func run() error {
 	slackCount, _ := slack.delivered(meshRun)
 	fmt.Println()
 	fmt.Printf("  the run published %d events, sequences 1..%d.\n", out.Events, out.LastSeq)
-	fmt.Printf("  slack   was delivered %d of them (every kind)\n", slackCount)
+	fmt.Printf("  slack   was delivered %d of them (every run type)\n", slackCount)
 	fmt.Printf("  webhook was delivered %d of them (%s)\n", hook.delivered(meshRun), kindList(hook.seenKinds()))
 	fmt.Println()
-	fmt.Println("  same run, same bus, same events. selectivity is a field on the route,")
-	fmt.Println("  not a separate topic and not a separate run — which is why adding the")
+	fmt.Println("  same run, same bus, same events. selectivity is a field on the")
+	fmt.Println("  subscription, not a separate channel or run, which is why adding the")
 	fmt.Println("  webhook cost nothing on the agent side.")
 
 	// ── 5 ───────────────────────────────────────────────────────────
 	section(5, `A THIRD PARTY CAN LISTEN TO AN AGENT   ← "the Kafka of agents"`)
 
 	if err := await(ctx, "the observer to see the run finish", func() bool {
-		return watcher.sawKind(meshRun, envelope.KindCompleted)
+		return watcher.sawKind(meshRun, event.TypeCompleted)
 	}); err != nil {
 		return err
 	}
 
-	fmt.Println("  this subscriber holds one subscription to agent:docs-bot.")
-	fmt.Println("  it did not raise the tag, no route names it, and the run cannot")
+	fmt.Println("  this subscriber holds one subscription to github:// and cron://.")
+	fmt.Println("  it did not raise the event, no sink names it, and the run cannot")
 	fmt.Println("  tell it is there. it sees the whole stream anyway:")
 	fmt.Println()
-	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "kind", "payload")
+	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "type", "data")
 	fmt.Printf("    %-5s  %-22s  %s\n", "─────", "──────────────────────", "───────")
 	for _, e := range watcher.events(meshRun) {
-		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Kind, summarize(e))
+		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Type, summarize(e))
 	}
 	fmt.Println()
 	fmt.Println("  seq 1 is accepted; 101 opens attempt 1's sequence band; 200 closes it.")
@@ -391,12 +382,9 @@ func run() error {
 
 	cites := 0
 	for _, e := range watcher.events(meshRun) {
-		if e.Kind != envelope.KindCitation {
+		c, ok := e.Data.(event.Citation)
+		if !ok {
 			continue
-		}
-		c, err := decodeCitation(e)
-		if err != nil {
-			return err
 		}
 		cites++
 		fmt.Printf("  %s  seq %d\n", c.Label, e.Seq)
@@ -409,41 +397,47 @@ func run() error {
 		return errors.New("no citation events were published; the retriever was not consulted")
 	}
 	fmt.Println()
-	fmt.Println("  a citation is an event of kind delta.citation, on the same stream and")
-	fmt.Println("  in the same order as the text — not an attachment on the final answer.")
+	fmt.Println("  a citation is a run.delta.citation.v1 event, on the same stream and")
+	fmt.Println("  in the same order as the text, not an attachment on the final answer.")
 	fmt.Println("  it is derived from what the turn RETRIEVED, not from what the model")
 	fmt.Println("  claimed, so a reader can resolve the URI and check it.")
 
 	// ── 7 ───────────────────────────────────────────────────────────
 	section(7, "A REPLAYED RUN DOES NOT RE-EXECUTE A RECORDED ACTIVITY")
 
-	// A second tag for the same agent, this time from a schedule. cron has no
-	// surface to answer into and this tag declares no routes, so it runs and
-	// publishes and delivers nowhere — which is legal, and is the reverse
-	// asymmetry from the webhook, a sink that can never trigger.
-	nightly := envelope.Tag{
-		ID:     "nightly-2026-07-26",
-		Tenant: tenant,
-		Agent:  "docs-bot",
-		Origin: "cron",
-		Text:   "summarise how a release gets out the door",
-		At:     fixedClock(),
+	// A second event for the same agent, this time from a schedule. cron
+	// has no surface to answer into and no sink subscribes to its channel,
+	// so it runs and publishes and delivers nowhere, which is legal, and is
+	// the reverse asymmetry from the webhook, a sink that can never trigger.
+	nightly := event.Envelope{
+		ID:      "nightly-2026-07-26",
+		Source:  "cron:" + tenant + "/nightly",
+		Type:    event.TypeCronTick,
+		Channel: "cron://" + tenant + "/nightly",
+		Time:    fixedClock(),
+		Tenant:  tenant,
+		Data: event.CronTick{
+			Request:    event.Request{Text: "summarise how a release gets out the door"},
+			Schedule:   "nightly",
+			Expression: "0 2 * * *",
+			Occurrence: fixedClock(),
+		},
 	}
-	cronRun := runtime.RunID(nightly.Tenant, nightly.ID)
+	cronRun := runtime.RunKey(tenant, nightly.ID, "docs-bot")
 
-	// Arm one failure: the first attempt's lifecycle.completed will not reach
-	// the bus. The runtime treats a failed publish as a failed turn — a run
-	// whose events nobody can see has not done its job — so anchor will
+	// Arm one failure: the first attempt's run.completed will not reach
+	// the bus. The runtime treats a failed publish as a failed turn (a run
+	// whose events nobody can see has not done its job), so anchor will
 	// replay the turn. Everything the turn recorded before that point is
 	// already in the ledger, including the ENTIRE agent execution.
-	published.failOnce(cronRun, envelope.KindCompleted)
+	published.failOnce(cronRun, event.TypeCompleted)
 
 	before := exec.modelCalls()
 	fmt.Printf("  model calls so far           %d\n", before)
-	fmt.Println("  arming a broker outage on this run's lifecycle.completed event...")
+	fmt.Println("  arming a broker outage on this run's run.completed event...")
 	fmt.Println()
 
-	if _, err := app.Invoke(ctx, nightly); err != nil {
+	if _, err := app.Runtime().Accept(ctx, nightly, "docs-bot"); err != nil {
 		return fmt.Errorf("accept nightly: %w", err)
 	}
 	nightlyOut, err := app.Runtime().Result(ctx, cronRun)
@@ -451,23 +445,23 @@ func run() error {
 		return fmt.Errorf("nightly run: %w", err)
 	}
 	if err := await(ctx, "the observer to see the nightly run finish", func() bool {
-		return watcher.sawKind(cronRun, envelope.KindCompleted)
+		return watcher.sawKind(cronRun, event.TypeCompleted)
 	}); err != nil {
 		return err
 	}
 
 	fmt.Println("  what the third party saw, on the same subscription as before:")
 	fmt.Println()
-	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "kind", "payload")
+	fmt.Printf("    %-5s  %-22s  %s\n", "seq", "type", "data")
 	fmt.Printf("    %-5s  %-22s  %s\n", "─────", "──────────────────────", "───────")
 	for _, e := range watcher.events(cronRun) {
-		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Kind, summarize(e))
+		fmt.Printf("    %-5d  %-22s  %s\n", e.Seq, e.Type, summarize(e))
 	}
 
 	after := exec.modelCalls()
 	fmt.Println()
 	fmt.Printf("  attempts on this run         %d\n", nightlyOut.Attempt)
-	fmt.Printf("  model calls after the replay %d   (was %d — the difference is %d)\n",
+	fmt.Printf("  model calls after the replay %d   (was %d: the difference is %d)\n",
 		after, before, after-before)
 	fmt.Println()
 	if after-before != 1 {
@@ -477,7 +471,7 @@ func run() error {
 	fmt.Println("  read the stream above: attempt 1 published started (101) and six deltas")
 	fmt.Println("  (102..107), then its completed event was lost and the turn failed.")
 	fmt.Println("  attempt 2 re-executed the workflow body from the top and published")
-	fmt.Println("  resumed (201) and completed (300) — and NO deltas, because the agent")
+	fmt.Println("  resumed (201) and completed (300), and NO deltas, because the agent")
 	fmt.Println("  activity was already recorded and was served from the ledger.")
 	fmt.Println()
 	fmt.Println("  that is the durability claim in one line: the workflow replays, the")
@@ -489,7 +483,7 @@ func run() error {
 	// ── shutdown ────────────────────────────────────────────────────
 	section(0, "WHAT JUST HAPPENED")
 
-	fmt.Printf("  agents defined      1 (%d revisions, both still resolvable)\n", rev2.Rev)
+	fmt.Println("  agents defined      1 (2 versions, both still resolvable)")
 	fmt.Printf("  runs executed       %d (one from GitHub, one from a schedule)\n", len(watcher.runs()))
 	fmt.Printf("  events on the bus   %d (%d + %d, counted by a subscriber that invoked nothing)\n",
 		watcher.total(), len(watcher.events(meshRun)), len(watcher.events(cronRun)))
@@ -497,7 +491,7 @@ func run() error {
 	fmt.Printf("  model calls         %d\n", after)
 	fmt.Println()
 	fmt.Println("  pass WithPostgres(pool) and WithBus(bus.NewRedis(client)) instead of")
-	fmt.Println("  the in-memory registry, bus and executor, swap the two fakes for")
+	fmt.Println("  the in-memory definitions, bus and turn runtime, swap the two fakes for")
 	fmt.Println("  WithSlack and WithWebhooks, and this file does not otherwise change.")
 	fmt.Println()
 
@@ -515,7 +509,7 @@ const rule = "──────────────────────
 
 func banner() {
 	fmt.Println()
-	fmt.Println("  fiber — tag an agent from anywhere, run it durably, stream it to")
+	fmt.Println("  fiber: wake an agent from any channel, run it durably, stream it to")
 	fmt.Println("            everyone, deliver it anywhere.")
 	fmt.Println()
 	fmt.Println("  one process, no API key, no network, no infrastructure.")
@@ -534,7 +528,7 @@ func section(n int, title string) {
 
 // kindList renders the kinds a sink was handed, so "the webhook never saw a
 // delta" is a printed fact rather than an assertion.
-func kindList(kinds map[envelope.Kind]int) string {
+func kindList(kinds map[string]int) string {
 	if len(kinds) == 0 {
 		return "nothing"
 	}

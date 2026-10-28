@@ -7,7 +7,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/urmzd/fiber/pkg/agentspec"
+	"github.com/urmzd/fiber/pkg/definition"
+	"github.com/urmzd/fiber/pkg/turn"
 )
 
 // Severity ranks a finding.
@@ -67,7 +68,7 @@ type World struct {
 	// Agents are the tenant's current definitions. They let Review check that
 	// spawn targets exist and that delegation does not loop. A definition with
 	// the draft's own name is replaced by the draft.
-	Agents []agentspec.AgentSpec
+	Agents []turn.Spec
 	// Tools are the tool names the deployment can resolve. With them, a tool
 	// reference is checked exactly. Without them, Review falls back to a
 	// narrower heuristic described on Review.
@@ -99,10 +100,9 @@ type World struct {
 //     is". The system prompt is the cached prefix of every request, so
 //     anything in it that changes between runs defeats prompt caching.
 //
-// Review does not validate. A draft that the registry would reject can still
-// be reviewed, and usually should be validated first.
-func Review(draft agentspec.AgentSpec, world World) []Finding {
-	spec := draft.Normalize()
+// Review does not validate: it reads a compiled spec (definition.Parse), and
+// a draft that does not compile is reported by validation instead.
+func Review(spec turn.Spec, world World) []Finding {
 	prompt := strings.ToLower(spec.SystemPrompt)
 	words := wordSet(prompt)
 
@@ -121,17 +121,16 @@ func Review(draft agentspec.AgentSpec, world World) []Finding {
 	granted := toSet(lower(spec.Tools))
 	spawn := toSet(spec.Access.Spawn)
 	catalog := toSet(lower(world.Tools))
-	agents := make(map[string]agentspec.AgentSpec, len(world.Agents)+1)
+	agents := make(map[string]turn.Spec, len(world.Agents)+1)
 	for _, a := range world.Agents {
-		n := a.Normalize()
-		agents[n.Name] = n
+		agents[a.Name] = a
 	}
 	agents[spec.Name] = spec
 
 	grantedPrefixes := map[string]bool{}
 	groups := map[string]bool{}
 	for t := range granted {
-		if g, ok, err := agentspec.ParseMCPGrant(t); ok {
+		if g, ok, err := definition.ParseMCPGrant(t); ok {
 			if err == nil {
 				// "mcp:docs:write" is the docs group too.
 				groups[g.Provider] = true
@@ -178,7 +177,7 @@ func Review(draft agentspec.AgentSpec, world World) []Finding {
 			add(CodeUnknownTool, SeverityError, t,
 				"the spec grants %s, which this deployment cannot resolve; an agent naming a missing tool fails to build", t)
 		}
-		if !words[key] && !strings.HasPrefix(key, agentspec.MCPGroupPrefix) {
+		if !words[key] && !strings.HasPrefix(key, definition.MCPGroupPrefix) {
 			add(CodeUnusedTool, SeverityInfo, t,
 				"the spec grants %s but the prompt never mentions it; say when to use it or drop the grant", t)
 		}
@@ -308,7 +307,7 @@ func sortedKeys(m map[string]bool) []string {
 // spawnCycle returns the shortest delegation path from start back to itself,
 // or nil. Neighbours are visited in sorted order, so the path reported for a
 // graph with several cycles is always the same one.
-func spawnCycle(start string, agents map[string]agentspec.AgentSpec) []string {
+func spawnCycle(start string, agents map[string]turn.Spec) []string {
 	type step struct {
 		name string
 		path []string

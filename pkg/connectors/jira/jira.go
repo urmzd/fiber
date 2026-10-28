@@ -25,7 +25,7 @@
 // Inbound, the direction is reversed: a webhook payload does not know our key, so
 // the issue's own REST URL is matched against the configured base URLs to
 // recover it (see siteOf). A delivery from an instance that is not configured
-// raises no tag, rather than being attributed to whichever site sorted first.
+// publishes nothing, rather than being attributed to whichever site sorted first.
 //
 // # Authentication is a shared secret, and that is Jira's fault
 //
@@ -35,13 +35,15 @@
 // (see internal/inbound.Secret). It is weaker than a signature in a specific way
 // — it does not bind the secret to the body, so a captured request can be
 // replayed with a different one — and the honest mitigation is the same as
-// everywhere else here: TLS, plus Tag.ID idempotency downstream. Saying so is
+// everywhere else here: TLS, plus event id idempotency downstream. Saying so is
 // better than implying a MAC exists.
 //
-// # Three ways a tag is raised
+// # Three events
 //
-// A comment naming an agent, an issue created naming one, and an issue ASSIGNED
-// to one. The third has no message at all: the assignment is the request and the
+// A comment naming an agent (jira.comment.created.v1), an issue created naming
+// one (jira.issue.created.v1), and an issue ASSIGNED to one
+// (jira.issue.assigned.v1). The event names the agents and chooses none: the
+// members of the issue's channel decide who answers. The third has no message at all: the assignment is the request and the
 // ticket is what the agent reads, which is the same structural gesture as
 // requesting a review from a bot on GitHub, and the way a human hands over work
 // without typing anything.
@@ -75,7 +77,7 @@ import (
 	"github.com/urmzd/fiber/pkg/connectors/internal/render"
 	"github.com/urmzd/fiber/pkg/connectors/internal/sink"
 	"github.com/urmzd/fiber/pkg/connectors/mention"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Name is the address scheme this connector owns.
@@ -126,10 +128,6 @@ type Config struct {
 	// the shared @name grammar applies. Nil disables textual resolution.
 	Agents mention.Set
 
-	// Deliver overrides where a tag's events go. Empty answers on the issue the
-	// tag came from.
-	Deliver []envelope.Route
-
 	// Interval coalesces comment edits. Zero means sink.DefaultInterval.
 	Interval time.Duration
 
@@ -139,11 +137,11 @@ type Config struct {
 	// MaxBody bounds an inbound request body. Zero means inbound.DefaultMaxBody.
 	MaxBody int64
 
-	// Tenant is the authorization scope this connector's tags belong to. It
-	// is stamped on every tag it raises, and files are stored under it.
+	// Tenant is the authorization scope this connector's events belong to. It
+	// is stamped on every event it publishes, and files are stored under it.
 	Tenant string
 
-	// Files brings in issue attachments as the tag's attachments (see
+	// Files brings in issue attachments as the event's attachments (see
 	// attachments.go). Needs Tenant. A site's credentials go to that site's
 	// host only, never to the media host its downloads redirect to.
 	Files connectors.Files
@@ -234,8 +232,8 @@ func (c *Connector) Name() string { return Name }
 
 // Ingest implements connector.Trigger. It parks until ctx is cancelled while
 // ServeHTTP feeds out.
-func (c *Connector) Ingest(ctx context.Context, out chan<- envelope.Tag) error {
-	return c.pipe.Serve(ctx, out)
+func (c *Connector) Ingest(ctx context.Context, publish connector.Publish) error {
+	return c.pipe.Serve(ctx, publish)
 }
 
 // Ingesting reports whether an Ingest is running, so a server can answer a
@@ -259,20 +257,17 @@ func (c *Connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tag, ok := c.tagFrom(r.Header, h)
+	e, ok := c.eventFrom(r.Header, h)
 	if !ok {
-		// An authentic delivery that names no agent. 200, so Jira stops
-		// retrying something that is not an error.
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if c.cfg.Tenant != "" {
-		tag.Tenant = c.cfg.Tenant
-	}
-	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, tag.Tenant, &tag,
-		c.candidates(tag.Source.Workspace, filesOf(h, tag.Meta["jira_assigned"] == "true")))
+	channel, _ := address.Parse(e.Channel)
+	_, assigned := e.Data.(event.JiraIssueAssigned)
+	ctx, cancel := files.Attach(r.Context(), c.cfg.Files, Name, e.Tenant, channel, &e,
+		c.candidates(channel.Workspace, filesOf(h, assigned)))
 	defer cancel()
-	if err := c.pipe.Send(ctx, tag); err != nil {
+	if err := c.pipe.Send(ctx, e); err != nil {
 		http.Error(w, "not ready", inbound.SendStatus(err))
 		return
 	}
@@ -300,7 +295,7 @@ func (s agentSet) Lookup(token string) (string, bool) {
 }
 
 // Deliver implements connector.Sink.
-func (c *Connector) Deliver(ctx context.Context, target address.Address, e envelope.Event) error {
+func (c *Connector) Deliver(ctx context.Context, target address.Address, e event.Envelope) error {
 	if _, err := c.ref(target); err != nil {
 		return err
 	}

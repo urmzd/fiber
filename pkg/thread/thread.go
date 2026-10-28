@@ -53,7 +53,7 @@
 // # Boundary
 //
 // This package stores and orders messages. It does not know what a run is
-// beyond an id, does not render anything for a model (pkg/agentrt does), and
+// beyond an id, does not render anything for a model (pkg/turn/native does), and
 // does not decide when history is pinned or appended (pkg/runtime does). It
 // imports only the leaves that name its inputs.
 package thread
@@ -66,9 +66,8 @@ import (
 	"time"
 
 	"github.com/urmzd/fiber/pkg/address"
-	"github.com/urmzd/fiber/pkg/agentspec"
 	"github.com/urmzd/fiber/pkg/attachment"
-	"github.com/urmzd/fiber/pkg/envelope"
+	"github.com/urmzd/fiber/pkg/event"
 )
 
 // Sentinel errors. Callers match with errors.Is.
@@ -116,10 +115,10 @@ type Key struct {
 	Surface string `json:"surface"`
 }
 
-// KeyOf returns the thread a tag belongs to.
+// KeyOf returns the thread a run of agent answering e belongs to.
 //
-// The surface is the tag's Source address reduced to what identifies a
-// conversation:
+// The surface is e's Source, read as an address, reduced to what identifies
+// a conversation:
 //
 //	connector://workspace/path[?thread=<value>]
 //
@@ -135,17 +134,18 @@ type Key struct {
 //	github://acme/handbook/pull/7?head_sha=abc123     -> github://acme/handbook/pull/7
 //	jira://acme/PROJ-5                                -> jira://acme/PROJ-5
 //
-// A tag with no source address (a schedule, a bare API call) has no surface a
-// second tag could share, so it is its own one-shot thread, keyed by the tag's
-// id. A redelivery of that tag carries the same id and lands on the same
-// thread.
-func KeyOf(tag envelope.Tag) Key {
-	k := Key{Tenant: tag.Tenant, Agent: agentspec.NormalizeName(tag.Agent)}
-	if tag.Source.IsZero() {
-		k.Surface = oneShot + tag.ID
+// An event whose Source is not an address (a schedule's tick, a delegation)
+// has no surface a second event could share, so it is its own one-shot
+// thread, keyed by the event's id. A redelivery carries the same id and lands
+// on the same thread.
+func KeyOf(e event.Envelope, agent string) Key {
+	k := Key{Tenant: e.Tenant, Agent: strings.ToLower(strings.TrimSpace(agent))}
+	src, err := address.Parse(e.Source)
+	if err != nil {
+		k.Surface = oneShot + e.ID
 		return k
 	}
-	k.Surface = Surface(tag.Source)
+	k.Surface = Surface(src)
 	return k
 }
 
@@ -165,7 +165,7 @@ func (k Key) OneShot() bool { return strings.HasPrefix(k.Surface, oneShot) }
 
 // Validate checks that the key names exactly one thread.
 //
-// An empty tenant is refused for the reason pkg/registry refuses it: the
+// An empty tenant is refused for the reason every store refuses it: the
 // tenant comes from the caller's credential, so a missing one means the
 // authorization step was skipped, and a shared bucket for unscoped callers is
 // how one customer reads another's conversation.
@@ -195,7 +195,7 @@ type Entry struct {
 	Text string `json:"text"`
 	// Actor is who said it: a person for a user message, the agent for its
 	// own answer.
-	Actor envelope.Actor `json:"actor,omitempty"`
+	Actor event.Actor `json:"actor,omitempty"`
 	// RunID is the run that produced the entry, empty for a message that
 	// reached the journal by reconciliation rather than through a run.
 	RunID string `json:"run_id,omitempty"`

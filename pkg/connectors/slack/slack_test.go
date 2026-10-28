@@ -6,20 +6,22 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/urmzd/fiber/pkg/connectors/internal/rendertest"
+	"github.com/urmzd/fiber/pkg/event"
+
 	"github.com/urmzd/fiber/pkg/address"
 	"github.com/urmzd/fiber/pkg/connector"
-	"github.com/urmzd/fiber/pkg/connectors/mention"
 	"github.com/urmzd/fiber/pkg/connectors/slack"
-	"github.com/urmzd/fiber/pkg/envelope"
 	"github.com/urmzd/fiber/pkg/signature"
-	"github.com/urmzd/fiber/pkg/topic"
 )
 
 const secret = "8f742231b10e8888abcd99yyyzzz85a5"
@@ -48,8 +50,8 @@ func verifier() *signature.Slack {
 }
 
 // start brings up a connector with an Ingest running, and returns the channel
-// tags arrive on.
-func start(t *testing.T, cfg slack.Config) (*slack.Connector, <-chan envelope.Tag) {
+// its events are published on.
+func start(t *testing.T, cfg slack.Config) (*slack.Connector, <-chan event.Envelope) {
 	t.Helper()
 	if cfg.API == nil {
 		cfg.API = slack.NewFake()
@@ -62,12 +64,15 @@ func start(t *testing.T, cfg slack.Config) (*slack.Connector, <-chan envelope.Ta
 		t.Fatalf("New: %v", err)
 	}
 
-	tags := make(chan envelope.Tag, 8)
+	tags := make(chan event.Envelope, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = c.Ingest(ctx, tags)
+		_ = c.Ingest(ctx, func(_ context.Context, e event.Envelope) error {
+			tags <- e
+			return nil
+		})
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -109,10 +114,11 @@ const appMention = `{
   "is_ext_shared_channel": false
 }`
 
-func TestAppMentionBecomesATagNamingTheAgentItMentioned(t *testing.T) {
+func TestAppMentionPublishesAMessageNamingTheAgentItMentioned(t *testing.T) {
 	c, tags := start(t, slack.Config{
-		Team: "T01ABCDEF",
-		Bots: map[string]string{"U08BOTID": "docs-bot"},
+		Team:   "T01ABCDEF",
+		Tenant: "acme",
+		Bots:   map[string]string{"U08BOTID": "docs-bot"},
 	})
 
 	w := httptest.NewRecorder()
@@ -121,45 +127,39 @@ func TestAppMentionBecomesATagNamingTheAgentItMentioned(t *testing.T) {
 		t.Fatalf("status = %d, body = %q", w.Code, w.Body.String())
 	}
 
-	tag := receive(t, tags)
-	if tag.ID != "Ev08MNEMONIC" {
-		t.Errorf("Tag.ID = %q, want Slack's event_id so a retry dedupes", tag.ID)
+	e := receive(t, tags)
+	b := posted(t, e)
+	if e.ID != "Ev08MNEMONIC" {
+		t.Errorf("ID = %q, want Slack's event_id so a retry dedupes", e.ID)
 	}
-	if tag.Agent != "docs-bot" {
-		t.Errorf("Tag.Agent = %q, want docs-bot", tag.Agent)
+	if e.Type != event.TypeMessagePosted || e.Tenant != "acme" || e.Subject != "C02CHANNEL" {
+		t.Errorf("type, tenant, subject = %q, %q, %q", e.Type, e.Tenant, e.Subject)
 	}
-	if tag.Origin != "slack" {
-		t.Errorf("Tag.Origin = %q, want slack", tag.Origin)
+	if want := []string{"docs-bot"}; !slices.Equal(b.Mentions, want) {
+		t.Errorf("Mentions = %v, want %v", b.Mentions, want)
 	}
 	// The mention is gone, the link is its label, the other human survives as a
 	// mention, and the entity is decoded.
 	want := "hey can you summarize the design doc for @U0HUMAN2? <3"
-	if tag.Text != want {
-		t.Errorf("Tag.Text = %q, want %q", tag.Text, want)
+	if b.Text != want {
+		t.Errorf("Text = %q, want %q", b.Text, want)
 	}
-	if got, want := tag.Source.String(), "slack://T01ABCDEF/C02CHANNEL?thread=1700000000.000100"; got != want {
-		t.Errorf("Tag.Source = %q, want %q", got, want)
+	thread := "slack://T01ABCDEF/C02CHANNEL?thread=1700000000.000100"
+	if e.Source != thread || e.Channel != thread {
+		t.Errorf("Source, Channel = %q, %q, want both %q", e.Source, e.Channel, thread)
 	}
-	if tag.Actor.ID != "U0HUMAN1" {
-		t.Errorf("Tag.Actor.ID = %q, want the human who typed it", tag.Actor.ID)
+	if b.Actor.ID != "U0HUMAN1" {
+		t.Errorf("Actor.ID = %q, want the human who typed it", b.Actor.ID)
 	}
-	if !tag.At.Equal(time.Unix(1700000090, 1200000).UTC()) {
-		t.Errorf("Tag.At = %s, want the event timestamp with its microseconds", tag.At)
+	if !e.Time.Equal(time.Unix(1700000090, 1200000).UTC()) {
+		t.Errorf("Time = %s, want the event timestamp with its microseconds", e.Time)
 	}
-	for key, want := range map[string]string{
-		"slack_team":      "T01ABCDEF",
-		"slack_channel":   "C02CHANNEL",
-		"slack_user":      "U0HUMAN1",
-		"slack_thread_ts": "1700000000.000100",
-		"slack_event":     "app_mention",
-		"slack_app_id":    "A08APPID",
-	} {
-		if got := tag.Meta[key]; got != want {
-			t.Errorf("Meta[%q] = %q, want %q", key, got, want)
-		}
+	wantRef := event.SlackRef{
+		Team: "T01ABCDEF", Channel: "C02CHANNEL", User: "U0HUMAN1", Event: "app_mention",
+		TS: "1700000090.001200", ThreadTS: "1700000000.000100", AppID: "A08APPID",
 	}
-	if err := tag.Validate(); err != nil {
-		t.Errorf("the tag the core will receive is invalid: %v", err)
+	if b.Slack == nil || *b.Slack != wantRef {
+		t.Errorf("Slack = %+v, want %+v", b.Slack, wantRef)
 	}
 }
 
@@ -167,14 +167,14 @@ func TestSourceAddressRoundTripsThroughTheAddressPackage(t *testing.T) {
 	c, tags := start(t, slack.Config{Bots: map[string]string{"U08BOTID": "docs-bot"}})
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, post(t, appMention))
-	tag := receive(t, tags)
+	e := receive(t, tags)
 
-	parsed, err := address.Parse(tag.Source.String())
+	parsed, err := address.Parse(e.Channel)
 	if err != nil {
-		t.Fatalf("Parse(%q): %v", tag.Source, err)
+		t.Fatalf("Parse(%q): %v", e.Channel, err)
 	}
-	if parsed.String() != tag.Source.String() {
-		t.Errorf("round trip = %q, want %q", parsed, tag.Source)
+	if parsed.String() != e.Channel {
+		t.Errorf("round trip = %q, want %q", parsed, e.Channel)
 	}
 	if parsed.Connector != "slack" || parsed.Workspace != "T01ABCDEF" || parsed.Resource() != "C02CHANNEL" {
 		t.Errorf("parsed = %+v, want the slack team and channel", parsed)
@@ -192,35 +192,33 @@ func TestAMentionWithoutAThreadAnswersUnderTheMentionItself(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
-	tag := receive(t, tags)
-	if thread, _ := tag.Source.Param("thread"); thread != "1700000090.001200" {
-		t.Errorf("thread = %q, want the mention's own ts so the answer opens a thread", thread)
+	e := receive(t, tags)
+	if !strings.HasSuffix(e.Channel, "?thread=1700000090.001200") {
+		t.Errorf("channel = %q, want the mention's own ts so the answer opens a thread", e.Channel)
 	}
 }
 
-func TestTheAgentCanBeNamedInTheTextAfterTheAppMention(t *testing.T) {
+func TestAMentionOfNoKnownBotPublishesWithNoMentions(t *testing.T) {
 	body := strings.ReplaceAll(appMention,
 		`"text": "hey <@U08BOTID> can you summarize <https://example.com/design|the design doc> for <@U0HUMAN2>? &lt;3"`,
 		`"text": "<@U08APPID> @triage please look at this"`)
 
-	c, tags := start(t, slack.Config{
-		// The app's own user is not mapped to an agent, so resolution falls
-		// through to the text.
-		Agents: mention.NewNames("triage", "docs-bot"),
-	})
+	// The app's own user is not mapped to an agent, and an @name in the text
+	// is not a mention: the channel's members decide who answers.
+	c, tags := start(t, slack.Config{Bots: map[string]string{"U08BOTID": "docs-bot"}})
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, post(t, body))
-	tag := receive(t, tags)
+	b := posted(t, receive(t, tags))
 
-	if tag.Agent != "triage" {
-		t.Errorf("Tag.Agent = %q, want triage", tag.Agent)
+	if len(b.Mentions) != 0 {
+		t.Errorf("Mentions = %v, want none", b.Mentions)
 	}
-	if tag.Text != "@U08APPID please look at this" {
-		t.Errorf("Tag.Text = %q", tag.Text)
+	if b.Text != "@U08APPID @triage please look at this" {
+		t.Errorf("Text = %q", b.Text)
 	}
 }
 
-func TestEventsThatMustNotRaiseTags(t *testing.T) {
+func TestEventsThatPublishNothing(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
@@ -249,12 +247,6 @@ func TestEventsThatMustNotRaiseTags(t *testing.T) {
 				"type":"reaction_added","user":"U0HUMAN1","channel":"C02CHANNEL","ts":"1700000090.000100"}}`,
 		},
 		{
-			name: "a mention naming no agent we run",
-			body: `{"type":"event_callback","team_id":"T01ABCDEF","event_id":"Ev5","event":{
-				"type":"app_mention","user":"U0HUMAN1","text":"<@U0UNKNOWN> hi",
-				"channel":"C02CHANNEL","ts":"1700000090.000100"}}`,
-		},
-		{
 			name: "a team id that could not be an address workspace",
 			body: `{"type":"event_callback","team_id":"T01:BAD","event_id":"Ev6","event":{
 				"type":"app_mention","user":"U0HUMAN1","text":"<@U08BOTID> hi",
@@ -272,8 +264,8 @@ func TestEventsThatMustNotRaiseTags(t *testing.T) {
 				t.Errorf("status = %d, want 200", w.Code)
 			}
 			select {
-			case tag := <-tags:
-				t.Errorf("raised a tag: %+v", tag)
+			case e := <-tags:
+				t.Errorf("published %+v", e)
 			default:
 			}
 		})
@@ -285,19 +277,25 @@ func TestADirectMessageIsAMentionByContext(t *testing.T) {
 		"type":"message","channel_type":"im","user":"U0HUMAN1","text":"what changed yesterday?",
 		"channel":"D02DM","ts":"1700000090.000100","event_ts":"1700000090.000100"}}`
 
-	c, tags := start(t, slack.Config{DefaultAgent: "docs-bot"})
+	c, tags := start(t, slack.Config{})
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, post(t, body))
-	tag := receive(t, tags)
+	e := receive(t, tags)
+	b := posted(t, e)
 
-	if tag.Agent != "docs-bot" {
-		t.Errorf("Tag.Agent = %q, want the default agent", tag.Agent)
+	// The adapter chooses no agent: the members of the direct message's
+	// channel decide who answers.
+	if len(b.Mentions) != 0 {
+		t.Errorf("Mentions = %v, want none", b.Mentions)
 	}
-	if tag.Text != "what changed yesterday?" {
-		t.Errorf("Tag.Text = %q", tag.Text)
+	if b.Text != "what changed yesterday?" {
+		t.Errorf("Text = %q", b.Text)
 	}
-	if tag.Meta["slack_channel_type"] != "im" {
-		t.Errorf("Meta[slack_channel_type] = %q, want im", tag.Meta["slack_channel_type"])
+	if b.Slack.ChannelType != "im" {
+		t.Errorf("ChannelType = %q, want im", b.Slack.ChannelType)
+	}
+	if e.Channel != "slack://T01ABCDEF/D02DM?thread=1700000090.000100" {
+		t.Errorf("Channel = %q", e.Channel)
 	}
 }
 
@@ -340,8 +338,8 @@ func TestAnUnsignedOrTamperedRequestIsRefusedBeforeItIsParsed(t *testing.T) {
 				t.Errorf("status = %d, want %d", w.Code, tc.wantSts)
 			}
 			select {
-			case tag := <-tags:
-				t.Errorf("an unauthenticated request raised a tag: %+v", tag)
+			case e := <-tags:
+				t.Errorf("an unauthenticated request published %+v", e)
 			default:
 			}
 		})
@@ -394,7 +392,7 @@ func TestARequestArrivingBeforeIngestAsksSlackToRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// No Ingest is running: the tag has nowhere to go, and 503 is the answer
+	// No Ingest is running: the event has nowhere to go, and 503 is the answer
 	// that makes Slack redeliver an event we would otherwise drop.
 	w := httptest.NewRecorder()
 	c.ServeHTTP(w, post(t, appMention))
@@ -407,21 +405,31 @@ func TestARequestArrivingBeforeIngestAsksSlackToRetry(t *testing.T) {
 
 var target = address.MustParse("slack://T01ABCDEF/C02CHANNEL?thread=1700000000.000100")
 
-func event(seq uint64, kind envelope.Kind, payload string) envelope.Event {
-	return envelope.Event{
+func ev(seq uint64, typ, data string) event.Envelope {
+	if data == "" {
+		data = "{}"
+	}
+	body, err := event.Decode(typ, json.RawMessage(data))
+	if err != nil {
+		panic(err)
+	}
+	return event.Envelope{
+		ID:      fmt.Sprintf("run_1:%d", seq),
+		Source:  "fiber://run/run_1",
+		Type:    typ,
+		Channel: "slack://T01ABCDEF/C02CHANNEL",
+		Tenant:  "acme",
+		Run:     "run_1",
 		Seq:     seq,
-		Topic:   topic.MustParse("agent:docs-bot:run_1"),
-		RunID:   "run_1",
 		Agent:   "docs-bot",
-		Origin:  "slack",
-		Kind:    kind,
-		Payload: []byte(payload),
-		At:      time.Unix(1700000100, 0).Add(time.Duration(seq) * time.Second),
+		Version: "1",
+		Time:    time.Unix(1700000100, 0).Add(time.Duration(seq) * time.Second),
+		Data:    body,
 	}
 }
 
-func textEvent(seq uint64, s string) envelope.Event {
-	return event(seq, envelope.KindText, `{"text":`+jsonString(s)+`}`)
+func textEvent(seq uint64, s string) event.Envelope {
+	return ev(seq, event.TypeText, `{"text":`+jsonString(s)+`}`)
 }
 
 func jsonString(s string) string {
@@ -446,12 +454,12 @@ func TestDeliveringTheSameEventsTwiceKeepsOneEditedMessage(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	events := []envelope.Event{
-		event(1, envelope.KindAccepted, ""),
+	events := []event.Envelope{
+		ev(1, event.TypeAccepted, ""),
 		textEvent(2, "The design doc says "),
 		textEvent(3, "three things."),
-		event(4, envelope.KindCitation, `{"title":"Design doc","uri":"https://example.com/design"}`),
-		event(5, envelope.KindCompleted, ""),
+		ev(4, event.TypeCitation, `{"source":{"document_title":"Design doc","source_uri":"https://example.com/design"}}`),
+		ev(5, event.TypeCompleted, ""),
 	}
 	for range 2 {
 		for _, e := range events {
@@ -488,10 +496,10 @@ func TestOutOfOrderDeliveryDoesNotRenderStaleTextOverFresh(t *testing.T) {
 	c := sinkConnector(t, fake)
 	ctx := context.Background()
 
-	for _, e := range []envelope.Event{
+	for _, e := range []event.Envelope{
 		textEvent(3, "second"),
 		textEvent(2, "first "),
-		event(4, envelope.KindCompleted, ""),
+		ev(4, event.TypeCompleted, ""),
 	} {
 		if err := c.Deliver(ctx, target, e); err != nil {
 			t.Fatal(err)
@@ -656,7 +664,6 @@ func TestNewRejectsAConfigurationThatCouldNotAddress(t *testing.T) {
 		{name: "no api", cfg: slack.Config{}},
 		{name: "a team that cannot be a workspace", cfg: slack.Config{API: slack.NewFake(), Team: "T01:BAD"}},
 		{name: "a bot mapped to an unusable agent name", cfg: slack.Config{API: slack.NewFake(), Bots: map[string]string{"U1": "docs bot"}}},
-		{name: "an unusable default agent", cfg: slack.Config{API: slack.NewFake(), DefaultAgent: "docs bot"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -667,13 +674,29 @@ func TestNewRejectsAConfigurationThatCouldNotAddress(t *testing.T) {
 	}
 }
 
-func receive(t *testing.T, tags <-chan envelope.Tag) envelope.Tag {
+// receive waits for an event and checks it renders through the event
+// catalog as its request text.
+func receive(t *testing.T, tags <-chan event.Envelope) event.Envelope {
 	t.Helper()
 	select {
-	case tag := <-tags:
-		return tag
+	case e := <-tags:
+		if err := e.Validate(); err != nil {
+			t.Fatalf("published an invalid event: %v", err)
+		}
+		rendertest.Check(t, e)
+		return e
 	case <-time.After(2 * time.Second):
-		t.Fatal("no tag was raised")
-		return envelope.Tag{}
+		t.Fatal("no event was published")
+		return event.Envelope{}
 	}
+}
+
+// posted returns the message.posted.v1 body of e.
+func posted(t *testing.T, e event.Envelope) event.MessagePosted {
+	t.Helper()
+	b, ok := e.Data.(event.MessagePosted)
+	if !ok {
+		t.Fatalf("%s carries %T, want message.posted.v1", e.Type, e.Data)
+	}
+	return b
 }
