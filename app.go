@@ -139,7 +139,7 @@ func New(ctx context.Context, opts ...Option) (*App, error) {
 	// The control plane: append-only agent definitions, scoped by tenant.
 	// Its provider table includes the options', so an agent naming one can
 	// be stored as well as run.
-	if a.store, err = newDefinitions(ctx, pool, o); err != nil {
+	if a.store, err = newDefinitions(ctx, pool, o, a.log); err != nil {
 		return fail(err)
 	}
 	a.defs = definition.NewResolver(a.store, o.checks())
@@ -270,8 +270,9 @@ func migrateErr(what string, err error) error {
 // newDefinitions picks the control plane's store: the one passed, Postgres
 // on the pool, or memory. The Postgres schema is migrated here because a
 // deployment against an unmigrated database has nothing useful to do but
-// report that.
-func newDefinitions(ctx context.Context, pool *pgxpool.Pool, o options) (definition.Source, error) {
+// report that, and agents kept by the registry before v0.26 are moved into it
+// once (definition.ImportRegistry).
+func newDefinitions(ctx context.Context, pool *pgxpool.Pool, o options, log *slog.Logger) (definition.Source, error) {
 	if o.Definitions != nil {
 		return o.Definitions, nil
 	}
@@ -282,6 +283,14 @@ func newDefinitions(ctx context.Context, pool *pgxpool.Pool, o options) (definit
 	store := definition.NewPostgres(pool, checks)
 	if err := store.Migrate(ctx); err != nil {
 		return nil, migrateErr("definitions", err)
+	}
+	moved, err := store.ImportRegistry(ctx)
+	if err != nil {
+		return nil, migrateErr("import the agent registry", err)
+	}
+	for _, d := range moved.Disabled {
+		log.Warn("fiber: a registry agent was not moved to a definition and runs nothing",
+			"tenant", d.Tenant, "agent", d.Name, "reason", d.Reason)
 	}
 	return store, nil
 }

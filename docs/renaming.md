@@ -67,9 +67,9 @@ for accepted old names and identifiers kept for stored data.
    renames its own `mandatum_*` tables in the current schema, with their
    indexes and constraints, to `fiber_*`, in the same transaction as the rest
    of the migration, so rows are kept and the order stores migrate in does not
-   matter. The old agent registry tables are no longer read: agents are
-   saige definitions in `fiber_definitions` (see
-   [events.md](architecture/events.md#7-definitions)). `pkg/internal/pgrename` is the only code that knows the old names.
+   matter. The old agent registry tables are read once, to move their
+   agents into saige definitions in `fiber_definitions`, and never written
+   (see [events.md](architecture/events.md#7-definitions)). `pkg/internal/pgrename` is the only code that knows the old names.
 4. **Redis starts empty.** The bus's keys are a reconnect window, not a
    record, so the old `mandatum:` keys are simply abandoned; delete them when
    convenient.

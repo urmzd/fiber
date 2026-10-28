@@ -35,6 +35,19 @@ func TestPostgresSource(t *testing.T) {
 // newPostgres returns a migrated source in a schema of its own.
 func newPostgres(t *testing.T, url string) *definition.Postgres {
 	t.Helper()
+	src := definition.NewPostgres(newPool(t, url))
+	for range 2 {
+		if err := src.Migrate(context.Background()); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+	}
+	return src
+}
+
+// newPool returns a pool whose search_path is a schema of its own, dropped
+// when the test ends.
+func newPool(t *testing.T, url string) *pgxpool.Pool {
+	t.Helper()
 	ctx := context.Background()
 	schema := fmt.Sprintf("fibertest_%d_%d", time.Now().UnixNano(), schemas.Add(1))
 	cfg, err := pgxpool.ParseConfig(url)
@@ -56,13 +69,7 @@ func newPostgres(t *testing.T, url string) *definition.Postgres {
 		_, _ = pool.Exec(context.Background(), "DROP SCHEMA "+ident+" CASCADE")
 		pool.Close()
 	})
-	src := definition.NewPostgres(pool)
-	for range 2 {
-		if err := src.Migrate(ctx); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
-	}
-	return src
+	return pool
 }
 
 // TestPostgresHasNoUpdatePath proves the store never rewrites a version: the

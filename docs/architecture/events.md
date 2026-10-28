@@ -511,9 +511,14 @@ This is the one place the names from before the union appear.
   `subagents`, `approvals` becomes `approval.ask`, `mcp:<p>[:write]` becomes
   `tools.mcp` with the write bit in `Policy.MCPWrite`, and everything else goes
   to the Policy. A spec whose names break saige's name rule is refused with a
-  `NameError` listing them. The registry's tables `fiber_agents` and
-  `fiber_agent_revisions` are no longer read or written, and can be dropped
-  once no run pinned to a revision is still replayable.
+  `NameError` listing them. On Postgres, `fiber.New` moves the registry's
+  tables `fiber_agents` and `fiber_agent_revisions` into `fiber_definitions`
+  once (`Postgres.ImportRegistry`): every revision N becomes version N.0.0
+  with its author and time, a deleted agent is retired, and an agent that
+  cannot move is logged and runs nothing. The move is marked in
+  `fiber_definition_imports` and never repeated. The old tables are not
+  written, and can be dropped once the move is marked and no run pinned to a
+  revision is still replayable.
 - **Webhook selectors.** An endpoint's old `Kinds` (`lifecycle.completed`,
   `delta`, `usage`) are read through `legacy.KindSelector` at config load. An
   unknown or dropped selector is a config error, not an empty match.

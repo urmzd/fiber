@@ -15,6 +15,7 @@ import (
 // schema is everything the Postgres source owns. fiber_definitions holds
 // one row per version and is only ever inserted into: this package issues no
 // UPDATE and no DELETE against it. A retirement is a row of its own.
+// fiber_definition_imports marks a one-time import as done (ImportRegistry).
 //
 // name and version are COLLATE "C" so List orders by the same comparison
 // Memory uses, and a page token means the same position in both.
@@ -30,6 +31,11 @@ CREATE TABLE IF NOT EXISTS fiber_definitions (
 	created_at  timestamptz NOT NULL,
 	created_by  text        NOT NULL,
 	PRIMARY KEY (tenant, name, version)
+);
+
+CREATE TABLE IF NOT EXISTS fiber_definition_imports (
+	source text  PRIMARY KEY,
+	report jsonb NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS fiber_definition_retirements (
@@ -103,6 +109,11 @@ func (p *Postgres) Put(ctx context.Context, rec Record) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
+	return p.put(ctx, rec)
+}
+
+// put writes a prepared record.
+func (p *Postgres) put(ctx context.Context, rec Record) (Record, error) {
 	policy, err := json.Marshal(rec.Policy)
 	if err != nil {
 		return Record{}, fmt.Errorf("definition: encode policy: %w", err)
