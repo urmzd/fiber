@@ -339,7 +339,7 @@ Every request is signed with the endpoint's secret and carries
 dedupe on. A body the catalog marks sensitive (human-authored text, private
 host data) is sent with its `data` left out and `"redacted": true` unless the
 endpoint sets `Sensitive`. Old `Kinds` selectors are still read; see
-[Upgrade](docs/architecture/events.md#10-upgrade).
+[Upgrading](docs/guides/upgrading.md#to-the-event-union-v0260).
 
 ### Validate a definition locally
 
@@ -435,44 +435,12 @@ suite: `bustest`, `definitiontest`, `membershiptest`, `knowledgetest`,
 `threadtest`, `toolprovidertest`, `blobtest`, and `runtimetest` for a
 `turn.Runtime`.
 
-### Upgrade to the event union
+### Upgrade
 
-Every event is now one envelope with a typed body, the bus is keyed by channel,
-agents are saige definitions, and a turn runs through `turn.Runtime`. Runs
-recorded before the upgrade fail terminally on replay instead of running a body
-they were not recorded with, so drain them first. The table of removed packages
-and their replacements, the old kind to type mapping, the legacy decoders and
-the agent converter are in
-[docs/architecture/events.md](docs/architecture/events.md#10-upgrade).
-
-### Upgrade from the server binary
-
-**fiber is a library from this release.** The `fiber` server binary, its
-commands, the HTTP and Connect API and its protobuf contract,
-`registry.ServerStore`, the providers file and every `FIBER_*` variable are
-gone. Compose `fiber.New` with options instead: `FIBER_POSTGRES_URL` is
-`WithPostgres(pool)`, `FIBER_REDIS_URL` is `WithBus(bus.NewRedis(client))`
-(size the client with `bus.RedisPoolSize`), a providers file's entries are
-`WithOpenAICompatible` and `WithToolProvider`, and the connector variables are
-`WithSlack`, `WithGitHub`, `WithJira` and `WithWebhooks`. `GetRun` is
-`App.Status`, the stop and compact routes are `App.Stop` and `App.Compact`,
-`InvokeService.Answer` is `App.Answer`, and `fiber index` is `App.Index`.
-
-**The binary's defaults are not the library's.** The binary served tenant
-`default` unless `FIBER_TENANT` said otherwise, so the agents, threads and
-runs it wrote live under that tenant: pass `WithTenant("default")` (or the
-`FIBER_TENANT` you had) to keep them. `WithSlack`, `WithGitHub` and `WithJira`
-are `ErrConfig` without a tenant. The binary also kept files on disk under
-its workspace; the library keeps them in memory unless you pass
-`WithBlobs(blob.NewFS(dir))`.
-
-**Persisted names moved to `fiber`.** Postgres objects, Redis keys, durable
-activity and record names no longer use the old name. Drain runs before upgrading, including runs parked on a question,
-which wait until they are answered, stopped or expire: a run still pending
-from the old version is failed with a reason when the new one first claims
-it, and is not resumed. Stop every old process before the first new one
-starts. Postgres migrates itself and keeps its rows. See
-[docs/renaming.md](docs/renaming.md).
+Drain runs before upgrading across a breaking release: a run recorded under an
+older shape fails terminally on replay. Each release's steps (the event union,
+the move from the server binary to a library, the rename from mandatum) are in
+[docs/guides/upgrading.md](docs/guides/upgrading.md).
 
 ### Limitations
 
@@ -520,7 +488,7 @@ Model providers read their own credentials when an agent is built:
 and the variable an `OpenAICompatible.KeyEnv` names. An MCP provider's
 `env:NAME` credential reference resolves the same way, as does a reference a
 `WithPersonCredentials` resolver returns for a person. Set up connectors with
-the [GitHub](docs/architecture/github.md) and [Slack](docs/architecture/slack.md)
+the [GitHub](docs/reference/github.md) and [Slack](docs/reference/slack.md)
 guides.
 
 ## API
@@ -566,11 +534,12 @@ The first run warms Go's build cache. The capture runs the real demo and writes
 
 | Document | Covers |
 |----------|--------|
-| [docs/architecture/events.md](docs/architecture/events.md) | The event union, catalog, channels, definitions and pins, the Runtime seam, adapters, and upgrading |
+| [docs/README.md](docs/README.md) | Index of every document below |
+| [docs/architecture/events.md](docs/architecture/events.md) | The event union, catalog, channels, definitions and pins, the Runtime seam, adapters |
 | [docs/architecture/overview.md](docs/architecture/overview.md) | Channels, membership, delivery, durability, stopping, usage, parking, credentials, limitations |
-| [docs/architecture/github.md](docs/architecture/github.md) | GitHub connector setup |
-| [docs/architecture/slack.md](docs/architecture/slack.md) | Slack connector setup |
-| [docs/renaming.md](docs/renaming.md) | Upgrading persisted data across the rename |
+| [docs/reference/github.md](docs/reference/github.md) | GitHub connector capabilities and what it publishes |
+| [docs/reference/slack.md](docs/reference/slack.md) | Slack connector capabilities and what it publishes |
+| [docs/guides/upgrading.md](docs/guides/upgrading.md) | Upgrading across breaking releases: event union, server binary, rename |
 | [examples/README.md](examples/README.md) | Runnable example index |
 | [AGENTS.md](AGENTS.md) | AI-facing conventions, commands, rules, extension guide |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow and commit convention |

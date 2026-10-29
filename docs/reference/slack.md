@@ -13,7 +13,7 @@ policy or publishing anything.
 
 Session lifecycle policy, command discovery, refusal logging, app manifests,
 and installation configuration live in
-[Humagen](https://github.com/urmzd/humagen/blob/main/docs/slack.md).
+[Humagen](https://github.com/urmzd/humagen/blob/main/docs/reference/slack.md).
 Use `HUMAGEN_SLACK_*` with `humagen serve` for that experience.
 `fiber.WithSlack` takes the token, signing secret, team, app id and bot
 mapping; it does not enable product session or command policy, which is

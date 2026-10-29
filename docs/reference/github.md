@@ -13,7 +13,7 @@ with ordinary Markdown and exposes no `/fix` or `/check` tools.
 
 PR auto-label activation, per-commit review policy, PR guides, signed mutation
 grants, agent definitions and deployment configuration live in
-[Humagen](https://github.com/urmzd/humagen/blob/main/docs/github.md).
+[Humagen](https://github.com/urmzd/humagen/blob/main/docs/reference/github.md).
 Evidence-backed Markdown presentation lives in Humagen's
 `internal/presentation/github` package.
 
