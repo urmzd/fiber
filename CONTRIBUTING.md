@@ -26,7 +26,7 @@ make example # run the offline examples
 make integration # every suite against `make up` Postgres and Redis
 ```
 
-The sandbox (`pkg/sandbox`) is a security boundary: changes touching it must include tests that prove confinement still holds.
+The sandbox (`pkg/turn/sandbox`) is a security boundary: changes touching it must include tests that prove confinement still holds.
 
 ## Commit Convention
 

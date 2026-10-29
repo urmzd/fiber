@@ -4,7 +4,7 @@
 // they are gone.
 //
 // Every old kind maps to one catalog type, or is dropped. See the table in
-// docs/architecture/events.md.
+// docs/guides/upgrading.md.
 package legacy
 
 import (

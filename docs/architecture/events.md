@@ -3,7 +3,7 @@
 > **Implemented.** This document specifies the event union, the channel bus,
 > definitions and the `Runtime` seam as built. [overview.md](overview.md)
 > covers how a run behaves on top of them. Moving data and hosts from the
-> shapes before the union is in [Upgrade](#10-upgrade).
+> shapes before the union is in [Upgrading](../guides/upgrading.md#to-the-event-union-v0260).
 
 The design turns on four decisions:
 
@@ -451,90 +451,5 @@ error, not an empty match.
 
 ## 10. Upgrade
 
-This is the one place the names from before the union appear.
-
-**Removed packages and shapes.**
-
-| Before | Now |
-|--------|-----|
-| `pkg/envelope` (`Event`, `Kind`, `Filter`, `Subscription`) | `pkg/event` (`Envelope`, `Body`, the catalog) and `bus.Subscription` |
-| `pkg/topic` (`agent`, `agent:<name>`, `agent:<name>:<run>`, `agent:_control:<verb>-<key>`) | URI channels and `control://<tenant>/<verb>/<hash>` (`event.ControlChannel`) |
-| `pkg/agentspec` (`AgentSpec`, revisions) | saige `.agent.md` definitions plus `definition.Policy` |
-| `pkg/registry` and `registrytest` | `definition.Source` (`Memory`, `Postgres`) and `definitiontest` |
-| `pkg/agentrt` and `pkg/agentrt/payload` | `pkg/turn/native` and the bodies in `pkg/event` |
-| `runtime.Executor` | `turn.Runtime`, with `pkg/turn/sandbox` as a decorator |
-| The router and `Route` kind filters | `pkg/egress` subscriptions by channel and type prefix |
-| `Tag`, with free text in `Tag.Text` and context in `Tag.Meta` | An ingress event; the text is `Request.Text`, the context `Request.Context`, private keys `Envelope.Private` |
-| A connector's `Trigger` choosing an agent | Ingress publishes on the surface's channel; membership and dispatch choose |
-| `fiber.WithRegistry`, `App.Registry` | `fiber.WithDefinitions`, `App.Definitions` |
-| `App.Invoke(ctx, tag)` | `App.Publish(ctx, event)` with `App.Memberships`, or `App.Runtime().Accept(ctx, event, agent)` |
-| `App.ToolsFor(ctx, tag)` | `App.ToolsFor(ctx, event, agent)` |
-| `fiber.WithExecutor` | `fiber.WithTurnRuntime` |
-| `App.Router` | `App.Egress`, and `App.Dispatcher` for waking members |
-| Webhook body v1 (`kind`, `topic`, `payload`) | Webhook body v2, the envelope itself, with `Fiber-Event-Version: 2` |
-
-**Old kinds to types.** Every `envelope.Kind` maps to one type, through
-`legacy.TypeOf`:
-
-| Old kind | Type |
-|----------|------|
-| `lifecycle.<state>` (`accepted`, `started`, `parked`, `resumed`, `completed`, `failed`, `stopped`) | `run.<state>.v1` |
-| `lifecycle.child.parked` | `run.child.parked.v1` |
-| `delta.<name>` (`text`, `thinking`, `tool.call`, `tool.done`, `citation`) | `run.delta.<name>.v1` |
-| `action.taken` | `run.action.taken.v1` |
-| `usage.call` | `run.usage.v1` |
-| `usage.child` | `run.usage.child.v1` |
-| `context.compacted` | `run.context.compacted.v1` |
-| `control.stop`, `control.compact` | `control.stop.v1`, `control.compact.v1` |
-| `control.created`, `control.revised`, `control.deleted` | dropped: they had no producer |
-
-- **Activity names.** The durable turn registers `fiber.turn.v2`,
-  `fiber.turn.agent.v2` and `fiber.turn.resume.v2`. A run recorded under the
-  v1 names (`fiber.turn`, `fiber.turn.agent`, `fiber.turn.resume`) or before
-  the rename (`mandatum.turn`) fails terminally on replay, with the reason
-  "started before the event union; send the message again", instead of
-  running a body it was not recorded with.
-- **Bus tables.** The channel bus writes new tables. The old `fiber_bus_*`
-  tables are read by nothing after the upgrade and are safe to drop after
-  24 hours, when every row in them has aged out.
-- **Legacy decoders.** Stored JSON written before the union is read through
-  `pkg/event/legacy`, which reads raw JSON and imports none of the old
-  packages: `DecodeBusRow` and `DecodeEntry` for bus rows and journal events
-  with a `kind`, and `DecodeTag` for an old run input. `DecodeTag` chooses the
-  type from the tag's meta (`cron_*` keys make `cron.tick.v1`, `github_*` a
-  `github.*` type, `jira_*` a `jira.*` type, a slash command
-  `slack.command.invoked.v1`, anything else `message.posted.v1`) and renders
-  exactly the request text the tag rendered.
-- **Agents.** `definition.FromAgentSpec` converts a stored spec
-  deterministically: revision N becomes version N.0.0, provider and model
-  become `model.use`, fallbacks `model.fallback`, `access.spawn` becomes
-  `subagents`, `approvals` becomes `approval.ask`, `mcp:<p>[:write]` becomes
-  `tools.mcp` with the write bit in `Policy.MCPWrite`, and everything else goes
-  to the Policy. A spec whose names break saige's name rule is refused with a
-  `NameError` listing them. On Postgres, `fiber.New` moves the registry's
-  tables `fiber_agents` and `fiber_agent_revisions` into `fiber_definitions`
-  once (`Postgres.ImportRegistry`): every revision N becomes version N.0.0
-  with its author and time, a deleted agent is retired, and an agent that
-  cannot move is logged and runs nothing. The move is marked in
-  `fiber_definition_imports` and never repeated. The old tables are not
-  written, and can be dropped once the move is marked and no run pinned to a
-  revision is still replayable.
-- **Webhook selectors.** An endpoint's old `Kinds` (`lifecycle.completed`,
-  `delta`, `usage`) are read through `legacy.KindSelector` at config load. An
-  unknown or dropped selector is a config error, not an empty match.
-- **Subscribers to topics.** A host that let callers subscribe to
-  `agent:<name>` or `agent:<name>:<run>` translates those to channel and run
-  subscriptions itself. `legacy.Topic` spells a run's old address, and
-  `legacy.RunChannel` is the channel its old events are read onto.
-- **Deploy.** Deploy with a single replica, or stop old replicas briefly
-  before starting new ones. Old and new replicas do not share a bus.
-
-## 11. Kept stored names
-
-These names are in stored data and do not change:
-
-| Kind | Names |
-|------|-------|
-| Tables | `fiber_runs`, `fiber_run_records`, `fiber_run_queue`, `fiber_threads`, `fiber_thread_entries`, `fiber_knowledge_documents`, `fiber_knowledge_chunks`, `fiber_tool_providers`, `fiber_tool_snapshots` |
-| Record keys | `fiber.question.<id>`, `fiber.answer.<id>`, `fiber.child.<id>`, `fiber.stop`, `fiber.usage.a<attempt>`, `fiber.knowledge.v1` |
-| Activity names | `fiber.turn`, `fiber.turn.agent`, `fiber.turn.resume`, kept only so a v1 run is recognised and failed terminally |
+Moving data and hosts from the shapes before the union is in
+[the upgrading guide](../guides/upgrading.md#to-the-event-union-v0260).

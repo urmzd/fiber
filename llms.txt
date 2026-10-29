@@ -28,9 +28,10 @@
 ## Docs
 
 - [README](README.md): concepts, installation, quick start, usage, limitations
-- [docs/architecture/events.md](docs/architecture/events.md): the envelope, the type grammar and catalog, channels and subscriptions, rules (hops, self-wake, run key), definitions and pins, the Runtime interface, adapters, webhook v2, and upgrading from the shapes before the union
+- [docs/architecture/events.md](docs/architecture/events.md): the envelope, the type grammar and catalog, channels and subscriptions, rules (hops, self-wake, run key), definitions and pins, the Runtime interface, adapters, webhook v2
 - [docs/architecture/overview.md](docs/architecture/overview.md): layers, channels, membership, N:M delivery, durability, stop, compaction, usage, parking, credentials, package DAG, security boundaries, honest limitations
-- [docs/architecture/github.md](docs/architecture/github.md), [docs/architecture/slack.md](docs/architecture/slack.md): connector setup and what each publishes
+- [docs/reference/github.md](docs/reference/github.md), [docs/reference/slack.md](docs/reference/slack.md): connector capabilities and what each publishes
+- [docs/guides/upgrading.md](docs/guides/upgrading.md): upgrading across breaking releases (event union, server binary to library, rename from mandatum)
 - [AGENTS.md](AGENTS.md): AI-facing conventions, commands, rules, extension guide
 - [examples/README.md](examples/README.md): runnable example index
 - [CONTRIBUTING.md](CONTRIBUTING.md): development workflow and commit convention
@@ -53,7 +54,7 @@
 - Ingress bodies: `event.MessagePosted`, `event.SlackCommandInvoked`, `event.SlackSessionStopped`, `event.GitHub*`, `event.Jira*`, `event.CronTick`, each embedding `event.Request{Text, Actor, Mentions, Attachments, Context}`; `event.RequestOf(body)`, `event.Addressees(body)`
 - Run bodies: `Accepted`, `Started`, `Parked{Question}`, `Resumed`, `Completed`, `Failed`, `Stopped`, `ChildParked`, `Text`, `Thinking`, `ToolCall`, `ToolDone` (arguments as compact JSON, left out above `event.MaxToolArguments`, 8 KiB), `Citation`, `Action`, `UsageCall`, `UsageChild`, `Compaction`; control `StopRequest`, `CompactRequest`; money `Cost{Micros, Currency, AsOf}`; `Tally` counts each AccountingID once
 - Bus: `bus.Bus{Publish(ctx, e), Subscribe(ctx, bus.Subscription) (Stream, error)}`, `Stream.Recv(ctx)`, `bus.NewMemory()`, `bus.NewRedis(client)` (size it with `bus.RedisPoolSize`), `bus.NewPostgres(pool)`; `bustest.Run(t, factory)`
-- Definitions: `definition.Record{Tenant, Content, Policy, CreatedBy}`, `Source.Put/Get/Versions/Latest/List/Retire`, `Resolver.Resolve(ctx, tenant, name)` returns a `Pin`, `Resolver.Verify(ctx, tenant, pin)` re-checks it; stored agents from before the union convert as the upgrade section of docs/architecture/events.md says
+- Definitions: `definition.Record{Tenant, Content, Policy, CreatedBy}`, `Source.Put/Get/Versions/Latest/List/Retire`, `Resolver.Resolve(ctx, tenant, name)` returns a `Pin`, `Resolver.Verify(ctx, tenant, pin)` re-checks it; stored agents from before the union convert as docs/guides/upgrading.md says
 - Membership: `membership.Store{Join(ctx, tenant, channel, agent, Rule), Leave, Members}`, `membership.Rule{Types, Addressed}`
 - Runtime: `turn.Runtime`, `turn.Func`, `turn.Pinned`, `turn.Input`, `turn.Result`, `turn.StopSignal(ctx)`, `turn.CompactSignal(ctx)`; `sandbox.Sandboxed(inner, plane)`; `native.OpenAICompatible`, `native.Compaction`, `native.WithToolArguments`, `native.WithStrictTools`
 - Connectors: `connector.Trigger{Ingest(ctx, publish connector.Publish)}`, `connector.Sink{Deliver(ctx, target, e)}`, `connector.Subscriber{Subscriptions() []Subscription{Channels, Types, Target}}`, `connector.Actor{Actions() []Action}`, `connector.RolesOf(c)`; egress `egress.New(bus, registry, opts...)`; sentinels `ErrUnsupported`, `ErrNotFound`, `ErrUndeliverable`
