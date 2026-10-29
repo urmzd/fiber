@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.26.1 (2026-10-29)
+
+### Bug Fixes
+
+- **deps**: patch vulnerable Go dependencies (#49) ([f09517f](https://github.com/urmzd/fiber/commit/f09517f29e51cdc8aefb1e3a72fe5240350e08ed))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.26.0...v0.26.1)
+
+
 ## 0.26.0 (2026-10-28)
 
 ### Breaking
