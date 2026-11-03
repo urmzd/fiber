@@ -1,3 +1,4 @@
+// Deprecated: moved to github.com/urmzd/orchagent/flow
 module github.com/urmzd/fiber
 
 go 1.26.10
