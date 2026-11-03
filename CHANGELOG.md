@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.26.2 (2026-11-03)
+
+### Bug Fixes
+
+- deprecate module, moved to urmzd/orchagent (#50) ([f0a044c](https://github.com/urmzd/fiber/commit/f0a044cce794d68f8483c619102d9797b64d3e89))
+
+[Full Changelog](https://github.com/urmzd/fiber/compare/v0.26.1...v0.26.2)
+
+
 ## 0.26.1 (2026-10-29)
 
 ### Bug Fixes
